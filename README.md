@@ -2,6 +2,9 @@
 
 # amail-gateway
 
+![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-Apache--2.0-blue)
+
+
 **A bidirectional mail gateway purpose-built for AI Agents** — providing instant SMTP inbound and HTTP outbound mail channels so every Agent can seamlessly join the global email network.
 
 ---
