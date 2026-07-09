@@ -2,6 +2,9 @@
 
 # amail-gateway
 
+![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
+
+
 **AI Agent 专属的双向邮件网关**——为每个 Agent 提供 SMTP 收信和 HTTP 发信的即时邮件通道，让 Agent 无缝接入全球邮件网络。
 
 ---
