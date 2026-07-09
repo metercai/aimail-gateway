@@ -1,0 +1,71 @@
+# amail-gateway example configuration (base edition, MPL-2.0)
+# Copy to config.toml and edit for your environment:
+#
+#   cp config.toml.example config.toml
+#
+# Env var overrides (AMAILGW_*): HTTP_ADDR, SMTP_ADDR, STORAGE_PATH,
+# RELAY_SMTP_SERVER, RELAY_USERNAME, RELAY_PASSWORD, LOGGING_LEVEL.
+# Env vars take precedence over this file.
+
+# ── HTTP API server ─────────────────────────────────────────────────────
+
+[http]
+bind = "0.0.0.0:8080"                    # listen address (host:port, default 0.0.0.0:8080)
+# hostname = "mail.yourdomain.com"        # public hostname for API URL display
+
+# ── Inbound SMTP server ─────────────────────────────────────────────────
+
+[smtp]
+bind = "0.0.0.0:25"                      # listen address (host:port, default 0.0.0.0:25)
+# hostname = "mail.yourdomain.com"        # EHLO/HELO banner and PTR name for outbound connections
+# max_message_size = 10485760             # max inbound message size in bytes (default 10 MB)
+# max_connections = 100                   # max concurrent SMTP connections (default 100)
+# channel_capacity = 1000                 # internal channel buffer size (default 1000)
+
+# ── Webhook / push delivery ─────────────────────────────────────────────
+
+[webhook]
+# timeout_secs = 10                       # HTTP request timeout per webhook call, seconds (default 10)
+# pending_ttl_hours = 72                  # max age of undelivered pull-mode items before cleanup, hours (default 72)
+
+# ── Outbound relay ──────────────────────────────────────────────────────
+
+[relay]
+# smtp_server = "smtp://smtp.example.com:587"  # upstream SMTP relay URL
+# username = "relay@example.com"               # SMTP auth username
+# password = "your-password"                   # SMTP auth password
+# auto_reply_from = "noreply@yourdomain.com"   # From address for system auto-replies (NDR, notifications). Falls back to admin.email.
+# auto_reply_subject_prefix = "[Auto-Reply] "  # prefix prepended to all system-generated email subjects
+# auto_reply_body = "This is an automated message from the amail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
+# delivery_window_secs = 7200                  # NDR bounce correlation window in seconds (default 7200 = 2h)
+
+# ── Retry / backoff ─────────────────────────────────────────────────────
+
+[retry]
+# max_attempts = 3                        # max delivery attempts before NDR (default 3)
+# initial_backoff_secs = 5                # first retry backoff in seconds (default 5)
+# multiplier = 2                          # exponential backoff multiplier (default 2)
+# max_backoff_secs = 300                  # backoff ceiling in seconds (default 300)
+# poll_interval_secs = 5                  # scheduler batch processing interval in seconds (default 5)
+# batch_size = 50                         # max deliveries processed per batch (default 50)
+
+# ── Storage ─────────────────────────────────────────────────────────────
+
+[storage]
+path = "./data"                           # data directory. DB → {path}/amail.db, attachments → {path}/attachments/ (default ./data)
+# pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
+# attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)
+# attachment_lifetime_hours = 720         # attachment cleanup age in hours (default 720 = 30 days)
+# attachment_max_attachments = 5          # max attachments per inbound email (default 5)
+# attachment_allowed_types = []           # MIME type allowlist. Empty = allow all.
+
+# ── Logging ─────────────────────────────────────────────────────────────
+
+[logging]
+# level = "info"                          # log level: trace | debug | info | warn | error (default info)
+# file = "/var/log/amail-gateway.log"     # log file path. Unset → stdout.
+
+# ── Admin ───────────────────────────────────────────────────────────────
+
+[admin]
+# email = "admin@yourdomain.com"          # owner contact email (shown on /health), fallback From address for system auto-replies

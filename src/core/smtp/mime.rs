@@ -1,0 +1,90 @@
+//! MIME helpers for building multipart email bodies and custom headers.
+
+use base64::Engine;
+use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
+use lettre::message::{MultiPart, SinglePart};
+use lettre::Address;
+
+use crate::core::errors::{AppError, AppResult};
+
+// ── Custom header types ─────────────────────────────────────────
+
+#[derive(Clone)]
+pub(crate) struct ContentDispositionRaw(pub(crate) String);
+
+impl Header for ContentDispositionRaw {
+    fn name() -> HeaderName {
+        HeaderName::new_from_ascii_str("Content-Disposition")
+    }
+    fn parse(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self(s.into()))
+    }
+    fn display(&self) -> HeaderValue {
+        HeaderValue::new(Self::name(), self.0.clone())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct ContentTransferEncodingRaw(pub(crate) String);
+
+impl Header for ContentTransferEncodingRaw {
+    fn name() -> HeaderName {
+        HeaderName::new_from_ascii_str("Content-Transfer-Encoding")
+    }
+    fn parse(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self(s.into()))
+    }
+    fn display(&self) -> HeaderValue {
+        HeaderValue::new(Self::name(), self.0.clone())
+    }
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+/// Build a `multipart/mixed` MIME envelope wrapping the text body and
+/// base64-encoded attachment parts.
+pub(crate) fn build_with_attachments(
+    alt_part: MultiPart,
+    attachments: &[(String, String, Vec<u8>)],
+) -> MultiPart {
+    let mut mixed = MultiPart::mixed().multipart(alt_part);
+
+    for (filename, content_type, data) in attachments {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+
+        let wrapped: String = encoded
+            .as_bytes()
+            .chunks(76)
+            .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+
+        let content_type_str = if content_type.is_empty() {
+            format!("application/octet-stream; name=\"{}\"", filename)
+        } else {
+            format!("{}; name=\"{}\"", content_type, filename)
+        };
+
+        let disposition = format!("attachment; filename=\"{}\"", filename);
+
+        let part = SinglePart::builder()
+            .header(
+                content_type_str
+                    .parse::<ContentType>()
+                    .unwrap_or(ContentType::TEXT_PLAIN),
+            )
+            .header(ContentDispositionRaw(disposition))
+            .header(ContentTransferEncodingRaw("base64".to_string()))
+            .body(wrapped);
+
+        mixed = mixed.singlepart(part);
+    }
+
+    mixed
+}
+
+/// Parse an email address string into a lettre `Address`.
+pub(crate) fn parse_address(addr: &str) -> AppResult<Address> {
+    addr.parse::<Address>()
+        .map_err(|e| AppError::Validation(format!("invalid email address '{}': {}", addr, e)))
+}

@@ -1,0 +1,12 @@
+.cargo/
+Cargo.lock
+target/
+outputs/
+attachments/
+tests/
+*.swp
+*.swo
+deploy/
+.env
+config.toml
+a2a_board/
