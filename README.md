@@ -26,48 +26,49 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 ## 2. Features
 
 **Inbound:**
-- Standard SMTP — port 25, compatible with any mail client
-- Multi-domain — receive mail for multiple domains on one gateway
-- Webhook push — real-time HTTP POST to Agent Webhook URL
-- Multi-address aggregation — batch push to multiple recipients at once
-- Webhook hybrid mode — push/pull mixed delivery for the same email
-- Derived address support — compatible with multi-identity addresses: `{role_name}.{agent_name}@{mx_domain}`
-- Immediate rejection — invalid recipients, oversized mail, internal-sender-as-external rejected instantly to save resources
-- Push scheduling — async queue, auto-retry on failure, expired resource cleanup
+- **Standard SMTP** — port 25, compatible with any mail client
+- **Multi-domain** — receive mail for multiple domains on one gateway
+- **Webhook push** — real-time HTTP POST to Agent Webhook URL
+- **Multi-address aggregation** — batch push to multiple recipients at once
+- **Webhook hybrid mode** — push/pull mixed delivery for the same email
+- **Derived address support** — compatible with multi-identity addresses:
+  -  `{role_name}.{agent_name}@{mx_domain}`
+- **Immediate rejection** — invalid recipients, oversized mail, internal-sender-as-external rejected instantly to save resources
+- **Push scheduling** — async queue, auto-retry on failure, expired resource cleanup
 
 **Outbound:**
-- Pre-upload attachments — dedicated upload endpoint for higher delivery success
-- HTTP send API — JSON-format mail via HTTP, Agent-friendly
-- Standard SMTP outbound — configurable external relay
-- Internal forwarding — same-gateway recipients delivered directly, no public network loop
-- Derived address support — compatible with multi-identity addresses
-- Outbound scheduling — async queue, auto-retry on failure, expired resource cleanup
-- Bounce handling — RFC 3464 compliant automatic bounce recognition and processing
+- **Pre-upload attachments** — dedicated upload endpoint for higher delivery success
+- **HTTP send API** — JSON-format mail via HTTP, Agent-friendly
+- **Standard SMTP outbound** — configurable external relay
+- **Internal forwarding** — same-gateway recipients delivered directly, no public network loop
+- **Derived address support** — compatible with multi-identity addresses
+- **Outbound scheduling** — async queue, auto-retry on failure, expired resource cleanup
+- **Bounce handling** — RFC 3464 compliant automatic bounce recognition and processing
 
 **Security:**
-- Default bidirectional whitelist — unauthorized senders can't reach Agents; Agents can't send to unauthorized addresses
-- Security officer — every Agent has a security officer address for critical operation oversight
-- API Key authentication — independent keys per Agent with multi-scope management
-- Tiered API keys — separate system/domain/agent key levels, isolated per scenario
-- Behavior scoping — role and scope-based behavior limitation to prevent out-of-bounds actions
-- Loop prevention — internal recipients never relayed externally, internal senders never accepted as inbound, auto-reply suppression to avoid cycles
-- Audit logging — critical operations fully recorded and traceable
+- **Default bidirectional whitelist** — unauthorized senders can't reach Agents; Agents can't send to unauthorized addresses
+- **Security officer** — every Agent has a security officer address for critical operation oversight
+- **API Key authentication** — independent keys per Agent with multi-scope management
+- **Tiered API keys** — separate system/domain/agent key levels, isolated per scenario
+- **Behavior scoping** — role and scope-based behavior limitation to prevent out-of-bounds actions
+- **Loop prevention** — internal recipients never relayed externally, internal senders never accepted as inbound, auto-reply suppression to avoid cycles
+- **Audit logging** — critical operations fully recorded and traceable
 
 **Content:**
-- Encoding detection — auto-detect mail encoding and convert to UTF-8
-- Attachment management — auto-extract attachments for download, metadata flows with email
-- Format conversion — body cleaning and conversion to Markdown, ready for LLM consumption
-- Information extraction — sender signature extraction for identity recognition
-- Thread tracking — automatic In-Reply-To / References chain maintenance
-- Thread summary — persistent thread context, Agents retain memory across sessions
-- Raw snapshots — optional raw email preservation for future mining and audit
+- **Encoding detection** — auto-detect mail encoding and convert to UTF-8
+- **Attachment management** — auto-extract attachments for download, metadata flows with email
+- **Format conversion** — body cleaning and conversion to Markdown, ready for LLM consumption
+- **Information extraction** — sender signature extraction for identity recognition
+- **Thread tracking** — automatic In-Reply-To / References chain maintenance
+- **Thread summary** — persistent thread context, Agents retain memory across sessions
+- **Raw snapshots** — optional raw email preservation for future mining and audit
 
 **Collaboration:**
-- Identity self-declaration — tiered `[WHOAMI]` instruction response for strangers and contacts, enabling role discovery
-- A2A Board — pipeline view + task dependencies + assignee tracing, at a glance
-- A2A Task engine — instruction flow + session flow + notification flow, event-driven autonomous collaboration
-- Definable roles — roles and behaviors customized through config data and prompts, an LLM-native workflow engine
-- Human-in-the-loop — human-Agent hybrid workflows, with objectives and deliverables controlled by humans
+- **Identity self-declaration** — tiered `[WHOAMI]` instruction response for strangers and contacts, enabling role discovery
+- **A2A Board** — pipeline view + task dependencies + assignee tracing, at a glance
+- **A2A Task engine** — instruction flow + session flow + notification flow, event-driven autonomous collaboration
+- **Definable roles** — roles and behaviors customized through config data and prompts, an LLM-native workflow engine
+- **Human-in-the-loop** — human-Agent hybrid workflows, with objectives and deliverables controlled by humans
 
 ---
 
