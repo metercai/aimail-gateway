@@ -592,11 +592,10 @@ fn handle_reopen(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     board.criteria_version = None;
     db::update_board(conn, &board)?;
 
-    notifier.notify_owner_rejected(board_id);
     Ok(ok_response(None))
 }
 
-fn handle_arbitrate
+fn handle_arbitrate(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let task_id = cmd.task_id.clone().unwrap_or_default();
     let task = if task_id.is_empty() {
         None
