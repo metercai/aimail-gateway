@@ -21,12 +21,15 @@ pub fn execute_command(
     match cmd.verb.as_str() {
         "complete" => handle_complete(conn, notifier, cmd, sender),
         "approve" => handle_approve(conn, notifier, cmd, sender),
+        "review" => handle_review(conn, notifier, cmd, sender),
+        "verify" => handle_approve(conn, notifier, cmd, sender),
         "reject" => handle_reject(conn, notifier, cmd, sender),
         "block" => handle_block(conn, notifier, cmd, sender),
         "unblock" => handle_unblock(conn, notifier, cmd, sender),
         "heartbeat" => handle_heartbeat(conn, cmd, sender),
         "comment" => handle_comment(conn, notifier, cmd, sender),
         "cancel" => handle_cancel(conn, notifier, cmd, sender),
+        "assign" => handle_reassign(conn, notifier, cmd, sender),
         "reassign" => handle_reassign(conn, notifier, cmd, sender),
         "edit" => handle_edit(conn, cmd, sender),
         "deadline" => handle_deadline(conn, cmd, sender),
@@ -136,6 +139,21 @@ fn handle_complete(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sen
         promote_children(conn, notifier, &task);
         notifier.notify_approved(&task);
     }
+    Ok(ok_response(Some(task)))
+}
+
+fn handle_review(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+    let task_id = extract_task_id(cmd)?;
+    let reviewer = cmd.params.as_ref()
+        .and_then(|p| p.get("reviewer").and_then(|v| v.as_str()))
+        .ok_or_else(|| crate::core::errors::AppError::BadRequest("reviewer required".to_string()))?;
+    let mut task = db::get_task(conn, &task_id)?;
+    require_role(conn, &task.board_id, sender, "review")?;
+    task.reviewer = Some(reviewer.to_string());
+    task.status = TaskStatus::Reviewing;
+    task.updated_at = now();
+    db::update_task(conn, &task)?;
+    notifier.notify_review_needed(&task);
     Ok(ok_response(Some(task)))
 }
 
