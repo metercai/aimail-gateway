@@ -140,14 +140,17 @@ pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
 pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
     conn.execute(
         "UPDATE boards SET status=?1, output_task_id=?2, plan_version=?3,
-         plan_confirmed_at=?4, criteria_confirmed_at=?5, completed_at=?6
-         WHERE id=?7",
+         plan_confirmed_at=?4, criteria_version=?5, criteria_text=?6,
+         criteria_confirmed_at=?7, completed_at=?8
+         WHERE id=?9",
         params![
             board.status.to_string(),
             board.output_task_id,
             board.plan_version,
             board.plan_confirmed_at,
-            board.criteria_version, board.criteria_text, board.criteria_confirmed_at,
+            board.criteria_version,
+            board.criteria_text,
+            board.criteria_confirmed_at,
             board.completed_at,
             board.id,
         ],
