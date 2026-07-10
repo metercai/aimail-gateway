@@ -57,29 +57,18 @@ pub async fn handle_list_roles(
     let role = query.get("role").map(|v| v.as_str());
     match db::open_board_db(&s, &board_id) {
         Ok(conn) => {
+            let all_roles = match crate::board::commands::do_roles(&conn) {
+                Ok(r) => r,
+                Err(e) => return Json(json!({"status": "error", "error": format!("{:?}", e)})),
+            };
             if let Some(r) = role {
-                // Get members with this role
-                let emails: Vec<String> = match db::list_members(&conn, &board_id) {
-                    Ok(members) => members.into_iter()
-                        .filter(|m| m.role == r).map(|m| m.email).collect(),
-                    Err(_) => vec![],
-                };
-                // Get allowed verbs for this role
-                let verbs: Vec<String> = conn.prepare(
-                    "SELECT verb FROM role_permissions WHERE role = ?1 ORDER BY verb"
-                ).map(|mut s| {
-                    s.query_map(rusqlite::params![r], |row| row.get::<_, String>(0))
-                        .unwrap().filter_map(|v| v.ok()).collect()
-                }).unwrap_or_default();
+                let members = db::list_members(&conn, &board_id).unwrap_or_default();
+                let emails: Vec<String> = members.into_iter()
+                    .filter(|m| m.role == r).map(|m| m.email).collect();
+                let verbs = all_roles.get(r).cloned().unwrap_or_default();
                 Json(json!({"status": "ok", "role": r, "members": emails, "verbs": verbs}))
             } else {
-                let mut stmt = match conn.prepare("SELECT role, verb FROM role_permissions ORDER BY role, verb") {
-                    Ok(s) => s, Err(e) => return Json(json!({"error": format!("{:?}", e)})) };
-                let rows: Vec<(String,String)> = stmt.query_map([], |r| Ok((r.get(0)?,r.get(1)?)))
-                    .unwrap().filter_map(|r| r.ok()).collect();
-                let mut map = HashMap::new();
-                for (role, verb) in rows { map.entry(role).or_insert_with(Vec::new).push(verb); }
-                Json(json!({"status": "ok", "roles": map}))
+                Json(json!({"status": "ok", "roles": all_roles}))
             }
         }
         Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),

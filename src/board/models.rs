@@ -138,6 +138,7 @@ pub struct A2aCommand {
 pub struct CommandResponse {
     pub status: String,
     pub task: Option<Task>,
+    pub data: Option<serde_json::Value>,
     pub error: Option<String>,
 }
 

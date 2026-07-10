@@ -4,6 +4,8 @@
 //! and the sender email. Returns a CommandResponse.
 
 use crate::board::db;
+use std::collections::HashMap;
+use serde_json::json;
 use std::cell::RefCell;
 use crate::board::models::*;
 use crate::board::notify::Notifier;
@@ -48,6 +50,7 @@ pub fn execute_command(
         _ => Ok(CommandResponse {
             status: "error".to_string(),
             task: None,
+            data: None,
             error: Some(format!("unknown verb: {}", cmd.verb)),
         }),
     }
@@ -107,6 +110,16 @@ fn ok_response(task: Option<Task>) -> CommandResponse {
     CommandResponse {
         status: "ok".to_string(),
         task,
+        data: None,
+        error: None,
+    }
+}
+
+fn data_response(data: serde_json::Value) -> CommandResponse {
+    CommandResponse {
+        status: "ok".to_string(),
+        task: None,
+        data: Some(data),
         error: None,
     }
 }
@@ -393,19 +406,31 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
         status: "ok".to_string(),
         task: None,
         error: None,
+        data: None,
     })
 }
 
  
 
+pub fn do_roles(conn: &Connection) -> AppResult<HashMap<String, Vec<String>>> {
+    let mut stmt = conn.prepare("SELECT role, verb FROM role_permissions ORDER BY role, verb")?;
+    let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok()).collect();
+    let mut map = HashMap::new();
+    for (role, verb) in rows {
+        map.entry(role).or_insert_with(Vec::new).push(verb);
+    }
+    Ok(map)
+}
+
 fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    let board_id = cmd.params.as_ref()
+    let _board_id = cmd.params.as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
-    let members = db::list_members(conn, board_id)?;
-    let roles: Vec<String> = members.iter().map(|m| m.role.clone()).collect();
-    tracing::info!("[a2a_board] roles: {:?}", roles);
-    Ok(ok_response(None))
+        .unwrap_or("");
+    let roles = do_roles(conn)?;
+    let role_names: Vec<String> = roles.keys().cloned().collect();
+    tracing::info!("[a2a_board] roles: {:?}", role_names);
+    Ok(data_response(json!({"roles": roles})))
 }
 
 fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
@@ -413,8 +438,24 @@ fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<Command
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
     let board = db::get_board(conn, board_id)?;
+    let tasks = db::list_tasks(conn, board_id, None, None)?;
+    
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for t in &tasks {
+        groups.entry(t.status.to_string()).or_default().push(t.short_id.clone());
+    }
+    let keys = ["Ready","Running","Reviewing","Done","Blocked","Cancelled"];
+    let mut pipeline = serde_json::Map::new();
+    for k in &keys {
+        let list = groups.remove(*k).unwrap_or_default();
+        pipeline.insert(k.to_string(), json!({"count": list.len(), "tasks": list}));
+    }
+    
     tracing::info!("[a2a_board] board_status: board={} status={:?}", board.short_id, board.status);
-    Ok(ok_response(None))
+    Ok(data_response(json!({
+        "board": {"id": board.id, "short_id": board.short_id, "status": board.status.to_string()},
+        "pipeline": pipeline
+    })))
 }
 
 fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
@@ -422,11 +463,10 @@ fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandRespo
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
     let members = db::list_members(conn, board_id)?;
-    Ok(CommandResponse {
-        status: "ok".to_string(),
-        task: None,
-        error: None,
-    })
+    let member_list: Vec<serde_json::Value> = members.iter().map(|m| json!({
+        "email": m.email, "role": m.role, "display_name": m.display_name
+    })).collect();
+    Ok(data_response(json!({"members": member_list})))
 }
 
 fn handle_gateway_info(_conn: &Connection, _cmd: &A2aCommand) -> AppResult<CommandResponse> {
@@ -435,6 +475,7 @@ fn handle_gateway_info(_conn: &Connection, _cmd: &A2aCommand) -> AppResult<Comma
         status: "ok".to_string(),
         task: None,
         error: None,
+        data: None,
     })
 }
 
