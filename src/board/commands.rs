@@ -38,6 +38,8 @@ pub fn execute_command(
         "show" => handle_show(conn, cmd),
         "list" => handle_list(conn, cmd),
         "members" => handle_members(conn, cmd),
+        "roles" => handle_roles(conn, cmd),
+        "status" => handle_board_status(conn, cmd),
         "gateway-info" => handle_gateway_info(conn, cmd),
         "create" => handle_create(conn, notifier, cmd, sender),
             "refresh" => handle_init(conn, notifier, cmd, sender),
@@ -389,7 +391,23 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     })
 }
 
-fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+    let board_id = cmd.params.as_ref()
+        .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
+        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+    let members = db::list_members(conn, board_id)?;
+    let roles: Vec<serde_json::Value> = members.iter().map(|m| {
+        serde_json::json!({"email": m.email, "role": m.role, "display_name": m.display_name})
+    }).collect();
+    Ok(CommandResponse {
+        status: "ok".to_string(),
+        task: None,
+        metadata: Some(serde_json::json!({"roles": roles})),
+        error: None,
+    })
+}
+
+fn handle_members
     let board_id = cmd.params.as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
