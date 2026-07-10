@@ -145,6 +145,17 @@ impl Notifier<'_> {
     }
 
     // ── C8: 项目输出 ──
+    pub fn notify_owner_rejected(&self, board_id: &str) {
+        let members = crate::board::db::list_members(&self.db.lock().unwrap(), board_id).unwrap_or_default();
+        for m in &members {
+            if m.role == "orchestrator" {
+                let subject = format!("[A2A] reopen: Owner rejected output for board {}", board_id);
+                let body = "Owner rejected the output. All tasks have been reopened.".to_string();
+                self.create_email(&m.email, &subject, &body);
+            }
+        }
+    }
+
     pub fn notify_output(&self, task: &Task) {
         let subject = format!("[A2A] output: {} {}", self.board.short_id, task.title);
         let body = format!(

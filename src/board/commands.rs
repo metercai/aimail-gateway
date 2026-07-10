@@ -33,6 +33,7 @@ pub fn execute_command(
         "reassign" => handle_reassign(conn, notifier, cmd, sender),
         "edit" => handle_edit(conn, cmd, sender),
         "deadline" => handle_deadline(conn, cmd, sender),
+        "reopen" => handle_reopen(conn, notifier, cmd, sender),
         "output" => handle_output(conn, notifier, cmd, sender),
         "show" => handle_show(conn, cmd),
         "list" => handle_list(conn, cmd),
@@ -550,7 +551,7 @@ fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
         ("verifier",     &["verify","approve","reject","output","comment",
                            "list","show","roles","members","status","heartbeat"]),
         ("worker",       &["complete","commit","block","heartbeat","comment","list","show","roles","members","status"]),
-        ("owner",        &["create","unblock","reassign","comment","list","show","status","members","roles"]),
+        ("owner",        &["create","unblock","reassign","reopen","comment","list","show","status","members","roles"]),
     ];
     for (role, verbs) in defaults {
         for verb in *verbs {
@@ -563,7 +564,39 @@ fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-fn handle_arbitrate(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_reopen(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+    let board_id = cmd.params.as_ref()
+        .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
+        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+    require_role(conn, board_id, sender, "owner")?;
+
+    let mut board = db::get_board(conn, board_id)?;
+    if board.status != BoardStatus::AwaitingOwner {
+        return Err(crate::core::errors::AppError::BadRequest(
+            "board is not awaiting owner review".to_string(),
+        ));
+    }
+
+    // Reset all done tasks to running
+    let tasks = db::list_tasks(conn, board_id, None, None)?;
+    for mut task in tasks {
+        if task.status == TaskStatus::Done {
+            task.status = TaskStatus::Running;
+            task.updated_at = now();
+            db::update_task(conn, &task)?;
+        }
+    }
+
+    board.status = BoardStatus::Active;
+    board.plan_version = None;
+    board.criteria_version = None;
+    db::update_board(conn, &board)?;
+
+    notifier.notify_owner_rejected(board_id);
+    Ok(ok_response(None))
+}
+
+fn handle_arbitrate
     let task_id = cmd.task_id.clone().unwrap_or_default();
     let task = if task_id.is_empty() {
         None
