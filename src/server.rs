@@ -182,7 +182,8 @@ impl Server {
             cancel.clone(),
             inflight,
             Some(dkim_signer.clone() as Arc<dyn MessageSigner>),
-            None, // base edition: no MX direct delivery
+            // MX direct delivery: use system DNS resolver
+            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok().map(std::sync::Arc::new),
         );
         let mut http_handle =
             amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
