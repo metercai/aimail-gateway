@@ -42,17 +42,6 @@ impl A2aInterceptor {
     }
 }
 
-// Validate: sender must be an owner member
-            let sender_is_owner = db::get_member(&conn, &board_id, &sender)
-                .ok().flatten()
-                .map(|m| m.role == "owner")
-                .unwrap_or(false);
-            if !sender_is_owner {
-                tracing::warn!("[a2a_board] [A2A] new rejected: sender {} is not an owner", sender);
-                return crate::core::strategy::InterceptorDecision::PassThrough;
-            }
-
-            // Seed default role_permissions via a DB connection
 fn seed_default_role_permissions_conn(conn: &rusqlite::Connection) -> crate::core::errors::AppResult<()> {
     let defaults: &[(&str, &[&str])] = &[
         ("orchestrator", &["init","tasks","assign","review","block","unblock",
@@ -130,10 +119,10 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 .and_then(|v| v.as_array());
 
             // Validate: members must include orchestrator AND verifier
-            let has_orch = members.as_ref().map(|arr| {
+            let has_orch = members.map(|arr| {
                 arr.iter().any(|m| m.get("role").and_then(|v| v.as_str()) == Some("orchestrator"))
             }).unwrap_or(false);
-            let has_verifier = members.as_ref().map(|arr| {
+            let has_verifier = members.map(|arr| {
                 arr.iter().any(|m| m.get("role").and_then(|v| v.as_str()) == Some("verifier"))
             }).unwrap_or(false);
 
@@ -175,7 +164,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                     id: board_id.clone(),
                     short_id: short_id.clone(),
                     board_email: board_email.clone(),
-                    description: if description.is_empty() { None } else { Some(description) },
+                    description: if description.is_empty() { None } else { Some(description.clone()) },
                     status: BoardStatus::Active,
                     output_task_id: None,
                     plan_version: None,
@@ -247,7 +236,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
 
             // Send team initialization notification to all members
             {
-                let members_list: Vec<String> = members.as_ref().map(|arr| arr.iter().filter_map(|m| {
+                let members_list: Vec<String> = members.map(|arr| arr.iter().filter_map(|m| {
                     let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                     let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
                     let display = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(email);
@@ -270,9 +259,9 @@ Board ID: {}
                     members_list.join("
 "),
                 );
-                let notify_subject = format!("[A2A] notice: Board {} created — {}", short_id, description);
+                let notify_subject = format!("[A2A] notice: Board {} created — {}", short_id, description.clone());
 
-                if let Some(ref all_members) = members {
+                if let Some(all_members) = members {
                     for m in all_members {
                         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                         if !email.is_empty() {
