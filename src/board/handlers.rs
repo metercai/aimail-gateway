@@ -12,11 +12,13 @@ use serde_json::{json, Value};
 pub async fn handle_list_tasks(
     Path(board_id): Path<String>,
     State(state): State<HttpState>,
-    
+    Query(query): Query<HashMap<String, String>>,
 ) -> Json<Value> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let status_filter = query.get("status").map(|s| s.as_str());
+    let assignee_filter = query.get("assignee").map(|a| a.as_str());
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::list_tasks(&conn, &board_id, None, None) {
+        Ok(conn) => match db::list_tasks(&conn, &board_id, status_filter, assignee_filter) {
             Ok(tasks) => Json(json!({"status": "ok", "tasks": tasks})),
             Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
         },
@@ -104,10 +106,12 @@ pub async fn handle_get_task(
 pub async fn handle_post_heartbeat(
     Path((board_id, task_id)): Path<(String, String)>,
     State(state): State<HttpState>,
+    axum::extract::Query(query): axum::extract::Query<HashMap<String, String>>,
 ) -> Json<Value> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let actor = query.get("actor").map(|s| s.as_str()).unwrap_or("api");
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::touch_task(&conn, &task_id) {
+        Ok(conn) => match crate::board::commands::do_heartbeat(&conn, &task_id, actor) {
             Ok(_) => Json(json!({"status": "ok"})),
             Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
         },

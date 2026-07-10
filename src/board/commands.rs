@@ -238,13 +238,18 @@ fn handle_unblock(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, send
     Ok(ok_response(Some(task)))
 }
 
+pub fn do_heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()> {
+    db::touch_task(conn, task_id)?;
+    db::insert_event(conn, &TaskEvent {
+        id: 0, task_id: task_id.to_string(), event_type: "heartbeat".to_string(),
+        actor: actor.to_string(), payload: None, created_at: now(),
+    })?;
+    Ok(())
+}
+
 fn handle_heartbeat(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    db::touch_task(conn, &task_id)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task_id.clone(), event_type: "heartbeat".to_string(),
-        actor: sender.to_string(), payload: None, created_at: now(),
-    })?;
+    do_heartbeat(conn, &task_id, sender)?;
     Ok(ok_response(None))
 }
 
