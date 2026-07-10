@@ -51,21 +51,7 @@ pub trait MessageSigner: Send + Sync {
     }
 }
 
-// ── MxDeliverer ───────────────────────────────────────────────────────
-
 /// Delivers email via direct MX resolution instead of a relay.
-#[async_trait]
-pub trait MxDeliverer: Send + Sync {
-    async fn deliver_via_mx(
-        &self,
-        dkim_signer: &Option<Arc<dyn MessageSigner>>,
-        from_addr: &Address,
-        recipients: &[Address],
-        email_body: &MultiPart,
-        record: &EmailRecord,
-    ) -> AppResult<()>;
-}
-
 // ── RateLimitChecker ──────────────────────────────────────────────────
 
 /// Per-system rate limiter for the send-email endpoint.

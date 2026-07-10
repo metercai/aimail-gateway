@@ -11,7 +11,7 @@ use crate::core::config::Config;
 use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::errors::AppResult;
 use crate::core::smtp::sender::SmtpRelay;
-use crate::core::strategy::{MessageSigner, MxDeliverer};
+use crate::core::strategy::MessageSigner;
 
 use super::batch::{process_batch, InflightSet};
 use super::flows::immediate_forward;
@@ -27,7 +27,7 @@ pub async fn run_retry_worker_with_trigger(
     cancel: CancellationToken,
     inflight: InflightSet,
     dkim_signer: Option<Arc<dyn MessageSigner>>,
-    mx_deliverer: Option<Arc<dyn MxDeliverer>>,
+    dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
 ) -> AppResult<()> {
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.webhook.timeout_secs + 5))
@@ -45,7 +45,7 @@ pub async fn run_retry_worker_with_trigger(
         Arc::new(email_factory.clone()),
         config.smtp.hostname.as_deref(),
         dkim_signer,
-        mx_deliverer,
+        dns_resolver,
     ) {
         Ok(relay) => {
             let mode = if config

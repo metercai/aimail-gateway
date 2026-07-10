@@ -42,7 +42,7 @@ impl A2aInterceptor {
     }
 }
 
-/// Validate: sender must be an owner member
+// Validate: sender must be an owner member
             let sender_is_owner = db::get_member(&conn, &board_id, &sender)
                 .ok().flatten()
                 .map(|m| m.role == "owner")

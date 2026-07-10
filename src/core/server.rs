@@ -205,7 +205,7 @@ pub fn spawn_retry_worker(
     cancel: CancellationToken,
     inflight: crate::core::scheduler::InflightSet,
     dkim_signer: Option<Arc<dyn crate::core::strategy::MessageSigner>>,
-    mx_deliverer: Option<Arc<dyn crate::core::strategy::MxDeliverer>>,
+    dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
 ) -> JoinHandle<AppResult<()>> {
     tokio::spawn(async move {
         crate::core::scheduler::run_retry_worker_with_trigger(
@@ -217,7 +217,7 @@ pub fn spawn_retry_worker(
             cancel,
             inflight,
             dkim_signer,
-            mx_deliverer,
+            dns_resolver,
         )
         .await
     })

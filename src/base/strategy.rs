@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use crate::core::errors::{AppError, AppResult};
 
 use crate::core::strategy::{
-    InboundSecurity, MessageSigner, MxDeliverer, QuotaChecker, RateLimitChecker, RouterHook,
+    InboundSecurity, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook,
     SystemStore,
 };
 
@@ -98,22 +98,3 @@ impl RouterHook for BaseRouterHook {
     }
 }
 
-// ── MxDeliverer ──
-
-pub struct BaseMxDeliverer;
-
-#[async_trait]
-impl MxDeliverer for BaseMxDeliverer {
-    async fn deliver_via_mx(
-        &self,
-        _dkim_signer: &Option<std::sync::Arc<dyn MessageSigner>>,
-        _from_addr: &lettre::Address,
-        _recipients: &[lettre::Address],
-        _email_body: &lettre::message::MultiPart,
-        _record: &crate::core::email::storage::EmailRecord,
-    ) -> AppResult<()> {
-        Err(AppError::Smtp(
-            "MX direct delivery not available in base edition".into(),
-        ))
-    }
-}

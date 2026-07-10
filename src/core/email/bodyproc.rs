@@ -274,7 +274,7 @@ fn strip_signature_from_body(body: &str, signature: &str) -> String {
 }
 
 /// Detect which separator rule matched.
-fn detect_separator(sig: &str) -> String {
+fn detect_separator(_sig: &str) -> String {
     // Check against the known signatures
     "-- ".to_string()
 }

@@ -86,6 +86,7 @@ regex = "1"
 ipnetwork = "0.20"
 
 # TLS
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 rustls = { version = "0.23", features = ["ring"] }
 
 # Unix system

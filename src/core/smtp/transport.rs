@@ -9,13 +9,13 @@ use lettre::Tokio1Executor;
 
 use crate::core::config::RelayConfig;
 use crate::core::errors::{AppError, AppResult};
-use crate::core::strategy::MxDeliverer;
+use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 
 pub(crate) enum SmtpTransportMode {
     /// Upstream SMTP relay.
     Relay(AsyncSmtpTransport<Tokio1Executor>),
     /// Direct MX delivery (advanced edition).
-    DirectMx(Arc<dyn MxDeliverer>),
+    DirectMx(Arc<MxDelivererImpl>),
 }
 
 /// Apply an optional EHLO hostname to a transport builder.

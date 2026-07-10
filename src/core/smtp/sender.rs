@@ -17,7 +17,8 @@ use crate::core::email::utils::markdown_to_html;
 use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mime::{build_with_attachments, parse_address};
 use crate::core::smtp::transport::{build_transport, SmtpTransportMode};
-use crate::core::strategy::{MessageSigner, MxDeliverer};
+use crate::core::strategy::MessageSigner;
+use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 
 // ── SmtpRelay ─────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ impl SmtpRelay {
         email_factory: Arc<EmailFactory>,
         hostname: Option<&str>,
         dkim_signer: Option<Arc<dyn MessageSigner>>,
-        mx_deliverer: Option<Arc<dyn MxDeliverer>>,
+        dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
     ) -> AppResult<Self> {
         let has_relay = config
             .smtp_server
@@ -64,11 +65,14 @@ impl SmtpRelay {
 
         let transport = if has_relay {
             SmtpTransportMode::Relay(build_transport(config, hostname)?)
-        } else if let Some(d) = mx_deliverer {
-            SmtpTransportMode::DirectMx(d)
+        } else if let Some(resolver) = dns_resolver {
+            SmtpTransportMode::DirectMx(Arc::new(MxDelivererImpl::new(
+                resolver,
+                std::collections::HashMap::new(),
+            )))
         } else {
             return Err(AppError::Config(
-                "No relay config — set relay.smtp_server or use advanced edition for MX direct delivery".into(),
+                "No relay config — set relay.smtp_server for SMTP relay delivery".into(),
             ));
         };
 
