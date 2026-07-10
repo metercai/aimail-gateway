@@ -407,7 +407,20 @@ fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandRespons
     })
 }
 
-fn handle_members
+fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+    let board_id = cmd.params.as_ref()
+        .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
+        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+    let board = db::get_board(conn, board_id)?;
+    Ok(CommandResponse {
+        status: "ok".to_string(),
+        task: None,
+        metadata: Some(serde_json::json!({"board_id": board.id, "board_status": format!("{:?}", board.status)})),
+        error: None,
+    })
+}
+
+fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
     let board_id = cmd.params.as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
