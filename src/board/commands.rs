@@ -545,7 +545,7 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
 fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     let defaults: &[(&str, &[&str])] = &[
         ("orchestrator", &["create","assign","review","block","unblock",
-                           "cancel","reassign","edit","deadline","output","notify",
+                           "cancel","reassign","edit","deadline","notify",
                            "members","roles","config","arbitrate","comment","list","show",
                            "status","heartbeat"]),
         ("verifier",     &["verify","approve","reject","output","comment",
