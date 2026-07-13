@@ -252,6 +252,16 @@ fn handle_unblock(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, send
 }
 
 pub fn do_heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()> {
+    let mut task = db::get_task(conn, task_id)?;
+    if task.assignee != actor {
+        return Err(crate::core::errors::AppError::Forbidden("only assignee can heartbeat".to_string()));
+    }
+    if task.status == TaskStatus::Ready {
+        task.status = TaskStatus::Running;
+        db::update_task(conn, &task)?;
+    } else if task.status != TaskStatus::Running {
+        return Err(crate::core::errors::AppError::BadRequest(format!("heartbeat invalid for task status: {}", task.status)));
+    }
     db::touch_task(conn, task_id)?;
     db::insert_event(conn, &TaskEvent {
         id: 0, task_id: task_id.to_string(), event_type: "heartbeat".to_string(),
@@ -288,6 +298,9 @@ fn handle_cancel(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "cancel")?;
+    if task.status != TaskStatus::Blocked {
+        return Err(crate::core::errors::AppError::BadRequest("cancel only allowed for blocked tasks".to_string()));
+    }
 
     let ts = now();
     task.status = TaskStatus::Cancelled;
@@ -500,7 +513,11 @@ fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
                     board_id: board_id.to_string(),
                     title: title.to_string(),
                     body: t.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    status: TaskStatus::Ready,
+                    status: if assignee.is_empty() {
+                        TaskStatus::Triage
+                    } else {
+                        TaskStatus::Ready
+                    },
                     assignee: assignee.to_string(),
                     reviewer: t.get("reviewer").and_then(|v| v.as_str()).map(|s| s.to_string()),
                     parent_ids: t.get("parents").and_then(|v| v.as_array())

@@ -83,6 +83,8 @@ pub struct Task {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TaskStatus {
+    #[serde(rename = "triage")]
+    Triage,
     #[serde(rename = "todo")]
     Todo,
     #[serde(rename = "ready")]
@@ -97,11 +99,14 @@ pub enum TaskStatus {
     Blocked,
     #[serde(rename = "cancelled")]
     Cancelled,
+    #[serde(rename = "archived")]
+    Archived,
 }
 
 impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            TaskStatus::Triage => write!(f, "triage"),
             TaskStatus::Todo => write!(f, "todo"),
             TaskStatus::Ready => write!(f, "ready"),
             TaskStatus::Running => write!(f, "running"),
@@ -109,6 +114,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Done => write!(f, "done"),
             TaskStatus::Blocked => write!(f, "blocked"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
+            TaskStatus::Archived => write!(f, "archived"),
         }
     }
 }

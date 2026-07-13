@@ -440,7 +440,7 @@ pub fn verify_pipeline_integrity(conn: &Connection, board_id: &str) -> AppResult
     // Check for any tasks that are not in done/cancelled status
     let mut stmt = conn.prepare(
         "SELECT short_id, status FROM tasks
-         WHERE board_id = ?1 AND status NOT IN ('done', 'cancelled')",
+         WHERE board_id = ?1 AND status NOT IN ('done', 'cancelled', 'triage', 'archived')",
     )?;
     let rows = stmt.query_map(params![board_id], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
