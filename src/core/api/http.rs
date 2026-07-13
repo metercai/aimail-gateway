@@ -84,34 +84,34 @@ pub fn create_router(
         // Admin: agent metadata (manager, signature, persona, webhook)
         .route("/api/v1/admin/agent-meta/:email", put(update_agent_meta))
         // Admin: agent-scoped key-value state (profiles, summaries, message metadata)
-        .route("/api/v1/admin/agent-state/:key", get(get_agent_state))
-        .route("/api/v1/admin/agent-state/:key", put(put_agent_state))
-        .route("/api/v1/admin/agent-state/:key", delete(delete_agent_state))
+        .route("/api/v1/agent-state/:key", get(get_agent_state))
+        .route("/api/v1/agent-state/:key", put(put_agent_state))
+        .route("/api/v1/agent-state/:key", delete(delete_agent_state))
         // Admin: contact profiles (semantic: atomic write + name index + search)
-        .route("/api/v1/admin/contacts/:address", put(put_contact_profile))
-        .route("/api/v1/admin/contacts/:address", get(get_contact_profile))
-        .route("/api/v1/admin/contacts", get(get_contacts_by_name))
+        .route("/api/v1/contacts/:address", put(put_contact_profile))
+        .route("/api/v1/contacts/:address", get(get_contact_profile))
+        .route("/api/v1/contacts", get(get_contacts_by_name))
         // Admin: thread summary (auto-resolve thread_id from message_id)
         .route(
-            "/api/v1/admin/thread-summary/:message_id",
+            "/api/v1/thread-summary/:message_id",
             put(put_thread_summary),
         )
         .route(
-            "/api/v1/admin/thread-summary/:message_id",
+            "/api/v1/thread-summary/:message_id",
             get(get_thread_summary),
         )
         // Admin: whitelist CRUD
-        .route("/api/v1/admin/whitelists", post(create_whitelist))
-        .route("/api/v1/admin/whitelists", get(list_whitelists))
-        .route("/api/v1/admin/whitelists/check", get(check_whitelist))
-        .route("/api/v1/admin/whitelists/:id", put(update_whitelist))
-        .route("/api/v1/admin/whitelists/:id", delete(delete_whitelist))
+        .route("/api/v1/whitelists", post(create_whitelist))
+        .route("/api/v1/whitelists", get(list_whitelists))
+        .route("/api/v1/whitelists/check", get(check_whitelist))
+        .route("/api/v1/whitelists/:id", put(update_whitelist))
+        .route("/api/v1/whitelists/:id", delete(delete_whitelist))
         .route(
-            "/api/v1/admin/whitelists",
+            "/api/v1/whitelists",
             delete(delete_whitelist_by_params),
         )
         .route(
-            "/api/v1/admin/whitelists",
+            "/api/v1/whitelists",
             put(update_whitelist_by_params),
         )
         // Admin: pending deliveries (pull-mode for amail-bridge)
@@ -887,7 +887,7 @@ async fn create_whitelist(
     }
 }
 
-/// GET /api/v1/admin/whitelists — List all whitelist entries.
+/// GET /api/v1/whitelists — List all whitelist entries.
 #[derive(Deserialize)]
 struct ListWhitelistsQuery {
     domain: Option<String>,
@@ -984,7 +984,7 @@ async fn list_whitelists(
     }
 }
 
-/// GET /api/v1/admin/whitelists/check — Check if a value is whitelisted.
+/// GET /api/v1/whitelists/check — Check if a value is whitelisted.
 #[derive(Deserialize)]
 struct CheckWhitelistQuery {
     domain_addr: String,
@@ -1095,7 +1095,7 @@ async fn check_whitelist(
     }
 }
 
-/// PUT /api/v1/admin/whitelists/:id — Toggle a whitelist entry active/inactive.
+/// PUT /api/v1/whitelists/:id — Toggle a whitelist entry active/inactive.
 async fn update_whitelist(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
@@ -1225,7 +1225,7 @@ async fn update_whitelist(
     }
 }
 
-/// DELETE /api/v1/admin/whitelists — Delete a whitelist entry by domain+value.
+/// DELETE /api/v1/whitelists — Delete a whitelist entry by domain+value.
 #[derive(Deserialize)]
 struct DeleteWhitelistByParams {
     domain_addr: String,
@@ -1388,7 +1388,7 @@ async fn delete_whitelist_by_params(
     }
 }
 
-/// PUT /api/v1/admin/whitelists — Update a whitelist entry by domain+value.
+/// PUT /api/v1/whitelists — Update a whitelist entry by domain+value.
 #[derive(Deserialize)]
 struct UpdateWhitelistByParams {
     domain_addr: String,
@@ -1584,7 +1584,7 @@ async fn update_whitelist_by_params(
     }
 }
 
-/// DELETE /api/v1/admin/whitelists/:id — Delete a whitelist entry by ID.
+/// DELETE /api/v1/whitelists/:id — Delete a whitelist entry by ID.
 async fn delete_whitelist(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
@@ -1768,7 +1768,7 @@ async fn delete_whitelist(
 
 // ── Agent State handlers ──────────────────────────────────────────
 
-/// GET /api/v1/admin/agent-state/:key
+/// GET /api/v1/agent-state/:key
 ///
 /// Requires agent scope. Agent address derived from api_key.email_address.
 async fn get_agent_state(
@@ -1809,7 +1809,7 @@ async fn get_agent_state(
     }
 }
 
-/// PUT /api/v1/admin/agent-state/:key
+/// PUT /api/v1/agent-state/:key
 async fn put_agent_state(
     state: axum::extract::State<HttpState>,
     Path(key): Path<String>,
@@ -1842,7 +1842,7 @@ async fn put_agent_state(
     }
 }
 
-/// DELETE /api/v1/admin/agent-state/:key
+/// DELETE /api/v1/agent-state/:key
 async fn delete_agent_state(
     state: axum::extract::State<HttpState>,
     Path(key): Path<String>,
@@ -1876,7 +1876,7 @@ async fn delete_agent_state(
 
 // ── Contact Profile handlers ─────────────────────────────────────
 
-/// PUT /api/v1/admin/contacts/:address — atomic profile write + name index
+/// PUT /api/v1/contacts/:address — atomic profile write + name index
 async fn put_contact_profile(
     state: axum::extract::State<HttpState>,
     Path(address): Path<String>,
@@ -1945,7 +1945,7 @@ async fn put_contact_profile(
     Ok(Json(serde_json::json!({"success": true})))
 }
 
-/// GET /api/v1/admin/contacts/:address — read contact profile by address
+/// GET /api/v1/contacts/:address — read contact profile by address
 async fn get_contact_profile(
     state: axum::extract::State<HttpState>,
     Path(address): Path<String>,
@@ -1984,7 +1984,7 @@ async fn get_contact_profile(
     }
 }
 
-/// GET /api/v1/admin/contacts?name=... — search contacts by name
+/// GET /api/v1/contacts?name=... — search contacts by name
 async fn get_contacts_by_name(
     state: axum::extract::State<HttpState>,
     Query(query): Query<ContactsByNameQuery>,
@@ -2030,7 +2030,7 @@ async fn get_contacts_by_name(
 
 // ── Thread Summary handler ────────────────────────────────────────
 
-/// PUT /api/v1/admin/thread-summary/:message_id — resolve thread_id + write summary
+/// PUT /api/v1/thread-summary/:message_id — resolve thread_id + write summary
 async fn put_thread_summary(
     state: axum::extract::State<HttpState>,
     Path(message_id): Path<String>,
@@ -2087,7 +2087,7 @@ async fn put_thread_summary(
     ))
 }
 
-/// GET /api/v1/admin/thread-summary/:message_id — resolve thread_id + read summary
+/// GET /api/v1/thread-summary/:message_id — resolve thread_id + read summary
 async fn get_thread_summary(
     state: axum::extract::State<HttpState>,
     Path(message_id): Path<String>,
