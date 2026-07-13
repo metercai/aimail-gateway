@@ -11,6 +11,7 @@ pub mod models;
 pub mod db;
 pub mod commands;
 pub mod notify;
+pub mod sweeper;
 pub mod interceptor;
 pub mod router;
 pub mod handlers;

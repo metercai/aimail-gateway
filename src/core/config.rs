@@ -28,6 +28,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub admin: AdminConfig,
+    #[serde(default)]
+    pub board: BoardConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -432,3 +434,31 @@ fn default_smtp_max_connections() -> usize {
 fn default_delivery_window() -> u64 {
     7200
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BoardConfig {
+    #[serde(default = "default_heartbeat_stale")]
+    pub heartbeat_stale_seconds: u64,
+    #[serde(default = "default_task_timeout")]
+    pub task_timeout_seconds: u64,
+    #[serde(default = "default_sweeper_interval")]
+    pub sweeper_interval_seconds: u64,
+    pub max_active_boards: Option<usize>,
+    pub archive_retention_days: Option<u64>,
+}
+
+impl Default for BoardConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat_stale_seconds: default_heartbeat_stale(),
+            task_timeout_seconds: default_task_timeout(),
+            sweeper_interval_seconds: default_sweeper_interval(),
+            max_active_boards: None,
+            archive_retention_days: None,
+        }
+    }
+}
+
+fn default_heartbeat_stale() -> u64 { 14400 }
+fn default_task_timeout() -> u64 { 259200 }
+fn default_sweeper_interval() -> u64 { 900 }
