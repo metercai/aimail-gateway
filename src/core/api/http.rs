@@ -47,6 +47,8 @@ pub fn create_router(
     let api = Router::new()
         // API Key CRUD
         .route("/api/v1/key/rotate", post(rotate_own_key))
+        .route("/api/v1/inbox", get(agent_inbox))
+        .route("/api/v1/stats/agent/me", get(agent_stats_me))
         .route("/api/v1/admin/api-keys", post(create_api_key))
         .route("/api/v1/admin/api-keys", get(list_api_keys))
         .route("/api/v1/admin/api-keys/:id", get(get_api_key))
@@ -161,6 +163,46 @@ async fn rotate_own_key(
         Ok(None) => Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "API key not found".to_string(), detail: None }))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
     }
+}
+
+
+
+/// GET /api/v1/inbox — Agent pulls own pending deliveries.
+async fn agent_inbox(
+    state: axum::extract::State<HttpState>,
+    api_key: axum::extract::Extension<ApiKeyRecord>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_scope_any(&api_key, &["agent"])?;
+    let agent_email = &api_key.email_address;
+    if agent_email.is_empty() {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "agent email required".to_string(), detail: None })));
+    }
+    let domain = agent_email.rsplit('@').next().unwrap_or("");
+    let records = state.email_factory.env_factory.db
+        .list_pending_deliveries(&api_key.system_id, 50, Some(&[domain.to_string()]))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
+    let own = records.into_iter().filter(|r| r.recipient == *agent_email).collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({ "pending": own.len(), "deliveries": own })))
+}
+
+/// GET /api/v1/stats/agent/me — Agent self statistics.
+async fn agent_stats_me(
+    state: axum::extract::State<HttpState>,
+    api_key: axum::extract::Extension<ApiKeyRecord>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_scope_any(&api_key, &["agent"])?;
+    let agent_email = &api_key.email_address;
+    if agent_email.is_empty() {
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "agent email required".to_string(), detail: None })));
+    }
+    let domain = agent_email.rsplit('@').next().unwrap_or("");
+    let records = state.email_factory.env_factory.db
+        .list_pending_deliveries(&api_key.system_id, 1000, Some(&[domain.to_string()]))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
+    let pending_count = records.iter().filter(|r| r.recipient == *agent_email).count();
+    Ok(Json(serde_json::json!({ "pending_count": pending_count })))
 }
 
 
