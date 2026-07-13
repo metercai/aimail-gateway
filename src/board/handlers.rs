@@ -84,7 +84,9 @@ pub async fn handle_get_task(
     let s = state.config.storage.path.to_string_lossy().to_string();
     match db::open_board_db(&s, &board_id) {
         Ok(conn) => match db::get_task(&conn, &task_id) {
-        Ok(task) => Json(json!({"status": "ok", "task": task})),
+            Ok(task) => Json(json!({"status": "ok", "task": task})),
+            Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
+        },
         Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
     }
 }
