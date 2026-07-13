@@ -1,7 +1,7 @@
 //! API key management CRUD handlers.
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::Json,
 };
@@ -262,77 +262,53 @@ pub async fn create_api_key(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-/// GET /api/v1/api-keys — List API keys with scope-aware filtering.
+/// GET /api/v1/api-keys — Lookup API key by email (or list with scope filter).
 pub async fn list_api_keys(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<ApiKeyResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let is_platform_admin = is_platform_admin_scope(&api_key);
     let is_system_admin = is_system_admin_scope(&api_key);
     let is_agent_admin = is_agent_admin_scope(&api_key);
     let is_agent = is_agent_scope(&api_key);
 
-    let keys = if is_platform_admin {
-        // PlatformAdmin (platform scope) — all keys visible
-        match state.email_factory.env_factory.list_api_keys().await {
-            Ok(keys) => keys,
-            Err(e) => {
+    let email_filter = params.get("email");
+
+    let keys = if let Some(email) = email_filter {
+        // Lookup by email — only agent/agent_admin/system_admin
+        if !is_platform_admin && !is_system_admin && !is_agent_admin {
+            // Agent: can only lookup self
+            if is_agent && email != &api_key.email_address {
                 return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse { error: "Forbidden".to_string(), detail: None }),
                 ));
             }
         }
-    } else if is_system_admin || is_agent_admin {
-        // SystemAdmin — only agent keys in own system
-        match state
-            .email_factory
-            .env_factory
-            .list_api_keys_by_system(&api_key.system_id, "agent")
-            .await
-        {
-            Ok(keys) => keys,
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                ));
-            }
-        }
-    } else if is_agent {
-        // Agent — only their own key
-        match state
-            .email_factory
-            .env_factory
-            .resolve_api_key_by_id(api_key.id)
-            .await
-        {
+        match state.email_factory.env_factory.resolve_api_key_by_email(email).await {
             Ok(Some(k)) => vec![k],
             Ok(None) => vec![],
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                ));
-            }
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+        }
+    } else if is_platform_admin {
+        match state.email_factory.env_factory.list_api_keys().await {
+            Ok(keys) => keys,
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+        }
+    } else if is_system_admin || is_agent_admin {
+        match state.email_factory.env_factory.list_api_keys_by_system(&api_key.system_id, "agent").await {
+            Ok(keys) => keys,
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+        }
+    } else if is_agent {
+        match state.email_factory.env_factory.resolve_api_key_by_id(api_key.id).await {
+            Ok(Some(k)) => vec![k],
+            Ok(None) => vec![],
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
         }
     } else {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Insufficient scope".to_string(),
-                detail: None,
-            }),
-        ));
+        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Insufficient scope".to_string(), detail: None })));
     };
 
     Ok(Json(keys.into_iter().map(|r| r.into()).collect()))
