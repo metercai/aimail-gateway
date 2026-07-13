@@ -315,7 +315,36 @@ Board ID: {}
             Err(_) => return crate::core::strategy::InterceptorDecision::PassThrough,
         };
 
+        
+        // ── [WHOAMI] → 响应 board 信息（不区分 member/陌生人）──
+        if subject.to_lowercase().starts_with("[whoami]") {
+            let board = match db::get_board(&conn, &board_id) {
+                Ok(b) => b,
+                Err(_) => return crate::core::strategy::InterceptorDecision::PassThrough,
+            };
+            let whoami_body = format!(
+                "Board: {} ({})\nGateway: {}\nStatus: {}\nDescription: {}",
+                board.short_id,
+                board_id,
+                self.gateway_url,
+                serde_json::to_string(&board.status).unwrap_or_default().trim_matches('"'),
+                board.description.as_deref().unwrap_or("(no description)"),
+            );
+            let sender_email = format!("{} <{}>", board.short_id, board.board_email);
+            let _ = self.email_factory.create_outbound(
+                &format!("a2a-whoami-{}", uuid::Uuid::new_v4()),
+                &self.system_id,
+                &sender_email,
+                &sender,
+                &format!("Re: [WHOAMI] — {}", board.short_id),
+                &whoami_body,
+                None, None, None, 3,
+            ).await;
+            return crate::core::strategy::InterceptorDecision::Handled;
+        }
+
         // ── A 流: [A2A] prefix → Rust 闭环 ──
+
         if let Some(rest) = subject.strip_prefix("[A2A] ") {
             let verb = rest.split_whitespace().next().unwrap_or("").to_string();
             // Only A类 verbs forward attachments; B类 clear
