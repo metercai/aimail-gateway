@@ -660,7 +660,7 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
         tracing::info!("[a2a_board] role_permissions override: {} roles", perms.len());
     }
 
-    notifier.notify_all(board_id, &format!("Board {} initialized", short_id));
+    notifier.notify_invite(board_id, &format!("Board {} initialized", short_id));
     Ok(ok_response(None))
 }
 

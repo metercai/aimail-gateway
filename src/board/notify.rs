@@ -205,6 +205,18 @@ impl Notifier {
     // ── C10: 全员通知 ──
     pub fn notify_all(&self, board_id: &str, message: &str) {
         let subject = format!("[A2A] notice: {} {}", self.board_short_id, message);
+        let body = format!("{}\n\nAPI: {}", message, self.gateway_url);
+        if let Ok(members) = crate::board::db::list_members(
+            &crate::board::db::open_board_db("", board_id).unwrap(),
+            board_id,
+        ) {
+            self.create_email_to_all(&members, &subject, &body);
+        }
+    }
+
+    // ── Board invitation — per-member notification with token ──
+    pub fn notify_invite(&self, board_id: &str, message: &str) {
+        let subject = format!("[A2A] invite: {}", self.board_short_id);
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db("", board_id).unwrap(),
             board_id,
