@@ -126,10 +126,13 @@ fn data_response(data: serde_json::Value) -> CommandResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-fn handle_complete(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
-    let task_id = extract_task_id(cmd)?;
-    let mut task = db::get_task(conn, &task_id)?;
+pub fn do_complete(conn: &Connection, notifier: &Notifier, task_id: &str, sender: &str, summary: Option<String>) -> AppResult<Task> {
+    let mut task = db::get_task(conn, task_id)?;
     require_assignee(&task, sender)?;
+
+    if let Some(ref s) = summary {
+        task.summary = s.clone();
+    }
 
     let ts = now();
     if task.reviewer.is_some() {
@@ -155,6 +158,15 @@ fn handle_complete(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sen
         promote_children(conn, notifier, &task);
         notifier.notify_approved(&task);
     }
+    Ok(task)
+}
+
+fn handle_complete(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+    let task_id = extract_task_id(cmd)?;
+    let summary = cmd.params.as_ref()
+        .and_then(|p| p.get("summary").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+    let task = do_complete(conn, notifier, &task_id, sender, summary)?;
     Ok(ok_response(Some(task)))
 }
 
