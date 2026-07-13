@@ -414,7 +414,20 @@ fn handle_output(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
 fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let task = db::get_task(conn, &task_id)?;
-    Ok(ok_response(Some(task)))
+
+    // Collect parent summaries
+    let parent_summaries: Vec<serde_json::Value> = task.parent_ids.iter()
+        .filter_map(|pid| {
+            db::list_tasks(conn, &task.board_id, None, None).ok()?
+                .into_iter().find(|t| t.short_id == *pid)
+                .map(|p| json!({"short_id": p.short_id, "title": p.title, "summary": p.summary}))
+        }).collect();
+
+    let mut resp = ok_response(Some(task));
+    if !parent_summaries.is_empty() {
+        resp.data = Some(json!({"parent_summaries": parent_summaries}));
+    }
+    Ok(resp)
 }
 
 fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
@@ -427,12 +440,12 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     let assignee = cmd.params.as_ref()
         .and_then(|p| p.get("assignee").and_then(|v| v.as_str()));
     let tasks = db::list_tasks(conn, board_id, status, assignee)?;
-    Ok(CommandResponse {
-        status: "ok".to_string(),
-        task: None,
-        error: None,
-        data: None,
-    })
+    let task_list: Vec<serde_json::Value> = tasks.iter().map(|t| json!({
+        "id": t.id, "short_id": t.short_id, "title": t.title,
+        "status": t.status.to_string(), "assignee": t.assignee,
+        "reviewer": t.reviewer, "parent_ids": t.parent_ids,
+    })).collect();
+    Ok(data_response(json!({"tasks": task_list})))
 }
 
  
