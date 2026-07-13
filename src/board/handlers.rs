@@ -1,6 +1,7 @@
 //! Board handlers — State<HttpState> with :board_id syntax (axum 0.7)
 
 use crate::board::db;
+use crate::board::models::TaskStatus;
 
 use axum::extract::{Path, State, Query};
 use std::collections::HashMap;
@@ -19,7 +20,7 @@ pub async fn handle_list_tasks(
     let assignee_filter = query.get("assignee").map(|a| a.as_str());
     match db::open_board_db(&s, &board_id) {
         Ok(conn) => match db::list_tasks(&conn, &board_id, status_filter, assignee_filter) {
-            Ok(tasks) => Json(json!({"status": "ok", "tasks": tasks})),
+            Ok(tasks) => { for t in &tasks { if t.status == TaskStatus::Running { let _ = db::touch_task(&conn, &t.id); } } Json(json!({"status": "ok", "tasks": tasks})) },
             Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
         },
         Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
@@ -76,6 +77,14 @@ pub async fn handle_list_roles(
 }
 
 
+fn touch_if_running(conn: &rusqlite::Connection, task_id: &str) {
+    if let Ok(task) = db::get_task(conn, task_id) {
+        if task.status == TaskStatus::Running {
+            let _ = db::touch_task(conn, task_id);
+        }
+    }
+}
+
 /// GET /api/v1/board/:board_id/task/:task_id
 pub async fn handle_get_task(
     Path((board_id, task_id)): Path<(String, String)>,
@@ -84,7 +93,7 @@ pub async fn handle_get_task(
     let s = state.config.storage.path.to_string_lossy().to_string();
     match db::open_board_db(&s, &board_id) {
         Ok(conn) => match db::get_task(&conn, &task_id) {
-            Ok(task) => Json(json!({"status": "ok", "task": task})),
+            Ok(task) => { touch_if_running(&conn, &task_id); Json(json!({"status": "ok", "task": task})) },
             Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
         },
         Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
