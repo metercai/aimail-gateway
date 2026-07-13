@@ -79,24 +79,12 @@ pub async fn handle_list_roles(
 /// GET /api/v1/board/:board_id/task/:task_id
 pub async fn handle_get_task(
     Path((board_id, task_id)): Path<(String, String)>,
-    headers: HeaderMap,
     State(state): State<HttpState>,
 ) -> Json<Value> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    let conn = match db::open_board_db(&s, &board_id) {
-        Ok(c) => c,
-        Err(e) => return Json(json!({"status": "error", "error": format!("{:?}", e)})),
-    };
-    if verify_board_token(&headers, &conn, &board_id).is_none() {
-        return Json(json!({"status": "error", "error": "unauthorized"}));
-    }
-    match db::get_task(&conn, &task_id) {
-    let s = state.config.storage.path.to_string_lossy().to_string();
     match db::open_board_db(&s, &board_id) {
         Ok(conn) => match db::get_task(&conn, &task_id) {
-            Ok(task) => Json(json!({"status": "ok", "task": task})),
-            Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
-        },
+        Ok(task) => Json(json!({"status": "ok", "task": task})),
         Err(e) => Json(json!({"status": "error", "error": format!("{:?}", e)})),
     }
 }

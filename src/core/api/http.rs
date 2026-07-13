@@ -183,7 +183,7 @@ async fn agent_inbox(
         .list_pending_deliveries(&api_key.system_id, 50, Some(&[domain.to_string()]))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
-    let own = records.into_iter().filter(|r| r.recipient == *agent_email).collect::<Vec<_>>();
+    let own = records.into_iter().filter(|r| r.to_addr == *agent_email).collect::<Vec<_>>();
     Ok(Json(serde_json::json!({ "pending": own.len(), "deliveries": own })))
 }
 
@@ -202,7 +202,7 @@ async fn agent_stats_me(
         .list_pending_deliveries(&api_key.system_id, 1000, Some(&[domain.to_string()]))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
-    let pending_count = records.iter().filter(|r| r.recipient == *agent_email).count();
+    let pending_count = records.iter().filter(|r| r.to_addr == *agent_email).count();
     Ok(Json(serde_json::json!({ "pending_count": pending_count })))
 }
 
