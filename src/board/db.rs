@@ -45,7 +45,8 @@ fn init_schema(conn: &Connection) -> AppResult<()> {
             board_id TEXT REFERENCES boards(id),
             joined_at TEXT,
             domains TEXT,
-            capability_snapshot TEXT
+            capability_snapshot TEXT,
+            board_token TEXT UNIQUE
         );
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -249,6 +250,16 @@ pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<O
     } else {
         Ok(None)
     }
+}
+
+pub fn generate_board_token(conn: &Connection, email: &str, board_id: &str) -> AppResult<String> {
+    use uuid::Uuid;
+    let token = format!("bdt_{}", Uuid::new_v4().to_string().replace('-', ""));
+    conn.execute(
+        "UPDATE board_members SET board_token = ?1 WHERE email = ?2 AND board_id = ?3 AND board_token IS NULL",
+        rusqlite::params![token, email, board_id],
+    )?;
+    Ok(token)
 }
 
 pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>> {
