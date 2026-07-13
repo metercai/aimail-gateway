@@ -29,13 +29,14 @@ impl Notifier {
     }
     fn format_body(&self, label: &str, task: &Task, context: &str, action: &str) -> String {
         format!(
-            "── A2A Board ──\n\n{label}\n  任务: {sid} — {title}\n  看板: {bsid}\n\n── 上下文 ──\n{context}\n\n── 操作 ──\n{action}",
+            "── A2A Board ──\n\n{label}\n  任务: {sid} — {title}\n  看板: {bsid}\n\n── 上下文 ──\n{context}\n\n── 操作 ──\n{action}\n\nAPI: {gateway_url}",
             label = label,
             sid = task.short_id,
             title = task.title,
             bsid = self.board_short_id,
             context = context,
             action = action,
+            gateway_url = self.gateway_url,
         )
     }
 
@@ -91,12 +92,11 @@ impl Notifier {
     pub fn notify_assigned(&self, task: &Task) {
         let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
         let context = format!(
-            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}\nBoard API: {}",
+            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}",
             task.body,
             task.assignee,
             task.reviewer.as_deref().unwrap_or("(无)"),
             task.created_by,
-            self.gateway_url,
         );
         let body = self.format_body("新任务分配", task, &context, &format!(
             "开始执行后发 [A2A] heartbeat {}", task.short_id
@@ -205,11 +205,12 @@ impl Notifier {
     // ── C10: 全员通知 ──
     pub fn notify_all(&self, board_id: &str, message: &str) {
         let subject = format!("[A2A] notice: {} {}", self.board_short_id, message);
+        let body = format!("{}\n\nAPI: {}", message, self.gateway_url);
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db("", board_id).unwrap(),
             board_id,
         ) {
-            self.create_email_to_all(&members, &subject, message);
+            self.create_email_to_all(&members, &subject, &body);
         }
     }
 
