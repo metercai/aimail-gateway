@@ -569,8 +569,8 @@ fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
 }
 
 fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
-    let board_id = &notifier.board.id;
-    let short_id = &notifier.board.short_id;
+    let board_id = &notifier.board_id;
+    let short_id = &notifier.board_short_id;
     let ts = now();
 
     let description = cmd.params.as_ref()
@@ -578,7 +578,7 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
     let board = Board {
         id: board_id.clone(),
         short_id: short_id.clone(),
-        board_email: notifier.board.board_email.clone(),
+        board_email: notifier.board_email.clone(),
         description,
         status: BoardStatus::Active,
         output_task_id: None,
@@ -588,7 +588,7 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
         criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
-        gateway_url: notifier.board.gateway_url.clone(),
+        gateway_url: notifier.board_id.clone(),
         created_at: ts.clone(),
         completed_at: None,
     };

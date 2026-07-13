@@ -84,6 +84,8 @@ impl InboundInterceptor for A2aInterceptor {
     ) -> crate::core::strategy::InterceptorDecision {
         let subject = payload["subject"].as_str().unwrap_or("").trim().to_string();
         let sender = payload["from"].as_str().unwrap_or("").to_string();
+        let attachments_json: Option<String> = payload.get("attachments")
+            .and_then(|v| serde_json::to_string(v).ok());
         let to_addr = payload["to"]
             .as_array()
             .and_then(|a| a.first())
@@ -354,9 +356,12 @@ Board ID: {}
 
             let notifier = Notifier {
                 email_factory: Some(self.email_factory.clone()),
-                system_id: &self.system_id,
-                board: &board,
-                gateway_domain: &self.gateway_domain,
+                system_id: self.system_id.clone(),
+                board_short_id: board.short_id.clone(),
+                board_email: board.board_email.clone(),
+                board_id: board.id.clone(),
+                gateway_domain: self.gateway_domain.clone(),
+                attachments_json: attachments_json.clone(),
                 tasks: RefCell::new(Vec::new()),
             };
 
