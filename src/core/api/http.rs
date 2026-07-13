@@ -118,8 +118,6 @@ pub fn create_router(
         // Admin: pending deliveries (pull-mode for amail-bridge)
         .route("/api/v1/admin/pending", post(list_pending_deliveries))
         .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
-        // Admin: probe webhook reachability (integrate.sh bridge mode detection)
-        .route("/api/v1/admin/probe-webhook", post(probe_webhook))
         // Admin: check if domain exists globally (integrate.sh domain uniqueness)
         .route("/api/v1/admin/domains/check", get(check_domain_exists))
         .with_state(state.clone())
@@ -2381,52 +2379,6 @@ async fn ack_pending_deliveries(
 /// Used by integrate.sh to determine whether to deploy the bridge in
 /// push mode (relay can reach the agent's machine) or pull mode (relay
 /// cannot, bridge must poll).
-async fn probe_webhook(
-    _state: axum::extract::State<HttpState>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    Json(req): Json<ProbeWebhookRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["system"])?;
-
-    // Reject loopback addresses — probe is meant for cross-machine connectivity
-    if let Ok(sock_addr) = req.addr.parse::<std::net::SocketAddr>() {
-        if sock_addr.ip().is_loopback() {
-            return Ok(Json(serde_json::json!({
-                "reachable": false,
-                "error": "loopback_not_allowed",
-                "detail": "Probe does not accept loopback addresses (127.0.0.1/::1). Provide a routable IP.",
-            })));
-        }
-    }
-
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        tokio::net::TcpStream::connect(&req.addr),
-    )
-    .await;
-
-    match result {
-        Ok(Ok(_stream)) => Ok(Json(serde_json::json!({"reachable": true}))),
-        Ok(Err(e)) => {
-            let kind = e.kind();
-            let error_str = if kind == std::io::ErrorKind::ConnectionRefused {
-                "connection_refused"
-            } else {
-                "other"
-            };
-            Ok(Json(serde_json::json!({
-                "reachable": false,
-                "error": error_str,
-                "detail": e.to_string(),
-            })))
-        }
-        Err(_elapsed) => Ok(Json(serde_json::json!({
-            "reachable": false,
-            "error": "timeout",
-            "detail": "dial tcp timeout after 5s",
-        }))),
-    }
-}
 
 // ── Public config ─────────────────────────────────────────────────
 
