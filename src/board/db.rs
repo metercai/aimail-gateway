@@ -103,6 +103,16 @@ pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
     Ok(())
 }
 
+
+/// Archive a board — set status to Archived.
+pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE boards SET status = 'archived', completed_at = ?1 WHERE id = ?2",
+        rusqlite::params![chrono::Utc::now().to_rfc3339(), board_id],
+    )?;
+    Ok(())
+}
+
 pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
     conn.query_row(
         "SELECT id, short_id, board_email, description, status, output_task_id, plan_version,

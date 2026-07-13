@@ -12,6 +12,7 @@ pub mod db;
 pub mod commands;
 pub mod notify;
 pub mod sweeper;
+pub mod quota;
 pub mod interceptor;
 pub mod router;
 pub mod handlers;
