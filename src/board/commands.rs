@@ -43,7 +43,6 @@ pub fn execute_command(
         "members" => handle_members(conn, cmd),
         "roles" => handle_roles(conn, cmd),
         "status" => handle_board_status(conn, cmd),
-        "gateway-info" => handle_gateway_info(conn, cmd),
         "create" => handle_create(conn, notifier, cmd, sender),
             "refresh" => handle_init(conn, notifier, cmd, sender),
         "init" => handle_init(conn, notifier, cmd, sender),
@@ -531,16 +530,6 @@ fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandRespo
         "email": m.email, "role": m.role, "display_name": m.display_name
     })).collect();
     Ok(data_response(json!({"members": member_list})))
-}
-
-fn handle_gateway_info(_conn: &Connection, _cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    // gateway-url is returned from the interceptor, not from board.db
-    Ok(CommandResponse {
-        status: "ok".to_string(),
-        task: None,
-        error: None,
-        data: None,
-    })
 }
 
 fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {

@@ -361,6 +361,7 @@ Board ID: {}
                 }
             };
 
+            let gw_url = self.gateway_url.clone();
             let notifier = Notifier {
                 email_factory: Some(self.email_factory.clone()),
                 system_id: self.system_id.clone(),
@@ -368,6 +369,7 @@ Board ID: {}
                 board_email: board.board_email.clone(),
                 board_id: board.id.clone(),
                 gateway_domain: self.gateway_domain.clone(),
+                gateway_url: gw_url,
                 attachments_json: attachments_json.clone(),
                 tasks: RefCell::new(Vec::new()),
             };

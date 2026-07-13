@@ -17,6 +17,7 @@ pub struct Notifier {
     pub board_email: String,
     pub board_id: String,
     pub gateway_domain: String,
+    pub gateway_url: String,
     pub attachments_json: Option<String>,
     pub tasks: RefCell<Vec<JoinHandle<()>>>,
 }
@@ -90,11 +91,12 @@ impl Notifier {
     pub fn notify_assigned(&self, task: &Task) {
         let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
         let context = format!(
-            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}",
+            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}\nBoard API: {}",
             task.body,
             task.assignee,
             task.reviewer.as_deref().unwrap_or("(无)"),
             task.created_by,
+            self.gateway_url,
         );
         let body = self.format_body("新任务分配", task, &context, &format!(
             "开始执行后发 [A2A] heartbeat {}", task.short_id
@@ -276,7 +278,7 @@ mod tests {
     #[test]
     fn test_notify_assigned_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         // Just verify it doesn't panic (no email sent since factory is None)
         notifier.notify_assigned(&task);
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn test_notify_review_needed_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_review_needed(&task);
     }
@@ -293,7 +295,7 @@ mod tests {
     #[test]
     fn test_notify_approved_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_approved(&task);
     }
@@ -301,7 +303,7 @@ mod tests {
     #[test]
     fn test_notify_rejected_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_rejected(&task, "need more data");
     }
@@ -309,7 +311,7 @@ mod tests {
     #[test]
     fn test_notify_blocked_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_blocked(&task, "worker@t.io");
     }
@@ -317,7 +319,7 @@ mod tests {
     #[test]
     fn test_notify_unblocked_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_unblocked(&task, "orch@t.io");
     }
@@ -325,7 +327,7 @@ mod tests {
     #[test]
     fn test_notify_cancelled_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_cancelled(&task);
     }
@@ -333,7 +335,7 @@ mod tests {
     #[test]
     fn test_notify_comment_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_comment(&task, "veri@t.io", "looks good");
     }
@@ -341,7 +343,7 @@ mod tests {
     #[test]
     fn test_notify_comment_to_reviewer_when_assignee_comments() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         // assignee comments -> notification goes to reviewer
         notifier.notify_comment(&task, "worker@t.io", "please review");
@@ -350,14 +352,14 @@ mod tests {
     #[test]
     fn test_notify_all_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
     }
 
     #[test]
     fn test_notify_arbitrate_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
+        let notifier = Notifier { email_factory: None, system_id: "test".to_string(), board_short_id: board.short_id.clone(), board_email: board.board_email.clone(), board_id: board.id.clone(), gateway_domain: "test.io".to_string(), gateway_url: "http://localhost".to_string(), attachments_json: None, tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
     }
