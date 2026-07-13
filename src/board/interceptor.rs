@@ -84,7 +84,7 @@ impl InboundInterceptor for A2aInterceptor {
     ) -> crate::core::strategy::InterceptorDecision {
         let subject = payload["subject"].as_str().unwrap_or("").trim().to_string();
         let sender = payload["from"].as_str().unwrap_or("").to_string();
-        let attachments_json: Option<String> = payload.get("attachments")
+        let raw_attachments_json: Option<String> = payload.get("attachments")
             .and_then(|v| serde_json::to_string(v).ok());
         let to_addr = payload["to"]
             .as_array()
@@ -318,6 +318,13 @@ Board ID: {}
         // ── A 流: [A2A] prefix → Rust 闭环 ──
         if let Some(rest) = subject.strip_prefix("[A2A] ") {
             let verb = rest.split_whitespace().next().unwrap_or("").to_string();
+            // Only A类 verbs forward attachments; B类 clear
+            let carry_verbs = ["complete", "output", "comment", "create", "arbitrate"];
+            let attachments_json: Option<String> = if carry_verbs.contains(&verb.as_str()) {
+                raw_attachments_json.clone()
+            } else {
+                None
+            };
             let task_id = rest.split_whitespace().nth(1).map(|s| s.to_string());
 
             // Parse optional params from body (JSON body or inline)
