@@ -106,6 +106,11 @@ impl Server {
             config.storage.attachments_dir(),
             system_store.clone(),
         ));
+        let attachment_factory = Arc::new(AttachmentFactory::new(
+            db_arc.clone(),
+            config.storage.attachments_dir(),
+        ));
+
         // ── Register a2a_board interceptor ──
         {
             let gw_domain = config.smtp.bind.rsplit_once(':')
@@ -124,16 +129,13 @@ impl Server {
 
         amail_base::board::interceptor::register(
                 &email_factory,
+                &attachment_factory,
                 config.storage.path.to_str().unwrap_or(""),
                 "",
                 &gw_domain,
                 &endpoint,
             );
         }
-        let attachment_factory = Arc::new(AttachmentFactory::new(
-            db_arc.clone(),
-            config.storage.attachments_dir(),
-        ));
 
         let inbound_security: Arc<dyn InboundSecurity> = Arc::new(BaseInboundSecurity);
         let dkim_signer: Arc<dyn MessageSigner> = Arc::new(BaseMessageSigner);

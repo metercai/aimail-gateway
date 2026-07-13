@@ -4,6 +4,7 @@ use crate::board::commands;
 use crate::board::db;
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
 use crate::board::notify::Notifier;
+use crate::core::email::factory::AttachmentFactory;
 use std::cell::RefCell;
 use crate::core::email::factory::EmailFactory;
 use crate::core::errors::AppResult;
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 pub struct A2aInterceptor {
     pub email_factory: Arc<EmailFactory>,
+    pub attachment_factory: Arc<AttachmentFactory>,
     pub system_id: String,
     pub storage_path: String,
     pub gateway_domain: String,
@@ -23,6 +25,7 @@ pub struct A2aInterceptor {
 impl A2aInterceptor {
     pub fn new(
         email_factory: Arc<EmailFactory>,
+        attachment_factory: Arc<AttachmentFactory>,
         system_id: &str,
         storage_path: &str,
         gateway_domain: &str,
@@ -30,6 +33,7 @@ impl A2aInterceptor {
     ) -> Self {
         Self {
             email_factory,
+            attachment_factory,
             system_id: system_id.to_string(),
             storage_path: storage_path.to_string(),
             gateway_domain: gateway_domain.to_string(),
@@ -357,10 +361,17 @@ Board ID: {}
             };
 
             // Auto-inject board_id into params so commands don't need it in body
+            // ── Inject attachments from SMTP payload into command params ──
             let mut params = params;
             if let Some(ref mut p) = params {
                 if p.get("board_id").is_none() {
                     p["board_id"] = Value::String(board_id.clone());
+                }
+                // Inject attachments_json for complete/output handlers
+                if let Some(attachments) = payload.get("attachments") {
+                    if p.get("_attachments").is_none() {
+                        p["_attachments"] = attachments.clone();
+                    }
                 }
             }
 
@@ -576,6 +587,7 @@ mod tests {
 /// Call this once during server startup.
 pub fn register(
     email_factory: &std::sync::Arc<crate::core::email::factory::EmailFactory>,
+    attachment_factory: &std::sync::Arc<AttachmentFactory>,
     storage_path: &str,
     system_id: &str,
     gateway_domain: &str,
@@ -584,6 +596,7 @@ pub fn register(
     use crate::core::strategy::InboundInterceptor;
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
         email_factory.clone(),
+        attachment_factory.clone(),
         system_id,
         storage_path,
         gateway_domain,
