@@ -46,11 +46,12 @@ pub fn create_router(
     let api_env_factory = state.email_factory.env_factory.clone();
     let api = Router::new()
         // API Key CRUD
-        .route("/api/v1/api-keys", post(create_api_key))
-        .route("/api/v1/api-keys", get(list_api_keys))
-        .route("/api/v1/api-keys/:id", get(get_api_key))
-        .route("/api/v1/api-keys/:id", put(update_api_key))
-        .route("/api/v1/api-keys/:id", delete(delete_api_key))
+        .route("/api/v1/key/rotate", post(rotate_own_key))
+        .route("/api/v1/admin/api-keys", post(create_api_key))
+        .route("/api/v1/admin/api-keys", get(list_api_keys))
+        .route("/api/v1/admin/api-keys/:id", get(get_api_key))
+        .route("/api/v1/admin/api-keys/:id", put(update_api_key))
+        .route("/api/v1/admin/api-keys/:id", delete(delete_api_key))
         // Outbound send
         .route("/api/v1/send", post(send_email))
         // Whoami
@@ -145,6 +146,25 @@ pub fn create_router(
         .with_state(state.clone());
     router.merge(board_routes)
 }
+
+
+/// POST /api/v1/key/rotate — Rotate own API key (any scope).
+async fn rotate_own_key(
+    state: axum::extract::State<HttpState>,
+    api_key: axum::extract::Extension<ApiKeyRecord>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use uuid::Uuid;
+    use crate::core::api::auth::sha256_hex;
+    let raw_key = Uuid::new_v4().to_string().replace('-', "");
+    let key_hash = sha256_hex(&raw_key);
+    let new_prefix = &raw_key[..8];
+    match state.email_factory.env_factory.rotate_api_key(api_key.id, &key_hash, new_prefix).await {
+        Ok(Some(_record)) => Ok(Json(serde_json::json!({"raw_key": raw_key}))),
+        Ok(None) => Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "API key not found".to_string(), detail: None }))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+    }
+}
+
 
 // ── System Domain CRUD ──
 
