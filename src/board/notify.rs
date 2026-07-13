@@ -23,6 +23,18 @@ impl Notifier<'_> {
     pub fn take_tasks(&self) -> Vec<JoinHandle<()>> {
         self.tasks.borrow_mut().drain(..).collect()
     }
+    fn format_body(&self, label: &str, task: &Task, context: &str, action: &str) -> String {
+        format!(
+            "── A2A Board ──\n\n{label}\n  任务: {sid} — {title}\n  看板: {bsid}\n\n── 上下文 ──\n{context}\n\n── 操作 ──\n{action}",
+            label = label,
+            sid = task.short_id,
+            title = task.title,
+            bsid = self.board.short_id,
+            context = context,
+            action = action,
+        )
+    }
+
     fn create_email(&self, to: &str, subject: &str, body: &str) {
         let factory = match &self.email_factory {
             Some(f) => f.clone(),
@@ -73,22 +85,29 @@ impl Notifier<'_> {
     // ── C1: 任务分配 ──
     pub fn notify_assigned(&self, task: &Task) {
         let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
-        let body = format!(
-            "task_id: {}\nboard: {}\n标题: {}\n描述: {}\n审阅者: {}\n创建人: {}",
-            task.id, task.board_id, task.title, task.body,
+        let context = format!(
+            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}",
+            task.body,
+            task.assignee,
             task.reviewer.as_deref().unwrap_or("(无)"),
             task.created_by,
         );
+        let body = self.format_body("新任务分配", task, &context, &format!(
+            "开始执行后发 [A2A] heartbeat {}", task.short_id
+        ));
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C2: 待审阅 ──
     pub fn notify_review_needed(&self, task: &Task) {
         let subject = format!("[A2A] review-needed {}: {}", task.short_id, task.title);
-        let body = format!(
-            "task_id: {}\n完成人: {}\n标题: {}\nsummary: {}\n\n请审阅后执行 [A2A] approve {} 或 [A2A] reject {}。",
-            task.id, task.assignee, task.title, task.summary, task.short_id, task.short_id,
+        let context = format!(
+            "完成人: {}\n产出物: {}",
+            task.assignee, task.summary,
         );
+        let body = self.format_body("待审阅", task, &context, &format!(
+            "[A2A] approve {}  — 通过\n  [A2A] reject {}   — 退回", task.short_id, task.short_id
+        ));
         if let Some(reviewer) = &task.reviewer {
             self.create_email(reviewer, &subject, &body);
         }
@@ -97,7 +116,8 @@ impl Notifier<'_> {
     // ── C3: 审阅通过 ──
     pub fn notify_approved(&self, task: &Task) {
         let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
-        let body = format!("task_id: {}\n任务 {} 已通过审阅，状态: 已完成。", task.id, task.short_id);
+        let context = format!("审阅人: {}", task.reviewer.as_deref().unwrap_or("(无)"));
+        let body = self.format_body("审阅通过", task, &context, "已完成，无后续操作");
         self.create_email(&task.assignee, &subject, &body);
     }
 
@@ -253,7 +273,7 @@ mod tests {
     #[test]
     fn test_notify_assigned_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         // Just verify it doesn't panic (no email sent since factory is None)
         notifier.notify_assigned(&task);
@@ -262,7 +282,7 @@ mod tests {
     #[test]
     fn test_notify_review_needed_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_review_needed(&task);
     }
@@ -270,7 +290,7 @@ mod tests {
     #[test]
     fn test_notify_approved_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_approved(&task);
     }
@@ -278,7 +298,7 @@ mod tests {
     #[test]
     fn test_notify_rejected_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_rejected(&task, "need more data");
     }
@@ -286,7 +306,7 @@ mod tests {
     #[test]
     fn test_notify_blocked_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_blocked(&task, "worker@t.io");
     }
@@ -294,7 +314,7 @@ mod tests {
     #[test]
     fn test_notify_unblocked_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_unblocked(&task, "orch@t.io");
     }
@@ -302,7 +322,7 @@ mod tests {
     #[test]
     fn test_notify_cancelled_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_cancelled(&task);
     }
@@ -310,7 +330,7 @@ mod tests {
     #[test]
     fn test_notify_comment_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_comment(&task, "veri@t.io", "looks good");
     }
@@ -318,7 +338,7 @@ mod tests {
     #[test]
     fn test_notify_comment_to_reviewer_when_assignee_comments() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         // assignee comments -> notification goes to reviewer
         notifier.notify_comment(&task, "worker@t.io", "please review");
@@ -327,14 +347,14 @@ mod tests {
     #[test]
     fn test_notify_all_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
     }
 
     #[test]
     fn test_notify_arbitrate_subject() {
         let board = make_board();
-        let notifier = Notifier { email_factory: None, system_id: "test", board: &board };
+        let notifier = Notifier { email_factory: None, system_id: "test", board: &board, gateway_domain: "test.io", tasks: RefCell::new(Vec::new()) };
         let task = make_task();
         notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
     }
