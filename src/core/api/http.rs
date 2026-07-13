@@ -48,6 +48,7 @@ pub fn create_router(
         // API Key CRUD
         .route("/api/v1/key/rotate", post(rotate_own_key))
         .route("/api/v1/inbox", get(agent_inbox))
+        .route("/api/v1/inbox/ack", post(agent_inbox_ack))
         .route("/api/v1/stats/agent/me", get(agent_stats_me))
         .route("/api/v1/admin/api-keys", post(create_api_key))
         .route("/api/v1/admin/api-keys", get(list_api_keys))
@@ -183,11 +184,6 @@ async fn agent_inbox(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
     let own = records.into_iter().filter(|r| r.recipient == *agent_email).collect::<Vec<_>>();
-    // Ack (consume) deliveries in the same request
-    let ids: Vec<String> = own.iter().map(|r| r.id.clone()).collect();
-    if !ids.is_empty() {
-        let _ = state.email_factory.env_factory.db.ack_deliveries(&ids).await;
-    }
     Ok(Json(serde_json::json!({ "pending": own.len(), "deliveries": own })))
 }
 
@@ -208,6 +204,23 @@ async fn agent_stats_me(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
     let pending_count = records.iter().filter(|r| r.recipient == *agent_email).count();
     Ok(Json(serde_json::json!({ "pending_count": pending_count })))
+}
+
+
+/// POST /api/v1/inbox/ack — Agent acknowledges delivery receipt.
+async fn agent_inbox_ack(
+    state: axum::extract::State<HttpState>,
+    api_key: axum::extract::Extension<ApiKeyRecord>,
+    Json(req): Json<AckRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_scope_any(&api_key, &["agent"])?;
+    const MAX_ACK: usize = 200;
+    if req.ids.len() > MAX_ACK {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "too many ids".to_string(), detail: Some(format!("max {} ids", MAX_ACK)) })));
+    }
+    let count = state.email_factory.env_factory.db.ack_deliveries(&req.ids).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
+    Ok(Json(serde_json::json!({ "acked": count })))
 }
 
 
