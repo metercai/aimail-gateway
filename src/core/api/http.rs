@@ -183,6 +183,11 @@ async fn agent_inbox(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) })))?;
     let own = records.into_iter().filter(|r| r.recipient == *agent_email).collect::<Vec<_>>();
+    // Ack (consume) deliveries in the same request
+    let ids: Vec<String> = own.iter().map(|r| r.id.clone()).collect();
+    if !ids.is_empty() {
+        let _ = state.email_factory.env_factory.db.ack_deliveries(&ids).await;
+    }
     Ok(Json(serde_json::json!({ "pending": own.len(), "deliveries": own })))
 }
 
