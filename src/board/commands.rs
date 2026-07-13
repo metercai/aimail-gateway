@@ -30,6 +30,7 @@ pub fn execute_command(
         "unblock" => handle_unblock(conn, notifier, cmd, sender),
         "heartbeat" => handle_heartbeat(conn, cmd, sender),
         "comment" => handle_comment(conn, notifier, cmd, sender),
+        "continue" => handle_continue(conn, notifier, cmd, sender),
         "cancel" => handle_cancel(conn, notifier, cmd, sender),
         "assign" => handle_reassign(conn, notifier, cmd, sender),
         "reassign" => handle_reassign(conn, notifier, cmd, sender),
@@ -374,6 +375,31 @@ fn handle_deadline(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResu
     task.deadline = Some(deadline.to_string());
     task.updated_at = now();
     db::update_task(conn, &task)?;
+    Ok(ok_response(Some(task)))
+}
+
+fn handle_continue(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+    let task_id = extract_task_id(cmd)?;
+    let mut task = db::get_task(conn, &task_id)?;
+    require_assignee(&task, sender)?;
+
+    let progress = cmd.params.as_ref()
+        .and_then(|p| p.get("progress").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let note = cmd.params.as_ref()
+        .and_then(|p| p.get("note").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    task.summary = progress.to_string();
+    task.updated_at = now();
+    db::update_task(conn, &task)?;
+    db::insert_event(conn, &TaskEvent {
+        id: 0, task_id: task.id.clone(), event_type: "continue_request".to_string(),
+        actor: sender.to_string(),
+        payload: Some(serde_json::json!({"progress": progress, "note": note})),
+        created_at: now(),
+    })?;
+    notifier.notify_assigned(&task);
     Ok(ok_response(Some(task)))
 }
 

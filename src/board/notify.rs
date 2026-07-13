@@ -128,20 +128,21 @@ impl Notifier {
     // ── C4: 审阅退回 ──
     pub fn notify_rejected(&self, task: &Task, reason: &str) {
         let subject = format!("[A2A] rejected {}: {}", task.short_id, task.title);
-        let body = format!(
-            "task_id: {}\n审阅人: {}\n原因: {}\n状态: 已退回，请修订后重新 [A2A] complete {}。",
-            task.id,
+        let context = format!(
+            "审阅人: {}\n原因: {}",
             task.reviewer.as_deref().unwrap_or("unknown"),
             reason,
-            task.short_id,
         );
+        let body = self.format_body("审阅退回", task, &context, &format!(
+            "修改后重新 [A2A] complete {}", task.short_id
+        ));
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C5: 阻挡 ──
     pub fn notify_blocked(&self, task: &Task, blocker: &str) {
         let subject = format!("[A2A] blocked {}: {}", task.short_id, task.title);
-        let body = format!("task_id: {}\n阻挡人: {}\n请 Orchestrator 协调处理。", task.id, blocker);
+        let body = self.format_body("任务阻塞", task, &format!("阻挡人: {}", blocker), "Orchestrator 协调处理");
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db("", &task.board_id).unwrap(),
             &task.board_id,
@@ -157,24 +158,22 @@ impl Notifier {
     // ── C6: 解除阻挡 ──
     pub fn notify_unblocked(&self, task: &Task, unblocker: &str) {
         let subject = format!("[A2A] unblocked {}: {}", task.short_id, task.title);
-        let body = format!("task_id: {}\n解除人: {}\n状态: 已解除阻挡，请继续执行。", task.id, unblocker);
+        let body = self.format_body("阻塞解除", task, &format!("解除人: {}", unblocker), "继续执行");
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C7: 取消 ──
     pub fn notify_cancelled(&self, task: &Task) {
         let subject = format!("[A2A] cancelled {}: {}", task.short_id, task.title);
-        let body = format!("task_id: {}\n任务已取消，请停止工作等待新分配。", task.id);
+        let body = self.format_body("任务取消", task, "已终止", "停止工作等待新分配");
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C8: 项目输出 ──
         pub fn notify_output(&self, task: &Task) {
         let subject = format!("[A2A] output: {} {}", self.board_short_id, task.title);
-        let body = format!(
-            "output by: verifier\nboard: {}\ntask: {}\n最终输出: {}\nsummary: {}\n\n请 Human 验收确认。发送 [Confirm] output {} 完成最终验收。",
-            self.board_short_id, task.short_id, task.title, task.summary, self.board_short_id,
-        );
+        let context = format!("最终输出: {}\nsummary: {}", task.title, task.summary);
+        let body = self.format_body("项目输出", task, &context, &format!("[Confirm] output {} — 验收通过", self.board_short_id));
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db("", &self.board_id).unwrap(),
             &self.board_id,
@@ -190,7 +189,7 @@ impl Notifier {
     // ── C9: 评论 ──
     pub fn notify_comment(&self, task: &Task, commenter: &str, text: &str) {
         let subject = format!("[A2A] comment {}: {}", task.short_id, task.title);
-        let body = format!("task_id: {}\n来自: {}\n评论: {}", task.id, commenter, text);
+        let body = self.format_body("新评论", task, &format!("来自: {}\n{}", commenter, text), "直接回复邮件参与讨论");
         let recipient = if commenter == task.assignee {
             task.reviewer.as_deref().unwrap_or("")
         } else {
@@ -215,10 +214,10 @@ impl Notifier {
     // ── 仲裁请求 ──
     pub fn notify_arbitrate(&self, task: Option<&Task>, requester: &str, admin_email: &str, dispute: &str) {
         let task_info = task
-            .map(|t| format!("task: {} ({})", t.short_id, t.title))
+            .map(|t| format!("任务: {} ({})", t.short_id, t.title))
             .unwrap_or_default();
         let subject = format!("[A2A] arbitrate: {}", self.board_short_id);
-        let body = format!("仲裁请求来自: {}\n{}\n争议: {}", requester, task_info, dispute);
+        let body = format!("仲裁请求\n来自: {}\n{}\n争议: {}", requester, task_info, dispute);
         if !admin_email.is_empty() {
             self.create_email(admin_email, &subject, &body);
         }
