@@ -285,8 +285,8 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
             // Send individual invite emails with board_token and gateway_url
             for (email, token) in &member_invites {
                 let invite_body = format!(
-                    "You have been invited to board: {}\n\nGateway: {}\nBoard ID: {}\nBoard Email: {}\nYour token: {}",
-                    short_id, self.gateway_url, board_id, board_email, token
+                    "── A2A Board ──\n\nBoard 邀请\n  看板: {}\n  Board Email: {}\n\n── 信息 ──\nAPI: {}\nBoard ID: {}\nToken: {}",
+                    short_id, board_email, self.gateway_url, board_id, token
                 );
                 let invite_subject = format!("[A2A] invite: {}", short_id);
                 let _ = self.email_factory.create_outbound(
