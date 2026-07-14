@@ -84,37 +84,24 @@ pub async fn send_email(
             })?;
     }
 
-    // ── 1a. Per-system rate limit (with whitelist bypass) ──
+    // ── 1a. Per-system rate limit ──
     {
         let system_id = api_key.system_id.as_str();
-        // Check if sender has any whitelist entries (any direction) → rate limit bypass.
-        let whitelisted = state
-            .email_factory
-            .env_factory
-            .count_whitelist_entries(&api_key.email_address, &["to", "from", "all"])
-            .await
-            .unwrap_or(0)
-            > 0;
-        if whitelisted {
-            state.metrics.inc_whitelist_matches();
-        }
-        if !whitelisted {
-            match state.rate_limiter.check(system_id) {
-                Ok(()) => { /* allowed */ }
-                Err(wait) => {
-                    state.metrics.inc_rate_limited();
-                    return Err((
-                        StatusCode::TOO_MANY_REQUESTS,
-                        Json(ErrorResponse {
-                            error: "Rate limit exceeded".to_string(),
-                            detail: Some(format!(
-                                "Too many requests for system '{}'. Retry after {:.0}s",
-                                system_id,
-                                wait.as_secs_f64()
-                            )),
-                        }),
-                    ));
-                }
+        match state.rate_limiter.check(system_id) {
+            Ok(()) => { /* allowed */ }
+            Err(wait) => {
+                state.metrics.inc_rate_limited();
+                return Err((
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(ErrorResponse {
+                        error: "Rate limit exceeded".to_string(),
+                        detail: Some(format!(
+                            "Too many requests for system '{}'. Retry after {:.0}s",
+                            system_id,
+                            wait.as_secs_f64()
+                        )),
+                    }),
+                ));
             }
         }
     }
