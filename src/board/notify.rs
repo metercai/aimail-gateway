@@ -212,6 +212,16 @@ impl Notifier {
         }
     }
 
+    /// Send individual invite to a board member with token and gateway URL.
+    pub fn notify_invite(&self, member_email: &str, board_token: &str, board_id: &str, board_email: &str, short_id: &str) {
+        let body = format!(
+            "── A2A Board ──\n\nBoard 邀请\n  看板: {}\n  Board Email: {}\n\n── 信息 ──\nAPI: {}\nBoard ID: {}\nToken: {}",
+            short_id, board_email, self.gateway_url, board_id, board_token
+        );
+        let subject = format!("[A2A] invite: {}", short_id);
+        self.create_email(member_email, &subject, &body);
+    }
+
     // ── 仲裁请求 ──
     pub fn notify_arbitrate(&self, task: Option<&Task>, requester: &str, admin_email: &str, dispute: &str) {
         let task_info = task

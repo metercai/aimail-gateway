@@ -282,22 +282,21 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 }
             }
 
-            // Send individual invite emails with board_token and gateway_url
+            // Send individual invite emails via Notifier
+            use crate::board::notify::Notifier;
+            let invite_notifier = Notifier {
+                email_factory: Some(self.email_factory.clone()),
+                system_id: self.system_id.clone(),
+                board_short_id: short_id.clone(),
+                board_email: board_email.clone(),
+                board_id: board_id.clone(),
+                gateway_domain: self.gateway_domain.clone(),
+                gateway_url: self.gateway_url.clone(),
+                attachments_json: None,
+                tasks: RefCell::new(Vec::new()),
+            };
             for (email, token) in &member_invites {
-                let invite_body = format!(
-                    "── A2A Board ──\n\nBoard 邀请\n  看板: {}\n  Board Email: {}\n\n── 信息 ──\nAPI: {}\nBoard ID: {}\nToken: {}",
-                    short_id, board_email, self.gateway_url, board_id, token
-                );
-                let invite_subject = format!("[A2A] invite: {}", short_id);
-                let _ = self.email_factory.create_outbound(
-                    &format!("a2a-invite-{}", uuid::Uuid::new_v4()),
-                    &self.system_id,
-                    &format!("{} <{}>", short_id, board_email),
-                    email,
-                    &invite_subject,
-                    &invite_body,
-                    None, None, None, 3,
-                );
+                invite_notifier.notify_invite(email, token, &board_id, &board_email, &short_id);
             }
 
             // Inject board context for downstream (B flow)
