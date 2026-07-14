@@ -17,6 +17,7 @@ pub struct Notifier {
     pub board_email: String,
     pub board_id: String,
     pub gateway_domain: String,
+    pub gateway_url: String,
     pub attachments_json: Option<String>,
     pub tasks: RefCell<Vec<JoinHandle<()>>>,
 }

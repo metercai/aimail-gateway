@@ -186,24 +186,27 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 db::create_board(&conn, &board).ok();
             }
 
-            // Register members
+            // Register members and collect invite info
+            let mut member_invites: Vec<(String, String)> = Vec::new();
             if let Some(members) = members {
                 for m in members {
                     let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                     let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("worker");
                     let display = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(email);
                     if !email.is_empty() {
+                        let token = db::generate_board_token();
                         let member = Member {
                             email: email.to_string(),
                             role: role.to_string(),
                             display_name: display.to_string(),
                             board_id: board_id.clone(),
-                            board_token: Some(db::generate_board_token()),
+                            board_token: Some(token.clone()),
                             joined_at: Some(chrono::Utc::now().to_rfc3339()),
                             domains: None,
                             capability_snapshot: None,
                         };
                         db::add_member(&conn, &member).ok();
+                        member_invites.push((email.to_string(), token));
                     }
                 }
             }
@@ -251,20 +254,13 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 }).collect()).unwrap_or_default();
 
                 let notify_body = format!(
-                    "项目: {} ({})
-Board Email: {}
-Board ID: {}
-
-团队成员:
-{}
-
-请将团队成员的邮件地址加入你的联系人中。",
+                    "项目: {} ({})\nBoard Email: {}\nBoard ID: {}\nGateway: {}\n\n团队成员:\n{}",
                     short_id,
                     description,
                     board_email,
                     board_id,
-                    members_list.join("
-"),
+                    self.gateway_url,
+                    members_list.join("\n"),
                 );
                 let notify_subject = format!("[A2A] notice: Board {} created — {}", short_id, description.clone());
 
@@ -284,6 +280,24 @@ Board ID: {}
                         }
                     }
                 }
+            }
+
+            // Send individual invite emails with board_token and gateway_url
+            for (email, token) in &member_invites {
+                let invite_body = format!(
+                    "You have been invited to board: {}\n\nGateway: {}\nBoard ID: {}\nBoard Email: {}\nYour token: {}",
+                    short_id, self.gateway_url, board_id, board_email, token
+                );
+                let invite_subject = format!("[A2A] invite: {}", short_id);
+                let _ = self.email_factory.create_outbound(
+                    &format!("a2a-invite-{}", uuid::Uuid::new_v4()),
+                    &self.system_id,
+                    &format!("{} <{}>", short_id, board_email),
+                    email,
+                    &invite_subject,
+                    &invite_body,
+                    None, None, None, 3,
+                );
             }
 
             // Inject board context for downstream (B flow)
@@ -369,6 +383,7 @@ Board ID: {}
                 board_email: board.board_email.clone(),
                 board_id: board.id.clone(),
                 gateway_domain: self.gateway_domain.clone(),
+                gateway_url: self.gateway_url.clone(),
                 attachments_json: attachments_json.clone(),
                 tasks: RefCell::new(Vec::new()),
             };

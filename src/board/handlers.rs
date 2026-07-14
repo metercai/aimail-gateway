@@ -18,13 +18,7 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
 fn verify_board_token(headers: &HeaderMap, storage_path: &str, board_id: &str) -> Option<String> {
     let token = extract_token(headers)?;
     let conn = db::open_board_db(storage_path, board_id).ok()?;
-    let members = db::list_members(&conn, board_id).ok()?;
-    for m in &members {
-        if m.board_token.as_deref() == Some(token) {
-            return Some(m.email.clone());
-        }
-    }
-    None
+    db::verify_member_token(&conn, board_id, token).ok().flatten()
 }
 
 pub async fn handle_list_tasks(
