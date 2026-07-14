@@ -290,11 +290,11 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
 }
 
 /// Get role permissions for a board (from role_permissions table).
-pub fn get_role_permissions(conn: &Connection, board_id: &str) -> AppResult<Vec<(String, Vec<String>)>> {
+pub fn get_role_permissions(conn: &Connection, _board_id: &str) -> AppResult<Vec<(String, Vec<String>)>> {
     let mut stmt = conn.prepare(
-        "SELECT role, verb FROM role_permissions WHERE board_id = ?1"
+        "SELECT role, verb FROM role_permissions"
     )?;
-    let rows: Vec<_> = stmt.query_map(params![board_id], |row| {
+    let rows: Vec<_> = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?.collect::<rusqlite::Result<Vec<_>>>()?;
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
