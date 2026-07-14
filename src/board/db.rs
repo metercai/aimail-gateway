@@ -7,6 +7,7 @@ use crate::board::models::*;
 use crate::core::errors::AppResult;
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 /// Open or create a board database by board_id.
 pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection> {
@@ -42,6 +43,7 @@ fn init_schema(conn: &Connection) -> AppResult<()> {
             email TEXT PRIMARY KEY,
             role TEXT NOT NULL,
             display_name TEXT NOT NULL,
+            board_token TEXT,
             board_id TEXT REFERENCES boards(id),
             joined_at TEXT,
             domains TEXT,
@@ -181,18 +183,26 @@ pub fn short_id_exists(conn: &Connection, short_id: &str) -> AppResult<bool> {
 
 pub fn add_member(conn: &Connection, member: &Member) -> AppResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO board_members (email, role, display_name, board_id, joined_at, domains)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO board_members (email, role, display_name, board_id, board_token, joined_at, domains)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             member.email,
             member.role,
             member.display_name,
             member.board_id,
+            member.board_token,
             member.joined_at,
             member.domains.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default()),
         ],
     )?;
     Ok(())
+}
+
+/// Generate a board token: bdt_ + 32 hex chars.
+pub fn generate_board_token() -> String {
+    use rand::Rng;
+    let bytes: [u8; 16] = rand::thread_rng().gen();
+    format!("bdt_{}", hex::encode(bytes))
 }
 
 
@@ -230,8 +240,8 @@ pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppRe
 
 pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<Option<Member>> {
     let mut stmt = conn.prepare(
-        "SELECT email, role, display_name, board_id, joined_at, domains, capability_snapshot
-         FROM board_members WHERE board_id = ?1 AND email = ?2",
+        "SELECT email, role, display_name, board_token, board_id, joined_at, domains, capability_snapshot
+     FROM board_members WHERE board_id = ?1 AND email = ?2",
     )?;
     let mut rows = stmt.query(params![board_id, email])?;
     if let Some(row) = rows.next()? {
@@ -239,12 +249,13 @@ pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<O
             email: row.get(0)?,
             role: row.get(1)?,
             display_name: row.get(2)?,
-            board_id: row.get(3)?,
-            joined_at: row.get(4)?,
+            board_token: row.get(3)?,
+            board_id: row.get(4)?,
+            joined_at: row.get(5)?,
             domains: row
-                .get::<_, Option<String>>(5)?
+                .get::<_, Option<String>>(6)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-            capability_snapshot: row.get(6)?,
+            capability_snapshot: row.get(7)?,
         }))
     } else {
         Ok(None)
@@ -253,7 +264,7 @@ pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<O
 
 pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>> {
     let mut stmt = conn.prepare(
-        "SELECT email, role, display_name, board_id, joined_at, domains, capability_snapshot
+        "SELECT email, role, display_name, board_token, board_id, joined_at, domains, capability_snapshot
          FROM board_members WHERE board_id = ?1",
     )?;
     let rows = stmt.query_map(params![board_id], |row| {
@@ -261,12 +272,13 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
             email: row.get(0)?,
             role: row.get(1)?,
             display_name: row.get(2)?,
-            board_id: row.get(3)?,
-            joined_at: row.get(4)?,
+            board_token: row.get(3)?,
+            board_id: row.get(4)?,
+            joined_at: row.get(5)?,
             domains: row
-                .get::<_, Option<String>>(5)?
+                .get::<_, Option<String>>(6)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-            capability_snapshot: row.get(6)?,
+            capability_snapshot: row.get(7)?,
         })
     })?;
     let mut members = Vec::new();
@@ -274,6 +286,30 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
         members.push(r?);
     }
     Ok(members)
+}
+
+/// Get role permissions for a board (from role_permissions table).
+pub fn get_role_permissions(conn: &Connection, board_id: &str) -> AppResult<Vec<(String, Vec<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, verb FROM role_permissions WHERE board_id = ?1"
+    )?;
+    let rows: Vec<_> = stmt.query_map(params![board_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for (role, verb) in rows {
+        map.entry(role).or_default().push(verb);
+    }
+    Ok(map.into_iter().collect())
+}
+
+/// Record heartbeat by updating task updated_at.
+pub fn update_task_updated_at(conn: &Connection, task_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE tasks SET updated_at = datetime('now') WHERE id = ?1",
+        params![task_id],
+    )?;
+    Ok(())
 }
 
 // ── Task CRUD ─────────────────────────────────────────────────────────
@@ -531,6 +567,7 @@ mod tests {
             role: role.to_string(),
             display_name: email.to_string(),
             board_id: board_id.to_string(),
+            board_token: Some("test-token".into()),
             joined_at: None,
             domains: None,
             capability_snapshot: None,

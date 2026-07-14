@@ -198,6 +198,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                             role: role.to_string(),
                             display_name: display.to_string(),
                             board_id: board_id.clone(),
+                            board_token: Some(db::generate_board_token()),
                             joined_at: Some(chrono::Utc::now().to_rfc3339()),
                             domains: None,
                             capability_snapshot: None,

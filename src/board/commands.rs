@@ -635,6 +635,7 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
                 role: role.to_string(),
                 display_name: display_name.to_string(),
                 board_id: board_id.clone(),
+                board_token: Some(db::generate_board_token()),
                 joined_at: Some(ts.clone()),
                 domains: None,
                 capability_snapshot: None,

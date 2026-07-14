@@ -52,6 +52,7 @@ pub struct Member {
     pub role: String,
     pub display_name: String,
     pub board_id: String,
+    pub board_token: Option<String>,
     pub joined_at: Option<String>,
     pub domains: Option<Vec<String>>,
     pub capability_snapshot: Option<String>,
