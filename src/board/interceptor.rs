@@ -17,9 +17,7 @@ use std::sync::Arc;
 pub struct A2aInterceptor {
     pub email_factory: Arc<EmailFactory>,
     pub attachment_factory: Arc<AttachmentFactory>,
-    pub system_id: String,
     pub storage_path: String,
-    pub gateway_domain: String,
     pub gateway_url: String,
     pub board_quota: Arc<dyn BoardQuotaChecker>,
 }
@@ -28,18 +26,14 @@ impl A2aInterceptor {
     pub fn new(
         email_factory: Arc<EmailFactory>,
         attachment_factory: Arc<AttachmentFactory>,
-        system_id: &str,
         storage_path: &str,
-        gateway_domain: &str,
         gateway_url: &str,
         board_quota: Arc<dyn BoardQuotaChecker>,
     ) -> Self {
         Self {
             email_factory,
             attachment_factory,
-            system_id: system_id.to_string(),
             storage_path: storage_path.to_string(),
-            gateway_domain: gateway_domain.to_string(),
             gateway_url: gateway_url.to_string(),
             board_quota,
         }
@@ -631,8 +625,6 @@ pub fn register(
     email_factory: &std::sync::Arc<crate::core::email::factory::EmailFactory>,
     attachment_factory: &std::sync::Arc<AttachmentFactory>,
     storage_path: &str,
-    system_id: &str,
-    gateway_domain: &str,
     gateway_url: &str,
     board_quota: Arc<dyn BoardQuotaChecker>,
 ) {
@@ -640,9 +632,7 @@ pub fn register(
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
         email_factory.clone(),
         attachment_factory.clone(),
-        system_id,
         storage_path,
-        gateway_domain,
         gateway_url,
         board_quota.clone(),
     ));
