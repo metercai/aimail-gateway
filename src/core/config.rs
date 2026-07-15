@@ -453,7 +453,7 @@ impl Default for BoardConfig {
             heartbeat_stale_seconds: default_heartbeat_stale(),
             task_timeout_seconds: default_task_timeout(),
             sweeper_interval_seconds: default_sweeper_interval(),
-            max_active_boards: None,
+            max_active_boards: Some(5),
             archive_retention_days: None,
         }
     }
