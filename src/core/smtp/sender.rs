@@ -87,7 +87,6 @@ impl SmtpRelay {
     pub async fn send_email(
         &self,
         record: &EmailRecord,
-        _tenant_id: &str,
         attachment_data: Option<&[(String, String, Vec<u8>)]>,
     ) -> AppResult<()> {
         let html_body = if record.body.is_empty() {

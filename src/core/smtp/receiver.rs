@@ -269,7 +269,11 @@ impl Handler for ConnectionHandler {
         {
             Ok(Some(rec)) => {
                 // Exact match — full address is the domain record
-                self.system_id = Some(rec.system_id.clone());
+                self.system_id = match self.system_id.take() {
+                    None => Some(rec.system_id.clone()),
+                    Some(prev) if prev == rec.system_id => Some(prev),
+                    Some(prev) => Some(format!("{}|{}", prev, rec.system_id)),
+                };
                 self.domain = Some(rec.domain.clone());
                 (full_lower, String::new())
             }
@@ -282,7 +286,11 @@ impl Handler for ConnectionHandler {
                         .block_on(self.email_factory.env_factory.lookup_domain_addr(&base_lower))
                     {
                         Ok(Some(rec)) => {
-                            self.system_id = Some(rec.system_id.clone());
+                            self.system_id = match self.system_id.take() {
+                                None => Some(rec.system_id.clone()),
+                                Some(prev) if prev == rec.system_id => Some(prev),
+                                Some(prev) => Some(format!("{}|{}", prev, rec.system_id)),
+                            };
                             self.domain = Some(rec.domain.clone());
                             (base_lower, p)
                         }

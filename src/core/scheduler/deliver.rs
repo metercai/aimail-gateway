@@ -39,7 +39,7 @@ pub(crate) async fn deliver_smtp(
     let attachment_data = load_attachment_data(record, config, email_factory).await;
 
     match relay
-        .send_email(record, &record.system_id, attachment_data.as_deref())
+        .send_email(record, attachment_data.as_deref())
         .await
     {
         Ok(()) => {
