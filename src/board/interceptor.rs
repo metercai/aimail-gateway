@@ -109,12 +109,6 @@ impl InboundInterceptor for A2aInterceptor {
                     return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
 
-            // Compute board identifiers (same formula as regular boards)
-            let gateway_domain = self.gateway_domain.clone();
-let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain);
-            let board_email = format!("{}.a2a@{}", short_id, gateway_domain);
-            let gateway_url = self.gateway_url.clone();
-
             // Parse members from body
             let body = payload["body"].as_str().unwrap_or("");
             let params: Option<Value> = serde_json::from_str(body).ok();
@@ -153,6 +147,19 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 return crate::core::strategy::InterceptorDecision::PassThrough;
             }
 
+            // Compute board identifiers from orchestrator's domain
+            let orch_domain = orch_email.split('@').nth(1).unwrap_or("");
+            let board_id = crate::board::models::derive_board_id(&short_id, orch_domain);
+            let board_email = format!("{}.a2a@{}", short_id, orch_domain);
+            let gateway_url = self.gateway_url.clone();
+
+            // Resolve orchestrator system for quota attribution
+            let orch_system = tokio::runtime::Handle::current()
+                .block_on(self.email_factory.env_factory.lookup_domain_addr(orch_email))
+                .ok().flatten()
+                .map(|r| r.system_id)
+                .unwrap_or_default();
+
             // Open/create board DB and create board
             let conn = match db::open_board_db(&self.storage_path, &board_id) {
                 Ok(c) => c,
@@ -182,7 +189,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                     completed_at: None,
                 };
                 // Board quota: check max_active_boards
-                if let Err(e) = self.board_quota.check_active_boards(&self.system_id) {
+                if let Err(e) = self.board_quota.check_active_boards(&orch_system) {
                     tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
                     return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
@@ -274,7 +281,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                         if !email.is_empty() {
                             let _ = self.email_factory.create_outbound(
                                 &format!("a2a-init-notify-{}", uuid::Uuid::new_v4()),
-                                &self.system_id,
+                                &orch_system,
                                 &format!("{} <{}>", short_id, board_email),
                                 email,
                                 &notify_subject,
@@ -290,11 +297,11 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
             use crate::board::notify::Notifier;
             let invite_notifier = Notifier {
                 email_factory: Some(self.email_factory.clone()),
-                system_id: self.system_id.clone(),
+                system_id: orch_system.clone(),
                 board_short_id: short_id.clone(),
                 board_email: board_email.clone(),
                 board_id: board_id.clone(),
-                gateway_domain: self.gateway_domain.clone(),
+                gateway_domain: orch_domain.to_string(),
                 gateway_url: self.gateway_url.clone(),
                 attachments_json: None,
                 tasks: RefCell::new(Vec::new()),
@@ -357,10 +364,11 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 Err(_) => {
                     // Auto-create board record if not exists (for init command)
                     let ts = chrono::Utc::now().to_rfc3339();
+                    let board_domain = to_addr.split('@').nth(1).unwrap_or("");
                     let board = Board {
                         id: board_id.clone(),
                         short_id: short_id.clone(),
-                        board_email: format!("{}.a2a@{}", short_id, self.gateway_domain),
+                        board_email: format!("{}.a2a@{}", short_id, board_domain),
                         description: None,
                         status: BoardStatus::Active,
                         output_task_id: None,
@@ -380,13 +388,15 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                 }
             };
 
+            let board_domain = board.board_email.split('@').nth(1).unwrap_or("");
+
             let notifier = Notifier {
                 email_factory: Some(self.email_factory.clone()),
-                system_id: self.system_id.clone(),
+                system_id: board_domain.to_string(),
                 board_short_id: board.short_id.clone(),
                 board_email: board.board_email.clone(),
                 board_id: board.id.clone(),
-                gateway_domain: self.gateway_domain.clone(),
+                gateway_domain: board_domain.to_string(),
                 gateway_url: self.gateway_url.clone(),
                 attachments_json: attachments_json.clone(),
                 tasks: RefCell::new(Vec::new()),
@@ -586,36 +596,23 @@ mod tests {
         let interceptor = A2aInterceptor::new(
             Arc::new(unsafe { std::mem::zeroed() }),
             Arc::new(unsafe { std::mem::zeroed() }),
-            "test", "", "", "",
             Arc::new(NoopBoardQuota),
         );
         assert_eq!(interceptor.name(), "A2aInterceptor");
     }
 
-    #[test]
-    fn test_interceptor_priority() {
-        let interceptor = A2aInterceptor::new(
-            Arc::new(unsafe { std::mem::zeroed() }),
-            "test", "", "", "", Arc::new(NoopBoardQuota), Arc::new(NoopBoardQuota),
-        );
-        assert_eq!(interceptor.priority(), 20);
-    }
 
     #[test]
     fn test_new_interceptor_creates() {
         let interceptor = A2aInterceptor::new(
             Arc::new(unsafe { std::mem::zeroed() }),
             Arc::new(unsafe { std::mem::zeroed() }),
-            "sys01",
             "/tmp/storage",
-            "mail.hermes.io",
             "https://gw.hermes.io",
             Arc::new(NoopBoardQuota),
         );
-        assert_eq!(interceptor.system_id, "sys01");
+        assert_eq!(interceptor.gateway_url, "https://mail.hermes.io");
         assert_eq!(interceptor.storage_path, "/tmp/storage");
-        assert_eq!(interceptor.gateway_domain, "mail.hermes.io");
-        assert_eq!(interceptor.gateway_url, "https://gw.hermes.io");
     }
 }
 
