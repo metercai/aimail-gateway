@@ -115,7 +115,7 @@ impl BoardSweeper {
                                 let elapsed = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
                                 if elapsed > self.config.board.task_timeout_seconds as i64 {
                                     tracing::info!("[a2a_board] sweeper: archiving board {}", board.short_id);
-                                    // TODO(P9): archive_board(&conn, &board_id);
+                                    db::archive_board(&conn, &board_id).ok();
                                 }
                             }
                         }

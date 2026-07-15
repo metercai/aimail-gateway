@@ -193,6 +193,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                     return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
                 db::create_board(&conn, &board).ok();
+                self.board_quota.invalidate_cache();
             }
 
             // Register members and collect invite info
@@ -380,6 +381,7 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                         completed_at: None,
                     };
                     let _ = db::create_board(&conn, &board);
+                self.board_quota.invalidate_cache();
                     board
                 }
             };
