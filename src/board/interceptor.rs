@@ -2,6 +2,7 @@
 
 use crate::board::commands;
 use crate::board::db;
+use crate::board::quota::{BoardQuotaChecker, NoopBoardQuota};
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
 use crate::board::notify::Notifier;
 use crate::core::email::factory::AttachmentFactory;
@@ -20,6 +21,7 @@ pub struct A2aInterceptor {
     pub storage_path: String,
     pub gateway_domain: String,
     pub gateway_url: String,
+    pub board_quota: Arc<dyn BoardQuotaChecker>,
 }
 
 impl A2aInterceptor {
@@ -30,6 +32,7 @@ impl A2aInterceptor {
         storage_path: &str,
         gateway_domain: &str,
         gateway_url: &str,
+        board_quota: Arc<dyn BoardQuotaChecker>,
     ) -> Self {
         Self {
             email_factory,
@@ -38,6 +41,7 @@ impl A2aInterceptor {
             storage_path: storage_path.to_string(),
             gateway_domain: gateway_domain.to_string(),
             gateway_url: gateway_url.to_string(),
+            board_quota,
         }
     }
 
@@ -183,6 +187,11 @@ let board_id = crate::board::models::derive_board_id(&short_id, &gateway_domain)
                     created_at: chrono::Utc::now().to_rfc3339(),
                     completed_at: None,
                 };
+                // Board quota: check max_active_boards
+                if let Err(e) = self.board_quota.check_active_boards(&self.system_id) {
+                    tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
                 db::create_board(&conn, &board).ok();
             }
 
@@ -579,8 +588,10 @@ mod tests {
     #[test]
     fn test_interceptor_name() {
         let interceptor = A2aInterceptor::new(
-            Arc::new(unsafe { std::mem::zeroed() }), // 测试中不使用
+            Arc::new(unsafe { std::mem::zeroed() }),
+            Arc::new(unsafe { std::mem::zeroed() }),
             "test", "", "", "",
+            Arc::new(NoopBoardQuota),
         );
         assert_eq!(interceptor.name(), "A2aInterceptor");
     }
@@ -589,7 +600,7 @@ mod tests {
     fn test_interceptor_priority() {
         let interceptor = A2aInterceptor::new(
             Arc::new(unsafe { std::mem::zeroed() }),
-            "test", "", "", "",
+            "test", "", "", "", Arc::new(NoopBoardQuota), Arc::new(NoopBoardQuota),
         );
         assert_eq!(interceptor.priority(), 20);
     }
@@ -598,10 +609,12 @@ mod tests {
     fn test_new_interceptor_creates() {
         let interceptor = A2aInterceptor::new(
             Arc::new(unsafe { std::mem::zeroed() }),
+            Arc::new(unsafe { std::mem::zeroed() }),
             "sys01",
             "/tmp/storage",
             "mail.hermes.io",
             "https://gw.hermes.io",
+            Arc::new(NoopBoardQuota),
         );
         assert_eq!(interceptor.system_id, "sys01");
         assert_eq!(interceptor.storage_path, "/tmp/storage");
@@ -619,6 +632,7 @@ pub fn register(
     system_id: &str,
     gateway_domain: &str,
     gateway_url: &str,
+    board_quota: Arc<dyn BoardQuotaChecker>,
 ) {
     use crate::core::strategy::InboundInterceptor;
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
@@ -628,6 +642,7 @@ pub fn register(
         storage_path,
         gateway_domain,
         gateway_url,
+        board_quota.clone(),
     ));
     email_factory.env_factory.register_interceptor(a2a as std::sync::Arc<dyn InboundInterceptor>);
 

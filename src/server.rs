@@ -10,6 +10,7 @@ use amail_base::core::config::Config;
 use amail_base::core::email::factory::AttachmentFactory;
 use amail_base::core::email::factory::EmailFactory;
 use amail_base::core::errors::{AppError, AppResult};
+use amail_base::board::quota::{BoardQuotaChecker, NoopBoardQuota};
 use amail_base::core::storage::Database;
 
 use amail_base::core::api::http::create_router;
@@ -128,12 +129,13 @@ impl Server {
         );
 
         amail_base::board::interceptor::register(
-                &email_factory,
-                &attachment_factory,
-                config.storage.path.to_str().unwrap_or(""),
-                "",
-                &gw_domain,
-                &endpoint,
+            &email_factory,
+            &attachment_factory,
+            config.storage.path.to_str().unwrap_or(""),
+            "",
+            &gw_domain,
+            &endpoint,
+            Arc::new(NoopBoardQuota),
             );
         }
 
