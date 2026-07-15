@@ -221,6 +221,22 @@ impl InboundInterceptor for A2aInterceptor {
                     }
                 }
             }
+            // Auto-whitelist: board members can send to board address
+            if let Some(members_arr) = members {
+                for m in members_arr {
+                    let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
+                    if !email.is_empty() {
+                        let _ = self.email_factory.env_factory.create_whitelist_entry_full(
+                            &board_email,
+                            "from",
+                            email,
+                            "board",
+                            None,
+                            Some("board member auto-whitelist"),
+                        ).await;
+                    }
+                }
+            }
 
             // Validate: sender must be an owner member
             let sender_is_owner = db::get_member(&conn, &board_id, &sender)
