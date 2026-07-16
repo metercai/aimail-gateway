@@ -802,11 +802,13 @@ pub struct MailFactories {
 
 impl MailFactories {
     /// Create both factories from shared dependencies.
+    /// `storage_path` is the base storage directory; attachments dir is derived internally.
     pub fn new(
         db: Arc<Database>,
-        attachments_dir: PathBuf,
+        storage_path: &std::path::Path,
         system_store: Arc<dyn SystemStore>,
     ) -> Self {
+        let attachments_dir = storage_path.join("attachments");
         Self {
             email: Arc::new(EmailFactory::new(db.clone(), attachments_dir.clone(), system_store)),
             attachment: Arc::new(AttachmentFactory::new(db, attachments_dir)),

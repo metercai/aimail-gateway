@@ -99,7 +99,7 @@ impl Server {
         let http_state = amail_base::core::api::types::HttpState {
             factories: amail_base::core::email::factory::MailFactories::new(
                 db_arc.clone(),
-                config.storage.attachments_dir(),
+                &config.storage.path,
                 system_store.clone(),
             ),
             metrics: metrics.clone(),
