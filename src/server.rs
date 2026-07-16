@@ -12,7 +12,6 @@ use amail_base::core::storage::Database;
 
 use amail_base::core::api::http::create_router;
 use amail_base::core::api::monitor::Metrics;
-use amail_base::core::scheduler;
 use amail_base::core::strategy::RouterHook;
 
 /// amail-gateway server: SMTP, HTTP, and retry worker.
@@ -125,15 +124,13 @@ impl Server {
         let http_state_for_worker = http_state.clone();
         let router = create_router(http_state, router_hook, None, None);
 
-        let inflight = scheduler::new_inflight_set();
         let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
         let retry_handle = amail_base::core::server::spawn_retry_worker(
             &http_state_for_worker,
-            amail_base::core::server::RetryDependencies {
+            amail_base::core::server::RetryDependencies::new(
                 trigger_rx,
-                inflight,
-                dns_resolver: Some(dns_resolver.clone()),
-            },
+                Some(dns_resolver.clone()),
+            ),
             cancel.clone(),
         );
         let http_handle =

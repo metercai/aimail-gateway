@@ -207,6 +207,20 @@ pub struct RetryDependencies {
     pub dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
 }
 
+impl RetryDependencies {
+    /// Create dependencies; `inflight` is initialized automatically.
+    pub fn new(
+        trigger_rx: tokio::sync::mpsc::Receiver<String>,
+        dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
+    ) -> Self {
+        Self {
+            trigger_rx,
+            inflight: crate::core::scheduler::new_inflight_set(),
+            dns_resolver,
+        }
+    }
+}
+
 // ── retry worker ──────────────────────────────────────────────────
 
 pub fn spawn_retry_worker(
