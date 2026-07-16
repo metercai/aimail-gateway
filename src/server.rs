@@ -16,9 +16,7 @@ use amail_base::core::storage::Database;
 use amail_base::core::api::http::create_router;
 use amail_base::core::api::monitor::Metrics;
 use amail_base::core::scheduler;
-use amail_base::core::strategy::{MessageSigner, RouterHook};
-
-use amail_base::base::strategy::BaseMessageSigner;
+use amail_base::core::strategy::RouterHook;
 
 /// amail-gateway server: SMTP, HTTP, and retry worker.
 pub struct Server {
@@ -127,8 +125,6 @@ impl Server {
             );
         }
 
-        let dkim_signer: Arc<dyn MessageSigner> = Arc::new(BaseMessageSigner);
-
         let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
         let http_state = amail_base::core::api::types::HttpState {
             email_factory: (*email_factory).clone(),
@@ -147,21 +143,20 @@ impl Server {
             cancel.clone(),
         )?;
 
+        // Clone http_state before create_router moves it
+        let http_state_for_worker = http_state.clone();
         let router = create_router(http_state, router_hook, None, None);
 
-        let metrics_for_worker = (*metrics).clone();
         let inflight = scheduler::new_inflight_set();
         let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
         let retry_handle = amail_base::core::server::spawn_retry_worker(
-            (*email_factory).clone(),
-            (*attachment_factory).clone(),
-            config.clone(),
-            trigger_rx,
-            metrics_for_worker,
+            &http_state_for_worker,
+            amail_base::core::server::RetryDependencies {
+                trigger_rx,
+                inflight,
+                dns_resolver: Some(dns_resolver.clone()),
+            },
             cancel.clone(),
-            inflight,
-            Some(dkim_signer.clone() as Arc<dyn MessageSigner>),
-            Some(dns_resolver.clone()),
         );
         let http_handle =
             amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
