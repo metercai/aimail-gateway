@@ -1,7 +1,7 @@
-//! C 流通知 — Board → 成员的通知邮件。
+//! C-flow notifications — Board → member notification emails.
 //!
-//! 每个通知创建一封出站邮件记录（EmailRecord），调度器自动投递。
-//! 投递路径由调度器决定（同 gateway 走 webhook，外部走 SMTP relay）。
+//! Each notification creates an outbound EmailRecord; scheduler handles delivery.
+//! Delivery path scheduler-determined (webhook for same-gateway, SMTP relay for external).
 
 use crate::board::models::*;
 use crate::core::email::factory::EmailFactory;
@@ -99,7 +99,7 @@ impl Notifier {
         }
     }
 
-    // ── C1: 任务分配 ──
+    // ── C1: task assignment ──
     pub fn notify_assigned(&self, task: &Task) {
         let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
         let context = format!(
@@ -118,7 +118,7 @@ impl Notifier {
         self.create_email(&task.assignee, &subject, &body);
     }
 
-    // ── C2: 待审阅 ──
+    // ── C2: pending review ──
     pub fn notify_review_needed(&self, task: &Task) {
         let subject = format!("[A2A] review-needed {}: {}", task.short_id, task.title);
         let context = format!("完成人: {}\n产出物: {}", task.assignee, task.summary,);
@@ -136,7 +136,7 @@ impl Notifier {
         }
     }
 
-    // ── C3: 审阅通过 ──
+    // ── C3: review approved ──
     pub fn notify_approved(&self, task: &Task) {
         let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
         let context = format!("审阅人: {}", task.reviewer.as_deref().unwrap_or("(无)"));
@@ -144,7 +144,7 @@ impl Notifier {
         self.create_email(&task.assignee, &subject, &body);
     }
 
-    // ── C4: 审阅退回 ──
+    // ── C4: review rejected ──
     pub fn notify_rejected(&self, task: &Task, reason: &str) {
         let subject = format!("[A2A] rejected {}: {}", task.short_id, task.title);
         let context = format!(
@@ -161,7 +161,7 @@ impl Notifier {
         self.create_email(&task.assignee, &subject, &body);
     }
 
-    // ── C5: 阻挡 ──
+    // ── C5: blocked ──
     pub fn notify_blocked(&self, task: &Task, blocker: &str) {
         let subject = format!("[A2A] blocked {}: {}", task.short_id, task.title);
         let body = self.format_body(
@@ -182,7 +182,7 @@ impl Notifier {
         }
     }
 
-    // ── C6: 解除阻挡 ──
+    // ── C6: unblocked ──
     pub fn notify_unblocked(&self, task: &Task, unblocker: &str) {
         let subject = format!("[A2A] unblocked {}: {}", task.short_id, task.title);
         let body = self.format_body(
@@ -194,14 +194,14 @@ impl Notifier {
         self.create_email(&task.assignee, &subject, &body);
     }
 
-    // ── C7: 取消 ──
+    // ── C7: cancelled ──
     pub fn notify_cancelled(&self, task: &Task) {
         let subject = format!("[A2A] cancelled {}: {}", task.short_id, task.title);
         let body = self.format_body("任务取消", task, "已终止", "停止工作等待新分配");
         self.create_email(&task.assignee, &subject, &body);
     }
 
-    // ── C8: 项目输出 ──
+    // ── C8: project output ──
     pub fn notify_output(&self, task: &Task) {
         let subject = format!("[A2A] output: {} {}", self.board_short_id, task.title);
         let context = format!("最终输出: {}\nsummary: {}", task.title, task.summary);
@@ -223,7 +223,7 @@ impl Notifier {
         }
     }
 
-    // ── C9: 评论 ──
+    // ── C9: comment ──
     pub fn notify_comment(&self, task: &Task, commenter: &str, text: &str) {
         let subject = format!("[A2A] comment {}: {}", task.short_id, task.title);
         let body = self.format_body(
@@ -242,7 +242,7 @@ impl Notifier {
         }
     }
 
-    // ── C10: 全员通知 ──
+    // ── C10: broadcast ──
     pub fn notify_all(&self, board_id: &str, message: &str) {
         let subject = format!("[A2A] notice: {} {}", self.board_short_id, message);
         if let Ok(members) = crate::board::db::list_members(
@@ -270,7 +270,7 @@ impl Notifier {
         self.create_email(member_email, &subject, &body);
     }
 
-    // ── 仲裁请求 ──
+    // ── arbitration request ──
     pub fn notify_arbitrate(
         &self,
         task: Option<&Task>,

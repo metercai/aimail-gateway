@@ -1170,7 +1170,7 @@ mod tests {
         }
 
         let notifier = Notifier {
-            email_factory: todo!(), // 单元测试中不发送通知
+            email_factory: todo!(), // unit test: skip notification
             system_id: "test",
             board: &board,
             gateway_domain: "test.io",

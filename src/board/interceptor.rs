@@ -1,4 +1,4 @@
-//! A2aInterceptor — 拦截入站邮件，处理 A 流指令 / 注入 B 流身份。
+//! A2aInterceptor — intercepts inbound emails, processes A-flow commands / injects B-flow identity.
 
 use crate::board::commands;
 use crate::board::db;
@@ -489,10 +489,10 @@ impl InboundInterceptor for A2aInterceptor {
             Err(_) => return crate::core::strategy::InterceptorDecision::PassThrough,
         };
 
-        // ── A 流: [A2A] prefix → Rust 闭环 ──
+        // ── A-flow: [A2A] prefix → Rust closed loop ──
         if let Some(rest) = subject.strip_prefix("[A2A] ") {
             let verb = rest.split_whitespace().next().unwrap_or("").to_string();
-            // Only A类 verbs forward attachments; B类 clear
+            // Only A-flow verbs forward attachments; B-flow clears
             let carry_verbs = ["complete", "output", "comment", "create", "arbitrate"];
             let attachments_json: Option<String> = if carry_verbs.contains(&verb.as_str()) {
                 raw_attachments_json.clone()
@@ -600,7 +600,7 @@ impl InboundInterceptor for A2aInterceptor {
             return crate::core::strategy::InterceptorDecision::Handled;
         }
 
-        // ── Human 审批: TO 含 board 地址 + [Confirm] → 更新 board 属性 ──
+        // ── Human approval: TO has board address + [Confirm] → update board ──
         {
             let to_list = payload["to"].as_array().cloned().unwrap_or_default();
             let mut board_in_to = None;
@@ -676,7 +676,7 @@ impl InboundInterceptor for A2aInterceptor {
             }
         }
 
-        // ── 会话流: CC 含 board 地址 + FROM/TO 均为 member → 注入身份 ──
+        // ── Session flow: CC has board address + FROM/TO both members → inject identity ──
         {
             let cc_list = payload["cc"].as_array().cloned().unwrap_or_default();
             let mut detected_board = None;
@@ -724,7 +724,7 @@ impl InboundInterceptor for A2aInterceptor {
             }
         }
 
-        // ── 会话流 fallback: X-Board-* headers (outbound external path) ──
+        // ── Session flow fallback: X-Board-* headers (outbound external path) ──
         crate::core::strategy::InterceptorDecision::PassThrough
     }
 }

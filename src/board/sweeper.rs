@@ -1,7 +1,7 @@
 //! Board lifecycle management — periodic scans for stale heartbeats,
 //! stale tasks, and completed boards.
 //!
-//! Called from the scheduler batch loop (`core/scheduler/flows.rs`) on
+//! Called from the scheduler batch loop (`core/scheduler/batch.rs`) on
 //! configurable intervals. Each board has its own independent SQLite file
 //! under `<storage_path>/a2a_board/<board_id>/`.
 

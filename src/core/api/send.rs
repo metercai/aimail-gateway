@@ -328,8 +328,8 @@ pub async fn send_email(
         merged_headers.entry(key).or_insert_with(|| persona.clone());
     }
 
-    // ── a2a_board: 会话流检测（出站） ──
-    // 检查 CC 中是否包含 board 地址，若是则注入 board 身份 headers
+    // ── a2a_board: session flow detection (outbound) ──
+    // Check CC for board addresses; inject board identity headers if found
     if let Some(ref cc_list) = req.cc {
         for cc_addr in cc_list {
             let (cc_base, _) = strip_persona(cc_addr);

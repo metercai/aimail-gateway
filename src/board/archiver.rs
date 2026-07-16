@@ -1,4 +1,4 @@
-//! Board archiver — 7 天自动归档。
+//! Board archiver — 7-day auto-archiving.
 
 use crate::board::db;
 use chrono::Utc;
