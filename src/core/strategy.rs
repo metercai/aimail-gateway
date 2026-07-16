@@ -84,7 +84,6 @@ pub trait RouterHook: Send + Sync {
     fn mount(&self, router: axum::Router) -> axum::Router;
 }
 
-
 // ── InboundInterceptor ─────────────────────────────────────────────────
 
 /// Intercepts inbound emails BEFORE webhook delivery.
@@ -130,11 +129,7 @@ pub trait SystemStore: Send + Sync {
 /// Advanced edition (`FallbackKeyResolver`): exact match → bare-domain fallback.
 #[async_trait]
 pub trait WhitelistKeyResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        db: &Database,
-        addr: &str,
-    ) -> AppResult<Vec<(String, String)>>;
+    async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>>;
 }
 
 // ── ExtensionProviders ─────────────────────────────────────────────

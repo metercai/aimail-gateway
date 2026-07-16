@@ -28,7 +28,7 @@
 //! - SMTP receive (inbound): `check_whitelisted(recipient_email, sender, "from")`
 //! - P0 gate before each: `count_whitelist_entries(addr, [directions])`
 //!   Returns 0 → reject immediately (no whitelist protection).
- 
+
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};

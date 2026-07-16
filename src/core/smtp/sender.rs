@@ -16,9 +16,9 @@ use crate::core::email::storage::EmailRecord;
 use crate::core::email::utils::markdown_to_html;
 use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mime::{build_with_attachments, parse_address};
+use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 use crate::core::smtp::transport::{build_transport, SmtpTransportMode};
 use crate::core::strategy::MessageSigner;
-use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 
 // ── SmtpRelay ─────────────────────────────────────────────────────
 
@@ -67,10 +67,7 @@ impl SmtpRelay {
             SmtpTransportMode::Relay(build_transport(config, hostname)?)
         } else if let Some(resolver) = dns_resolver {
             let mx_overrides = config.mx_dns_override.clone().unwrap_or_default();
-            SmtpTransportMode::DirectMx(Arc::new(MxDelivererImpl::new(
-                resolver,
-                mx_overrides,
-            )))
+            SmtpTransportMode::DirectMx(Arc::new(MxDelivererImpl::new(resolver, mx_overrides)))
         } else {
             return Err(AppError::Config(
                 "No relay config — set relay.smtp_server for SMTP relay delivery".into(),
@@ -279,9 +276,12 @@ impl SmtpRelay {
                 Ok(a) => a,
                 Err(_) => continue,
             };
-            match self.email_factory.env_factory.lookup_domain_addr(
-                r.rsplit('@').next().unwrap_or(r),
-            ).await {
+            match self
+                .email_factory
+                .env_factory
+                .lookup_domain_addr(r.rsplit('@').next().unwrap_or(r))
+                .await
+            {
                 Ok(Some(_)) => {
                     info!(operation="loopback_skip", recipient = %r, "Loopback prevention: skipping internal-domain recipient")
                 }

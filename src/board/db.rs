@@ -6,8 +6,8 @@
 use crate::board::models::*;
 use crate::core::errors::AppResult;
 use rusqlite::{params, Connection, OptionalExtension};
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Open or create a board database by board_id.
 pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection> {
@@ -104,7 +104,6 @@ pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
     )?;
     Ok(())
 }
-
 
 /// Archive a board — set status to Archived.
 pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
@@ -205,9 +204,12 @@ pub fn generate_board_token() -> String {
     format!("bdt_{}", hex::encode(bytes))
 }
 
-
 /// Insert multiple role-permission relationships (from init email).
-pub fn insert_role_permissions(conn: &Connection, _board_id: &str, permissions: &[(String, Vec<String>)]) -> AppResult<()> {
+pub fn insert_role_permissions(
+    conn: &Connection,
+    _board_id: &str,
+    permissions: &[(String, Vec<String>)],
+) -> AppResult<()> {
     for (role, verbs) in permissions {
         for verb in verbs {
             conn.execute(
@@ -273,7 +275,7 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
             email: row.get(0)?,
             role: row.get(1)?,
             display_name: row.get(2)?,
-            
+
             board_id: row.get(3)?,
             joined_at: row.get(4)?,
             domains: row
@@ -290,13 +292,16 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
 }
 
 /// Get role permissions for a board (from role_permissions table).
-pub fn get_role_permissions(conn: &Connection, _board_id: &str) -> AppResult<Vec<(String, Vec<String>)>> {
-    let mut stmt = conn.prepare(
-        "SELECT role, verb FROM role_permissions"
-    )?;
-    let rows: Vec<_> = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?.collect::<rusqlite::Result<Vec<_>>>()?;
+pub fn get_role_permissions(
+    conn: &Connection,
+    _board_id: &str,
+) -> AppResult<Vec<(String, Vec<String>)>> {
+    let mut stmt = conn.prepare("SELECT role, verb FROM role_permissions")?;
+    let rows: Vec<_> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     for (role, verb) in rows {
         map.entry(role).or_default().push(verb);
@@ -307,11 +312,15 @@ pub fn get_role_permissions(conn: &Connection, _board_id: &str) -> AppResult<Vec
 /// Record heartbeat by updating task updated_at.
 
 /// Verify a board token. Returns member email on success.
-pub fn verify_member_token(conn: &Connection, board_id: &str, token: &str) -> AppResult<Option<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT email FROM board_members WHERE board_id = ?1 AND board_token = ?2"
-    )?;
-    let result = stmt.query_row(params![board_id, token], |row| row.get(0))
+pub fn verify_member_token(
+    conn: &Connection,
+    board_id: &str,
+    token: &str,
+) -> AppResult<Option<String>> {
+    let mut stmt =
+        conn.prepare("SELECT email FROM board_members WHERE board_id = ?1 AND board_token = ?2")?;
+    let result = stmt
+        .query_row(params![board_id, token], |row| row.get(0))
         .optional()?;
     Ok(result)
 }
@@ -332,12 +341,21 @@ pub fn create_task(conn: &Connection, task: &Task) -> AppResult<()> {
          reviewer, parent_ids, tags, summary, metadata, created_by, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
-            task.id, task.short_id, task.board_id, task.title, task.body,
-            task.status.to_string(), task.assignee, task.reviewer,
+            task.id,
+            task.short_id,
+            task.board_id,
+            task.title,
+            task.body,
+            task.status.to_string(),
+            task.assignee,
+            task.reviewer,
             serde_json::to_string(&task.parent_ids).unwrap_or_default(),
             serde_json::to_string(&task.tags).unwrap_or_default(),
-            task.summary, task.metadata, task.created_by,
-            task.created_at, task.updated_at,
+            task.summary,
+            task.metadata,
+            task.created_by,
+            task.created_at,
+            task.updated_at,
         ],
     )?;
     Ok(())
@@ -391,8 +409,10 @@ pub fn list_tasks(
     let mut sql = "SELECT id, short_id, board_id, title, body, status, assignee, reviewer,
                    parent_ids, tags, summary, metadata, created_by, created_at, updated_at,
                    completed_at, cancelled_at, deadline
-                   FROM tasks WHERE board_id = ?1".to_string();
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(board_id.to_string())];
+                   FROM tasks WHERE board_id = ?1"
+        .to_string();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(board_id.to_string())];
     let mut param_idx = 2;
 
     if let Some(s) = status_filter {
@@ -406,7 +426,8 @@ pub fn list_tasks(
     }
 
     let mut stmt = conn.prepare(&sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let rows = stmt.query_map(param_refs.as_slice(), |row| {
         Ok(Task {
             id: row.get(0)?,
@@ -417,8 +438,14 @@ pub fn list_tasks(
             status: parse_task_status(&row.get::<_, String>(5)?),
             assignee: row.get(6)?,
             reviewer: row.get(7)?,
-            parent_ids: row.get::<_, String>(8).map(|s| serde_json::from_str(&s).unwrap_or_default()).unwrap_or_default(),
-            tags: row.get::<_, String>(9).map(|s| serde_json::from_str(&s).unwrap_or_default()).unwrap_or_default(),
+            parent_ids: row
+                .get::<_, String>(8)
+                .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                .unwrap_or_default(),
+            tags: row
+                .get::<_, String>(9)
+                .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                .unwrap_or_default(),
             summary: row.get(10)?,
             metadata: row.get(11)?,
             created_by: row.get(12)?,
@@ -481,7 +508,10 @@ pub fn insert_event(conn: &Connection, event: &TaskEvent) -> AppResult<()> {
             event.task_id,
             event.event_type,
             event.actor,
-            event.payload.as_ref().map(|p| serde_json::to_string(p).unwrap_or_default()),
+            event
+                .payload
+                .as_ref()
+                .map(|p| serde_json::to_string(p).unwrap_or_default()),
             event.created_at,
         ],
     )?;
@@ -539,7 +569,6 @@ pub fn next_short_id(conn: &Connection, board_id: &str) -> AppResult<String> {
 pub fn make_task_id(board_id: &str, short_id: &str) -> String {
     format!("t_{}_{}", short_id, &board_id[..8])
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -743,7 +772,7 @@ mod tests {
     #[test]
     fn test_verify_pipeline_integrity_pending() {
         let (conn, board_id) = setup_db();
-        let t1 = make_task(&board_id, "T1", "alice@t.io");  // status=Ready
+        let t1 = make_task(&board_id, "T1", "alice@t.io"); // status=Ready
         create_task(&conn, &t1).unwrap();
         let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
         assert!(!issues.is_empty(), "有未完成 task 时应报告问题");

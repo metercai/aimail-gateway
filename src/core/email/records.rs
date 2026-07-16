@@ -186,7 +186,8 @@ impl EmailRecord {
             None => {
                 // Only emit sender signature if confidence ≥ 0.65.
                 // Rule 4 (bare name, 0.40) is too noisy for machine use.
-                let sig = processed.signature
+                let sig = processed
+                    .signature
                     .filter(|s| s.confidence >= 0.65)
                     .map(|s| s.raw);
                 (processed.body, sig)

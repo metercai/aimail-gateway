@@ -137,7 +137,8 @@ fn extract_bare_name_end(body: &str) -> Option<String> {
         return None;
     }
     // Last non-empty line should look like a title
-    let mut last_lines: Vec<&str> = lines.iter()
+    let mut last_lines: Vec<&str> = lines
+        .iter()
         .rev()
         .filter(|l| !l.trim().is_empty())
         .take(3)
@@ -157,9 +158,24 @@ fn extract_bare_name_end(body: &str) -> Option<String> {
         return None; // likely a sentence
     }
     // Title line hint
-    let title_hints = ["Engineer", "Manager", "Director", "VP", "CTO", "CEO",
-        "Developer", "Designer", "Analyst", "Lead", "Head", "Chief",
-        "President", "Specialist", "Coordinator", "Consultant"];
+    let title_hints = [
+        "Engineer",
+        "Manager",
+        "Director",
+        "VP",
+        "CTO",
+        "CEO",
+        "Developer",
+        "Designer",
+        "Analyst",
+        "Lead",
+        "Head",
+        "Chief",
+        "President",
+        "Specialist",
+        "Coordinator",
+        "Consultant",
+    ];
     let has_title = title_hints.iter().any(|h| last.contains(h));
     if !has_title {
         return None;
@@ -438,7 +454,8 @@ mod tests {
 
     #[test]
     fn test_named_closing_thank_you_for() {
-        let body = "Content.\n\nThank you for choosing HSBC,\n\nSimang Daimari\nInternational Onboarding";
+        let body =
+            "Content.\n\nThank you for choosing HSBC,\n\nSimang Daimari\nInternational Onboarding";
         let (sig, conf) = extract_signature(body);
         assert!(sig.is_some(), "'Thank you for' should match named closing");
         assert!(conf > 0.7);
@@ -461,11 +478,17 @@ mod tests {
     #[test]
     fn test_disclaimer_then_sig() {
         // Disclaimer text before --, signature after. Both should survive.
-        let body = "Body text.\n\nThis email is CONFIDENTIAL.\nRESTRICTED.\n\n-- \nJane Smith\nLegal Dept";
+        let body =
+            "Body text.\n\nThis email is CONFIDENTIAL.\nRESTRICTED.\n\n-- \nJane Smith\nLegal Dept";
         let (sig, conf) = extract_signature(body);
-        assert!(sig.is_some(), "'-- ' sig should be found after disclaimer text");
-        assert!((conf - 0.95).abs() < 0.01, "RFC 3676 confidence expected 0.95");
+        assert!(
+            sig.is_some(),
+            "'-- ' sig should be found after disclaimer text"
+        );
+        assert!(
+            (conf - 0.95).abs() < 0.01,
+            "RFC 3676 confidence expected 0.95"
+        );
         assert!(sig.unwrap().contains("Jane Smith"));
     }
 }
-

@@ -48,7 +48,9 @@ pub async fn scan_stale_heartbeats(storage_path: &str, threshold_secs: u64) {
                     let _ = db::update_task(&conn, &t);
                     tracing::warn!(
                         "[a2a_board] sweeper: blocking stale task {} in board {} ({}s silent)",
-                        t.short_id, board_id, elapsed
+                        t.short_id,
+                        board_id,
+                        elapsed
                     );
                 }
             }
@@ -89,7 +91,9 @@ pub async fn scan_stale_tasks(storage_path: &str, threshold_secs: u64) {
                 if elapsed > threshold_secs as i64 && elapsed >= 0 {
                     tracing::warn!(
                         "[a2a_board] sweeper: stale review on task {} in board {} ({}s)",
-                        task.short_id, board_id, elapsed
+                        task.short_id,
+                        board_id,
+                        elapsed
                     );
                 }
             }

@@ -7,13 +7,13 @@
 //! - toolset HTTP API (4 endpoints)
 //! - A2aInterceptor for inbound email processing
 
-pub mod models;
-pub mod db;
-pub mod commands;
-pub mod notify;
-pub mod sweeper;
-pub mod quota;
-pub mod interceptor;
-pub mod router;
-pub mod handlers;
 pub mod archiver;
+pub mod commands;
+pub mod db;
+pub mod handlers;
+pub mod interceptor;
+pub mod models;
+pub mod notify;
+pub mod quota;
+pub mod router;
+pub mod sweeper;

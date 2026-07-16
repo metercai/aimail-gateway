@@ -27,7 +27,9 @@ pub async fn create_api_key(
 
     // ── Address quota check ──
     {
-        let _system = match state.factories.email
+        let _system = match state
+            .factories
+            .email
             .env_factory
             .resolve_system(&req.system_id)
             .await
@@ -229,7 +231,9 @@ pub async fn create_api_key(
     let key_prefix = &raw_key[..8];
     let expires_at = req.expires_at.as_deref();
 
-    let record = match state.factories.email
+    let record = match state
+        .factories
+        .email
         .env_factory
         .create_api_key(
             &req.system_id,
@@ -281,33 +285,92 @@ pub async fn list_api_keys(
             if is_agent && email != &api_key.email_address {
                 return Err((
                     StatusCode::FORBIDDEN,
-                    Json(ErrorResponse { error: "Forbidden".to_string(), detail: None }),
+                    Json(ErrorResponse {
+                        error: "Forbidden".to_string(),
+                        detail: None,
+                    }),
                 ));
             }
         }
-        match state.factories.email.env_factory.resolve_api_key_by_email(email).await {
+        match state
+            .factories
+            .email
+            .env_factory
+            .resolve_api_key_by_email(email)
+            .await
+        {
             Ok(Some(k)) => vec![k],
             Ok(None) => vec![],
-            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ))
+            }
         }
     } else if is_platform_admin {
         match state.factories.email.env_factory.list_api_keys().await {
             Ok(keys) => keys,
-            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ))
+            }
         }
     } else if is_system_admin || is_agent_admin {
-        match state.factories.email.env_factory.list_api_keys_by_system(&api_key.system_id, "agent").await {
+        match state
+            .factories
+            .email
+            .env_factory
+            .list_api_keys_by_system(&api_key.system_id, "agent")
+            .await
+        {
             Ok(keys) => keys,
-            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ))
+            }
         }
     } else if is_agent {
-        match state.factories.email.env_factory.resolve_api_key_by_id(api_key.id).await {
+        match state
+            .factories
+            .email
+            .env_factory
+            .resolve_api_key_by_id(api_key.id)
+            .await
+        {
             Ok(Some(k)) => vec![k],
             Ok(None) => vec![],
-            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ))
+            }
         }
     } else {
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse { error: "Insufficient scope".to_string(), detail: None })));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Insufficient scope".to_string(),
+                detail: None,
+            }),
+        ));
     };
 
     Ok(Json(keys.into_iter().map(|r| r.into()).collect()))
@@ -323,7 +386,9 @@ pub async fn get_api_key(
         return Err(e);
     }
 
-    let record = match state.factories.email
+    let record = match state
+        .factories
+        .email
         .env_factory
         .resolve_api_key_by_id(id)
         .await
@@ -379,7 +444,9 @@ pub async fn update_api_key(
             let raw_key = Uuid::new_v4().to_string().replace('-', "");
             let key_hash = sha256_hex(&raw_key);
             let new_prefix = &raw_key[..8];
-            match state.factories.email
+            match state
+                .factories
+                .email
                 .env_factory
                 .rotate_api_key(id, &key_hash, new_prefix)
                 .await
@@ -427,7 +494,9 @@ pub async fn update_api_key(
             ));
         }
         // Verify key exists
-        let existing = match state.factories.email
+        let existing = match state
+            .factories
+            .email
             .env_factory
             .resolve_api_key_by_id(id)
             .await
@@ -463,7 +532,9 @@ pub async fn update_api_key(
                 return Err(e);
             }
         }
-        match state.factories.email
+        match state
+            .factories
+            .email
             .env_factory
             .update_api_key(id, None, req.is_active)
             .await
@@ -516,7 +587,9 @@ pub async fn update_api_key(
         let raw_key = Uuid::new_v4().to_string().replace('-', "");
         let key_hash = sha256_hex(&raw_key);
         let new_prefix = &raw_key[..8];
-        match state.factories.email
+        match state
+            .factories
+            .email
             .env_factory
             .rotate_api_key(id, &key_hash, new_prefix)
             .await
@@ -568,7 +641,9 @@ pub async fn delete_api_key(
     }
 
     // Verify key exists and check domain match
-    let existing = match state.factories.email
+    let existing = match state
+        .factories
+        .email
         .env_factory
         .resolve_api_key_by_id(id)
         .await

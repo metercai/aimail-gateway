@@ -42,7 +42,9 @@ pub async fn send_email(
     // ── 1b. Daily email quota (emails_per_day from system plans) ──
     {
         let system_id = api_key.system_id.as_str();
-        let _system = match state.factories.email
+        let _system = match state
+            .factories
+            .email
             .env_factory
             .resolve_system(system_id)
             .await
@@ -128,7 +130,9 @@ pub async fn send_email(
 
     // ── 2b. Append agent signature if configured ──
     let mut markdown_body = req.markdown.clone();
-    if let Ok(Some(meta)) = state.factories.email
+    if let Ok(Some(meta)) = state
+        .factories
+        .email
         .env_factory
         .resolve_domain_addr_meta(sender)
         .await
@@ -219,7 +223,9 @@ pub async fn send_email(
     // Batch name resolution: fetch whitelist entries once per sender domain
     if !bare_emails.is_empty() {
         let domain = domain_from_email(&bare_emails[0]);
-        let all_entries = state.factories.email
+        let all_entries = state
+            .factories
+            .email
             .env_factory
             .list_whitelist_entries(domain)
             .await
@@ -327,12 +333,13 @@ pub async fn send_email(
     if let Some(ref cc_list) = req.cc {
         for cc_addr in cc_list {
             let (cc_base, _) = strip_persona(cc_addr);
-            if let Some((_sid, board_id, _domain)) = crate::board::models::parse_board_email(&cc_base) {
+            if let Some((_sid, board_id, _domain)) =
+                crate::board::models::parse_board_email(&cc_base)
+            {
                 use crate::board::db;
-                if let Ok(conn) = db::open_board_db(
-                    state.config.storage.path.to_str().unwrap_or(""),
-                    &board_id,
-                ) {
+                if let Ok(conn) =
+                    db::open_board_db(state.config.storage.path.to_str().unwrap_or(""), &board_id)
+                {
                     // Sender = API key's email address
                     let sender = sender_base.as_str();
                     // TO = first primary recipient (for board_role)
@@ -340,18 +347,9 @@ pub async fn send_email(
                     let from_member = db::get_member(&conn, &board_id, sender).ok().flatten();
                     let to_member = db::get_member(&conn, &board_id, to_addr).ok().flatten();
                     if from_member.is_some() && to_member.is_some() {
-                        merged_headers.insert(
-                            "X-Board-ID".to_string(),
-                            board_id.clone(),
-                        );
-                        merged_headers.insert(
-                            "X-Board-Role".to_string(),
-                            to_member.unwrap().role,
-                        );
-                        merged_headers.insert(
-                            "X-From-Role".to_string(),
-                            from_member.unwrap().role,
-                        );
+                        merged_headers.insert("X-Board-ID".to_string(), board_id.clone());
+                        merged_headers.insert("X-Board-Role".to_string(), to_member.unwrap().role);
+                        merged_headers.insert("X-From-Role".to_string(), from_member.unwrap().role);
                     }
                 }
                 break; // Only process the first matching board
@@ -397,7 +395,9 @@ pub async fn send_email(
     }
 
     // ── 3a. P0: Empty whitelist → 403 ──
-    let whitelist_count = match state.factories.email
+    let whitelist_count = match state
+        .factories
+        .email
         .env_factory
         .count_whitelist_entries(sender, &["to", "all"])
         .await
@@ -430,7 +430,9 @@ pub async fn send_email(
     let mut valid_recipients: Vec<String> = Vec::new();
 
     for recipient in &recipients {
-        match state.factories.email
+        match state
+            .factories
+            .email
             .env_factory
             .check_whitelisted(sender, recipient, "to")
             .await
@@ -447,7 +449,7 @@ pub async fn send_email(
     let mut internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     // (email, domain, webhook_url, webhook_secret)
     let mut external: Vec<String> = Vec::new();
-    let mut unregistered: Vec<String> = Vec::new();  // Type 2 hit but Type 1 miss
+    let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
 
     for recipient in &valid_recipients {
         let env = &state.factories.email.env_factory;
@@ -465,7 +467,9 @@ pub async fn send_email(
                 // Type 2: fallback to domain-level match
                 let domain = recipient.rsplit('@').next().unwrap_or(recipient);
                 match env.lookup_domain_addr(domain).await {
-                    Ok(Some(ref inner)) if inner.is_active && inner.system_id == api_key.system_id => {
+                    Ok(Some(ref inner))
+                        if inner.is_active && inner.system_id == api_key.system_id =>
+                    {
                         // Domain exists but address not registered — auto-reply
                         unregistered.push(recipient.clone());
                     }
@@ -480,7 +484,9 @@ pub async fn send_email(
     // ── 6. Inbound whitelist: for internal recipients, verify sender against their "from"/"all" rules ──
     let mut final_internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     for (recipient, domain, webhook_url, webhook_secret) in internal {
-        match state.factories.email
+        match state
+            .factories
+            .email
             .env_factory
             .check_whitelisted(&recipient, sender, "from")
             .await
@@ -514,7 +520,10 @@ pub async fn send_email(
                 if !merged_headers.contains_key("x-mail-stranger") {
                     merged_headers.insert("x-mail-stranger".into(), "true".into());
                 }
-                let cmd_name = cmd.trim_start_matches('[').trim_end_matches(']').to_lowercase();
+                let cmd_name = cmd
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_lowercase();
                 merged_headers.insert("x-mail-command".into(), cmd_name);
                 break;
             }
@@ -539,7 +548,9 @@ pub async fn send_email(
             "Pong intercepted at HTTP API — redirecting as inbound"
         );
 
-        state.factories.email
+        state
+            .factories
+            .email
             .create_inbound(
                 &new_id,
                 &api_key.system_id,
@@ -547,10 +558,10 @@ pub async fn send_email(
                 &new_recipients_json,
                 subject,
                 &markdown_body,
-                None,       // endpoints
-                None,       // attachments
+                None, // endpoints
+                None, // attachments
                 headers_json.as_deref(),
-                0,          // max_retries
+                0, // max_retries
             )
             .await
             .map_err(|e| {
@@ -591,7 +602,9 @@ pub async fn send_email(
             cc: external_cc,
         }
         .to_json();
-        match state.factories.email
+        match state
+            .factories
+            .email
             .create_outbound(
                 &email_id,
                 &api_key.system_id,
@@ -620,7 +633,9 @@ pub async fn send_email(
                 // the scheduler, so cleanup sees the mail_id reference.
                 if let Some(ref attachments) = req.attachments {
                     for att in attachments {
-                        if let Err(e) = state.factories.attachment
+                        if let Err(e) = state
+                            .factories
+                            .attachment
                             .add_mail_id(&att.attachment_id, &record.id)
                             .await
                         {
@@ -679,7 +694,9 @@ pub async fn send_email(
         .to_json();
 
         // Build webhook endpoints: per-recipient → domain fallback
-        let endpoints_str = state.factories.email
+        let endpoints_str = state
+            .factories
+            .email
             .build_endpoints_for_recipients(&internal_emails)
             .await;
         let endpoints = if endpoints_str == "{}" || endpoints_str.is_empty() {
@@ -688,7 +705,9 @@ pub async fn send_email(
             Some(endpoints_str)
         };
 
-        match state.factories.email
+        match state
+            .factories
+            .email
             .create_inbound(
                 &email_id,
                 &api_key.system_id,
@@ -708,7 +727,9 @@ pub async fn send_email(
                 for (recipient, _, _, _) in &final_internal {
                     if let Some(attachments) = &req.attachments {
                         for att in attachments {
-                            if let Err(e) = state.factories.attachment
+                            if let Err(e) = state
+                                .factories
+                                .attachment
                                 .create_permission(&att.attachment_id, recipient)
                                 .await
                             {
@@ -731,7 +752,9 @@ pub async fn send_email(
                 // Register this email on every attachment
                 if let Some(ref attachments) = req.attachments {
                     for att in attachments {
-                        if let Err(e) = state.factories.attachment
+                        if let Err(e) = state
+                            .factories
+                            .attachment
                             .add_mail_id(&att.attachment_id, &record.id)
                             .await
                         {
@@ -755,10 +778,24 @@ pub async fn send_email(
     }
 
     // ── 8. Auto-reply if any recipients were filtered ──
-    send_filtered_notification(&state.factories.email, &state.config, &api_key.system_id, sender, &filtered).await;
+    send_filtered_notification(
+        &state.factories.email,
+        &state.config,
+        &api_key.system_id,
+        sender,
+        &filtered,
+    )
+    .await;
 
     // ── 8b. Auto-reply for unregistered addresses (domain exists but address not registered) ──
-    send_unregistered_notification(&state.factories.email, &state.config, &api_key.system_id, sender, &unregistered).await;
+    send_unregistered_notification(
+        &state.factories.email,
+        &state.config,
+        &api_key.system_id,
+        sender,
+        &unregistered,
+    )
+    .await;
 
     let status = if created_ids.is_empty() {
         // All recipients were filtered — no emails created
@@ -817,9 +854,11 @@ async fn send_filtered_notification(
     }
 
     // Build markdown body
-    let auto_reply_body = config.relay.auto_reply_body.as_deref().unwrap_or(
-        "This is an automated message from the amail system.",
-    );
+    let auto_reply_body = config
+        .relay
+        .auto_reply_body
+        .as_deref()
+        .unwrap_or("This is an automated message from the amail system.");
     let body = format!(
         "{}\n\n---\n\n\
          **Filtered Recipients** (not in whitelist or blocked by policy):\n\n\
@@ -827,7 +866,11 @@ async fn send_filtered_notification(
          These recipients will NOT receive your message. \
          Please verify the addresses or contact your administrator to update whitelist settings.",
         auto_reply_body,
-        filtered.iter().map(|a| format!("  • {}", a)).collect::<Vec<_>>().join("\n")
+        filtered
+            .iter()
+            .map(|a| format!("  • {}", a))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     let subject = format!(

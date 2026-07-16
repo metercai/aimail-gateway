@@ -232,7 +232,6 @@ impl Handler for ConnectionHandler {
             self.sender = Some(real.clone());
             // Authenticated session: resolve_sender validated the key,
             // and check_inbound (including SPF) is bypassed intentionally.
-
         } else {
             // 2. Inbound security check — delegated to InboundSecurity trait
             if let Err(e) = self.inbound_security.check_inbound(ip, from, domain) {
@@ -243,7 +242,11 @@ impl Handler for ConnectionHandler {
 
         // 3. Anti-loop detection — check if sender domain is registered
         let sender_domain = from.rsplit('@').next().unwrap_or(from);
-        match self.block_on(self.email_factory.env_factory.lookup_domain_addr(sender_domain)) {
+        match self.block_on(
+            self.email_factory
+                .env_factory
+                .lookup_domain_addr(sender_domain),
+        ) {
             Ok(Some(_rec)) => {
                 tracing::warn!(operation="inbound_anti_loop", ip=%ip_str, sender=%from,
                     "Internal sender address rejected on inbound path");
@@ -264,9 +267,11 @@ impl Handler for ConnectionHandler {
         // (non-shared domain: sales.bob@company.com → bob@company.com).
         let full_lower = to.to_lowercase();
 
-        let (lookup_addr, persona) = match self
-            .block_on(self.email_factory.env_factory.lookup_domain_addr(&full_lower))
-        {
+        let (lookup_addr, persona) = match self.block_on(
+            self.email_factory
+                .env_factory
+                .lookup_domain_addr(&full_lower),
+        ) {
             Ok(Some(rec)) => {
                 // Exact match — full address is the domain record
                 self.system_id = match self.system_id.take() {
@@ -282,9 +287,11 @@ impl Handler for ConnectionHandler {
                 let (base_addr, p) = strip_persona(to);
                 let base_lower = base_addr.to_lowercase();
                 if base_lower != full_lower {
-                    match self
-                        .block_on(self.email_factory.env_factory.lookup_domain_addr(&base_lower))
-                    {
+                    match self.block_on(
+                        self.email_factory
+                            .env_factory
+                            .lookup_domain_addr(&base_lower),
+                    ) {
                         Ok(Some(rec)) => {
                             self.system_id = match self.system_id.take() {
                                 None => Some(rec.system_id.clone()),
@@ -310,11 +317,11 @@ impl Handler for ConnectionHandler {
 
         // ── Whitelist check (inbound) ────────────────────────────────
         if let Some(ref sender) = self.sender {
-            let allowed = self.block_on(
-                self.email_factory
-                    .env_factory
-                    .check_whitelisted(&lookup_addr, sender, "from"),
-            );
+            let allowed = self.block_on(self.email_factory.env_factory.check_whitelisted(
+                &lookup_addr,
+                sender,
+                "from",
+            ));
             match allowed {
                 Ok(true) => {
                     self.sender_whitelisted = true;
@@ -338,7 +345,13 @@ impl Handler for ConnectionHandler {
         ok()
     }
 
-    fn data_start(&mut self, _domain: &str, _from: &str, _is8bit: bool, _to: &[String]) -> Response {
+    fn data_start(
+        &mut self,
+        _domain: &str,
+        _from: &str,
+        _is8bit: bool,
+        _to: &[String],
+    ) -> Response {
         ok()
     }
 
@@ -660,7 +673,10 @@ impl Handler for ConnectionHandler {
                         serde_json::Value::String("true".to_string()),
                     );
                 }
-                let cmd_name = cmd.trim_start_matches('[').trim_end_matches(']').to_lowercase();
+                let cmd_name = cmd
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_lowercase();
                 headers_map.insert(
                     "x-mail-command".to_string(),
                     serde_json::Value::String(cmd_name),
@@ -874,8 +890,12 @@ impl ConnectionHandler {
              Subject: {}\n\
              Status: {}\n\
              Diagnostic: {}",
-            body_prefix, dsn.original_from, dsn.original_to,
-            dsn.original_subject, dsn.dsn_status, dsn.dsn_diagnostic,
+            body_prefix,
+            dsn.original_from,
+            dsn.original_to,
+            dsn.original_subject,
+            dsn.dsn_status,
+            dsn.dsn_diagnostic,
         );
 
         // Build recipients JSON
@@ -1036,9 +1056,7 @@ pub fn handle_smtp_session_blocking(
                 // Parse SIZE declaration from the raw SMTP line and store
                 // locally.  Check it when DATA arrives so we can reject
                 // oversized emails before any data transfer.
-                if line.len() > 6
-                    && line[..6].eq_ignore_ascii_case("MAIL FR")
-                {
+                if line.len() > 6 && line[..6].eq_ignore_ascii_case("MAIL FR") {
                     tracing::info!(
                         operation = "smtp_raw_mail_from",
                         line = %line.trim(),
@@ -1047,7 +1065,8 @@ pub fn handle_smtp_session_blocking(
                     declared_size = None; // reset on new MAIL FROM
                     if let Some(pos) = line.to_uppercase().find(" SIZE=") {
                         let rest = &line[pos + 6..];
-                        let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        let num_str: String =
+                            rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                         if let Ok(s) = num_str.parse::<u64>() {
                             declared_size = Some(s);
                         }
@@ -1068,8 +1087,10 @@ pub fn handle_smtp_session_blocking(
                                 );
                                 let resp = crate::Response::custom(
                                     552,
-                                    format!("Message size {} exceeds maximum allowed {}",
-                                        s, max_msg_size),
+                                    format!(
+                                        "Message size {} exceeds maximum allowed {}",
+                                        s, max_msg_size
+                                    ),
                                 );
                                 let _ = write_response_blocking(&mut stream, &resp);
                                 continue; // FSM stays in RCPT state; client should RSET/QUIT

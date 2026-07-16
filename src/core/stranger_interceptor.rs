@@ -48,13 +48,7 @@ impl StrangerInterceptor {
             .map(|(_, v)| v)
     }
 
-    async fn send_auto_reply(
-        &self,
-        from: &str,
-        to: &str,
-        subject: &str,
-        body: &str,
-    ) {
+    async fn send_auto_reply(&self, from: &str, to: &str, subject: &str, body: &str) {
         let email_id = format!("sr-{}", uuid::Uuid::new_v4());
         if let Err(e) = self
             .email_factory
@@ -126,10 +120,8 @@ impl InboundInterceptor for StrangerInterceptor {
                     .await
                     .unwrap_or_else(|| "Agent not configured yet.".to_string());
 
-                let reply_subject = format!(
-                    "Re: {}",
-                    payload["subject"].as_str().unwrap_or("[WHOAMI]")
-                );
+                let reply_subject =
+                    format!("Re: {}", payload["subject"].as_str().unwrap_or("[WHOAMI]"));
                 self.send_auto_reply(recipient, sender, &reply_subject, &body)
                     .await;
 

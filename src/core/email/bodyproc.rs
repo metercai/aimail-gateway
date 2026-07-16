@@ -82,9 +82,7 @@ fn is_reply_boundary(line: &str) -> Option<&'static str> {
     if t.starts_with("on ") && t.ends_with("wrote:") {
         return Some("reply");
     }
-    if (t.starts_with("在 ") || t.starts_with("于 "))
-        && t.contains("写道")
-    {
+    if (t.starts_with("在 ") || t.starts_with("于 ")) && t.contains("写道") {
         return Some("reply");
     }
     None
@@ -145,7 +143,11 @@ fn split_at_quote_boundary(body: &str) -> Option<(String, String, String, LayerK
     }
 
     boundary_idx.map(|idx| {
-        let before = if idx > 0 { lines[..idx].join("\n") } else { String::new() };
+        let before = if idx > 0 {
+            lines[..idx].join("\n")
+        } else {
+            String::new()
+        };
         let after_boundary = if idx + 1 < lines.len() {
             &lines[idx + 1..]
         } else {
@@ -156,7 +158,8 @@ fn split_at_quote_boundary(body: &str) -> Option<(String, String, String, LayerK
         // - Reply boundaries: only `>` lines are quoted; non-`>` after is current
         // - Forward boundaries: everything after is forwarded content
         let (quoted, after_quote): (String, String) = if kind == LayerKind::Reply {
-            let quote_end = after_boundary.iter()
+            let quote_end = after_boundary
+                .iter()
                 .position(|l| {
                     let t = l.trim();
                     !t.is_empty() && !t.starts_with('>')
@@ -168,7 +171,7 @@ fn split_at_quote_boundary(body: &str) -> Option<(String, String, String, LayerK
                     after_boundary[quote_end..].join("\n")
                 } else {
                     String::new()
-                }
+                },
             )
         } else {
             // Forward: all text after boundary is the original message
@@ -193,12 +196,20 @@ fn decompose_layers(body: &str) -> Vec<Layer> {
             } else {
                 format!("{}\n{}", current, after_quote)
             };
-            let processed = process_single_layer(&combined, if first { LayerKind::Current } else { kind });
+            let processed =
+                process_single_layer(&combined, if first { LayerKind::Current } else { kind });
             layers.push(processed);
             remaining = quoted;
             first = false;
         } else {
-            let processed = process_single_layer(&remaining, if first { LayerKind::Current } else { LayerKind::Reply });
+            let processed = process_single_layer(
+                &remaining,
+                if first {
+                    LayerKind::Current
+                } else {
+                    LayerKind::Reply
+                },
+            );
             layers.push(processed);
             break;
         }
@@ -314,7 +325,9 @@ fn filter_noise(body: &str) -> String {
         if in_disclaimer {
             // End of disclaimer block = non-empty, non-indented line
             // that doesn't look like it belongs to the disclaimer
-            if !t.is_empty() && !t.starts_with(' ') && !t.starts_with('\t')
+            if !t.is_empty()
+                && !t.starts_with(' ')
+                && !t.starts_with('\t')
                 && !is_disclaimer_continuation(t)
             {
                 in_disclaimer = false;
@@ -389,22 +402,27 @@ fn assemble_layers(layers: &[Layer]) -> String {
             };
             parts.push(format!("---\n**{}邮件:**", kind_label));
             if !layer.body.is_empty() {
-                    let quoted_body = layer.body.lines()
-                        .map(|l| {
-                            let t = l.trim();
-                            if t.is_empty() {
-                                format!(">")
-                            } else {
-                                format!("> {}", l)
-                            }
-                        })
+                let quoted_body = layer
+                    .body
+                    .lines()
+                    .map(|l| {
+                        let t = l.trim();
+                        if t.is_empty() {
+                            format!(">")
+                        } else {
+                            format!("> {}", l)
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 parts.push(quoted_body);
             }
             // Signature
             if let Some(ref sig) = layer.signature {
-                parts.push(format!("{}> ---\n{}> **原发件人签名:** {}", prefix, prefix, sig.raw));
+                parts.push(format!(
+                    "{}> ---\n{}> **原发件人签名:** {}",
+                    prefix, prefix, sig.raw
+                ));
             }
         }
     }
@@ -446,7 +464,8 @@ mod tests {
         // Path from workspace root: {repo}/agentmail/tests/original-plain.txt
         // CARGO_MANIFEST_DIR = amail-gateway/
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()   // go up to workspace root
+            .parent()
+            .unwrap() // go up to workspace root
             .join("agentmail")
             .join("tests")
             .join("original-plain.txt");
@@ -497,7 +516,8 @@ mod tests {
         let result = process_email_body(&body, false);
         // Write output to file for review
         let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap()
+            .parent()
+            .unwrap()
             .join("agentmail/tests/processed-body.md");
         let _ = std::fs::write(&out_path, &result.body);
 
@@ -511,9 +531,12 @@ mod tests {
             eprintln!("(none)");
         }
         eprintln!("=== Stats ===");
-        eprintln!("layers={} body={}chars sig={}",
-            result.layers.len(), result.body.len(),
-            result.signature.is_some());
+        eprintln!(
+            "layers={} body={}chars sig={}",
+            result.layers.len(),
+            result.body.len(),
+            result.signature.is_some()
+        );
         // Verify L1 signature exists in forwarded content
         if result.layers.len() >= 2 && !result.layers[1].signature.is_some() {
             eprintln!("WARN: forwarded layer lacks signature extraction");
@@ -521,21 +544,28 @@ mod tests {
         eprintln!("Output saved to: {}", out_path.display());
         // Should have at least a signature extracted
         if let Some(ref sig) = result.signature {
-            eprintln!("Extracted signature ({:.0}% confidence):",
-                      sig.confidence * 100.0);
+            eprintln!(
+                "Extracted signature ({:.0}% confidence):",
+                sig.confidence * 100.0
+            );
             for line in sig.raw.lines().take(5) {
                 eprintln!("  {}", line);
             }
         }
         // Should have disclaimer stripped (no "RESTRICTED" block in body)
-        assert!(!result.body.contains("RESTRICTED"),
-            "disclaimer 'RESTRICTED' should be stripped");
+        assert!(
+            !result.body.contains("RESTRICTED"),
+            "disclaimer 'RESTRICTED' should be stripped"
+        );
         // HSBC logo CID reference should remain as or be stripped
         let cid_count = result.body.matches("cid:").count();
         eprintln!("cid: references remaining in body: {}", cid_count);
-        eprintln!("Processed body: {} chars, {} layers, sig={}",
-                  result.body.len(), result.layers.len(),
-                  result.signature.is_some());
+        eprintln!(
+            "Processed body: {} chars, {} layers, sig={}",
+            result.body.len(),
+            result.layers.len(),
+            result.signature.is_some()
+        );
     }
 }
 
@@ -547,7 +577,8 @@ mod tests {
 #[cfg(test)]
 fn load_fixture(name: &str) -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
+        .parent()
+        .unwrap()
         .join("agentmail/tests/fixtures")
         .join(format!("{}.txt", name));
     std::fs::read_to_string(p).unwrap_or_default()
@@ -558,30 +589,45 @@ mod fixture_tests {
     use super::*;
 
     /// Run a fixture through the pipeline and assert expected layer count and signature.
-    fn assert_fixture(name: &str,
-                      expected_layers: usize,
-                      expected_l0_sig: bool,
-                      expected_l1_sig: bool)
-    {
+    fn assert_fixture(
+        name: &str,
+        expected_layers: usize,
+        expected_l0_sig: bool,
+        expected_l1_sig: bool,
+    ) {
         let body = load_fixture(name);
         assert!(!body.is_empty(), "fixture '{}' not found or empty", name);
 
         let result = process_email_body(&body, false);
-        assert_eq!(result.layers.len(), expected_layers,
+        assert_eq!(
+            result.layers.len(),
+            expected_layers,
             "fixture '{}': expected {} layers, got {}",
-            name, expected_layers, result.layers.len());
+            name,
+            expected_layers,
+            result.layers.len()
+        );
 
-        assert_eq!(result.signature.is_some(), expected_l0_sig,
+        assert_eq!(
+            result.signature.is_some(),
+            expected_l0_sig,
             "fixture '{}': expected L0 sig={}, got sig={}",
-            name, expected_l0_sig, result.signature.is_some());
+            name,
+            expected_l0_sig,
+            result.signature.is_some()
+        );
 
         if expected_layers >= 2 {
-            let l1_has = result.layers.get(1)
+            let l1_has = result
+                .layers
+                .get(1)
                 .map(|l| l.signature.is_some())
                 .unwrap_or(false);
-            assert_eq!(l1_has, expected_l1_sig,
+            assert_eq!(
+                l1_has, expected_l1_sig,
                 "fixture '{}': expected L1 sig={}, got {}",
-                name, expected_l1_sig, l1_has);
+                name, expected_l1_sig, l1_has
+            );
         }
     }
 
@@ -594,7 +640,10 @@ mod fixture_tests {
         let result = process_email_body(&body, false);
         // "Best regards" from L1 should appear as quoted > text, not plain
         let l0_body = &result.layers[0].body;
-        assert!(!l0_body.contains("Best regards"), "L0 body should not contain L1 signature");
+        assert!(
+            !l0_body.contains("Best regards"),
+            "L0 body should not contain L1 signature"
+        );
     }
 
     #[test]
@@ -633,7 +682,10 @@ mod fixture_tests {
         let body = load_fixture("disclaimer-footer");
         let result = process_email_body(&body, false);
         // "This email and any files..." not yet in DISCLAIMER_MARKERS (known gap)
-        assert!(!result.body.contains("RESTRICTED"), "restricted notice should be stripped");
+        assert!(
+            !result.body.contains("RESTRICTED"),
+            "restricted notice should be stripped"
+        );
     }
 
     #[test]
@@ -644,6 +696,9 @@ mod fixture_tests {
         // Code blocks with `>` should not be treated as quotes
         assert!(result.body.contains("println!"), "code should be preserved");
         // `>` in code should not be treated as quote markers
-        assert!(result.body.contains("n > 3"), "code comparison should be preserved");
+        assert!(
+            result.body.contains("n > 3"),
+            "code comparison should be preserved"
+        );
     }
 }

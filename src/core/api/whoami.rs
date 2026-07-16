@@ -22,7 +22,9 @@ pub async fn whoami(
 
     // Look up agent metadata from domain_addr_meta (keyed by email_address).
     let (manager_address, agent_signature, agent_persona) = if !key.email_address.is_empty() {
-        match state.factories.email
+        match state
+            .factories
+            .email
             .env_factory
             .resolve_domain_addr_meta(&key.email_address)
             .await

@@ -470,6 +470,12 @@ impl Default for BoardConfig {
     }
 }
 
-fn default_heartbeat_stale() -> u64 { 14400 }
-fn default_task_timeout() -> u64 { 259200 }
-fn default_sweeper_interval() -> u64 { 900 }
+fn default_heartbeat_stale() -> u64 {
+    14400
+}
+fn default_task_timeout() -> u64 {
+    259200
+}
+fn default_sweeper_interval() -> u64 {
+    900
+}

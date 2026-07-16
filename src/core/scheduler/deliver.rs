@@ -1,4 +1,4 @@
-use tracing::{error, debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
@@ -38,10 +38,7 @@ pub(crate) async fn deliver_smtp(
 
     let attachment_data = load_attachment_data(record, config, email_factory).await;
 
-    match relay
-        .send_email(record, attachment_data.as_deref())
-        .await
-    {
+    match relay.send_email(record, attachment_data.as_deref()).await {
         Ok(()) => {
             metrics.inc_relay_sent();
             None

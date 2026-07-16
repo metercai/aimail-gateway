@@ -110,14 +110,11 @@ impl Server {
         // ── Register interceptors (a2a_board, [WHOAMI]) ──
         amail_base::core::server::register_stranger_interceptor(&http_state);
         amail_base::core::server::register_board_interceptors(&http_state);
-        let base_hook: Arc<dyn RouterHook> = Arc::new(
-            amail_base::base::strategy::BaseRouterHook(http_state.clone()),
-        );
+        let base_hook: Arc<dyn RouterHook> = Arc::new(amail_base::base::strategy::BaseRouterHook(
+            http_state.clone(),
+        ));
         let router_hook: Arc<dyn RouterHook> = base_hook;
-        let smtp_handle = amail_base::core::server::spawn_smtp(
-            &http_state,
-            cancel.clone(),
-        )?;
+        let smtp_handle = amail_base::core::server::spawn_smtp(&http_state, cancel.clone())?;
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();

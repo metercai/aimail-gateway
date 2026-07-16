@@ -1,7 +1,7 @@
 //! Webhook delivery handlers.
 
 use std::sync::Arc;
-use tracing::{error, debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::core::email::utils::sign_payload;
 
@@ -221,8 +221,14 @@ pub async fn process_email_webhook(
     }
 
     let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    let body_len = payload.get("body").and_then(|v| v.as_str()).map_or(0, |s| s.len());
-    let subject = payload.get("subject").and_then(|v| v.as_str()).unwrap_or("N/A");
+    let body_len = payload
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map_or(0, |s| s.len());
+    let subject = payload
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("N/A");
     tracing::info!(
         operation = "webhook_payload_built",
         email_id = %record.id,
@@ -242,10 +248,13 @@ pub async fn process_email_webhook(
     {
         for addr in recipients.to.iter().chain(recipients.cc.iter()) {
             // Resolve address with domain-level fallback (Type 3)
-            let d = env_factory.resolve_domain_from_address(addr).await
+            let d = env_factory
+                .resolve_domain_from_address(addr)
+                .await
                 .unwrap_or(None);
             if let Some(ref d) = d {
-                let is_pull = d.webhook_url
+                let is_pull = d
+                    .webhook_url
                     .as_deref()
                     .map_or(true, |u| u.trim().is_empty());
                 if is_pull {

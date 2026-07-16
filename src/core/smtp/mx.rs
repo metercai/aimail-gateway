@@ -37,7 +37,11 @@ impl MxTransportPool {
     }
 
     /// Get or create a transport for the given MX host.
-    pub async fn get_or_create(&self, mx_host: &str, hostname: Option<&str>) -> AppResult<AsyncSmtpTransport<Tokio1Executor>> {
+    pub async fn get_or_create(
+        &self,
+        mx_host: &str,
+        hostname: Option<&str>,
+    ) -> AppResult<AsyncSmtpTransport<Tokio1Executor>> {
         let mut map = self.inner.lock().await;
         if let Some((transport, created_at)) = map.get(mx_host) {
             if created_at.elapsed() < self.ttl {
@@ -78,7 +82,10 @@ pub async fn resolve_mx(
         .collect();
 
     if records.is_empty() {
-        return Err(AppError::Smtp(format!("no MX records found for '{}'", domain)));
+        return Err(AppError::Smtp(format!(
+            "no MX records found for '{}'",
+            domain
+        )));
     }
 
     records.sort_by_key(|r| r.preference);
@@ -88,7 +95,10 @@ pub async fn resolve_mx(
 }
 
 /// Build a lettre transport to a raw MX host (port 25, opportunistic STARTTLS).
-fn build_mx_transport(mx_host: &str, hostname: Option<&str>) -> AppResult<AsyncSmtpTransport<Tokio1Executor>> {
+fn build_mx_transport(
+    mx_host: &str,
+    hostname: Option<&str>,
+) -> AppResult<AsyncSmtpTransport<Tokio1Executor>> {
     let (host, port) = match mx_host.rsplit_once(':') {
         Some((h, p)) if p.parse::<u16>().is_ok() => (h, p.parse::<u16>().unwrap()),
         _ => (mx_host, 25u16),
@@ -102,7 +112,9 @@ fn build_mx_transport(mx_host: &str, hostname: Option<&str>) -> AppResult<AsyncS
 
     if let Some(name) = hostname {
         if !name.is_empty() {
-            builder = builder.hello_name(lettre::transport::smtp::extension::ClientId::Domain(name.to_string()));
+            builder = builder.hello_name(lettre::transport::smtp::extension::ClientId::Domain(
+                name.to_string(),
+            ));
         }
     }
 

@@ -640,7 +640,11 @@ impl EmailFactory {
     /// Decode a MIME text body part according to its charset parameter.
     /// Falls back to UTF-8 lossy if the charset is unknown or decoding fails.
     fn decode_text_body(raw: &[u8], ctype: &mailparse::ParsedContentType) -> String {
-        let charset = ctype.params.get("charset").map(|s| s.as_str()).unwrap_or("");
+        let charset = ctype
+            .params
+            .get("charset")
+            .map(|s| s.as_str())
+            .unwrap_or("");
         if charset.is_empty() {
             return String::from_utf8_lossy(raw).into_owned();
         }
@@ -762,17 +766,17 @@ impl EmailFactory {
 
     /// Write message metadata (`msg:{mid}`) to agent_state before webhook delivery.
     /// This lets the Python side read thread info without calling back to the gateway.
-    pub async fn put_msg_metadata(
-        &self,
-        record: &EmailRecord,
-        agent_addr: &str,
-    ) -> AppResult<()> {
+    pub async fn put_msg_metadata(&self, record: &EmailRecord, agent_addr: &str) -> AppResult<()> {
         let msg_id = record.message_id_from_headers().unwrap_or_default();
         if msg_id.is_empty() {
             return Ok(());
         }
         let refs = record.references_from_headers().unwrap_or_default();
-        let thread_id = refs.split_whitespace().next().unwrap_or(&msg_id).to_string();
+        let thread_id = refs
+            .split_whitespace()
+            .next()
+            .unwrap_or(&msg_id)
+            .to_string();
         let value = serde_json::json!({
             "references": refs.split_whitespace().map(String::from).collect::<Vec<_>>(),
             "thread_id": thread_id,
@@ -810,7 +814,11 @@ impl MailFactories {
     ) -> Self {
         let attachments_dir = storage_path.join("attachments");
         Self {
-            email: Arc::new(EmailFactory::new(db.clone(), attachments_dir.clone(), system_store)),
+            email: Arc::new(EmailFactory::new(
+                db.clone(),
+                attachments_dir.clone(),
+                system_store,
+            )),
             attachment: Arc::new(AttachmentFactory::new(db, attachments_dir)),
         }
     }

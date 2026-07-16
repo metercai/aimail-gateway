@@ -9,6 +9,6 @@ pub mod scope;
 pub mod server;
 pub mod smtp;
 pub mod storage;
+pub mod stranger_interceptor;
 pub mod strategy;
 pub mod whitelist;
-pub mod stranger_interceptor;

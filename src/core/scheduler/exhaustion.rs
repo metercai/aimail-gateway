@@ -2,7 +2,7 @@ use tracing::{error, info, warn};
 
 use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
-use crate::core::email::factory::{EmailFactory, AttachmentFactory};
+use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::email::storage::EmailRecord;
 
 use super::deliver::resolve_webhook_url;
@@ -161,10 +161,7 @@ pub(crate) async fn insert_exhaustion_notification(
         if filenames.is_empty() {
             String::new()
         } else {
-            format!(
-                "\n**Attachments**: {}\n",
-                filenames.join(", ")
-            )
+            format!("\n**Attachments**: {}\n", filenames.join(", "))
         }
     };
 
@@ -188,7 +185,8 @@ pub(crate) async fn insert_exhaustion_notification(
         record.id,
         record.subject,
         record.recipients,
-        record.send_count, record.max_attempts,
+        record.send_count,
+        record.max_attempts,
         attachment_display,
         record.body,
     );

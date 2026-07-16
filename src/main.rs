@@ -6,9 +6,7 @@ use clap::Parser;
 use std::fs;
 
 use amail_base::core::cli::daemon;
-use amail_base::core::cli::{
-    cmd_status, cmd_stop, init_tracing, Cli, Commands,
-};
+use amail_base::core::cli::{cmd_status, cmd_stop, init_tracing, Cli, Commands};
 use amail_base::core::errors::AppResult;
 
 pub use amail_base::core::config::Config;

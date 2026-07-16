@@ -247,7 +247,6 @@ pub fn parse_board_email(to_addr: &str) -> Option<(String, String, String)> {
     Some((short_id.to_string(), board_id, domain.to_string()))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

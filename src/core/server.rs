@@ -8,10 +8,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
-use crate::board::quota::BoardQuotaChecker;
 use crate::core::api::types::HttpState;
 use crate::core::config::Config;
-use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::errors::{AppError, AppResult};
 use hex;
 use rand::Rng;
@@ -41,7 +39,6 @@ pub fn spawn_smtp(
     );
 
     let handle = tokio::spawn(async move {
-
         let listener = match crate::core::cli::daemon::bind_with_reuseaddr(&listen_addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -209,7 +206,9 @@ pub fn spawn_retry_worker(
     let attachment_factory = (*http_state.factories.attachment).clone();
     let config = http_state.config.clone();
     let metrics = (*http_state.metrics).clone();
-    let dkim_signer = Some(http_state.extensions.dkim_signer.clone() as Arc<dyn crate::core::strategy::MessageSigner>);
+    let dkim_signer =
+        Some(http_state.extensions.dkim_signer.clone()
+            as Arc<dyn crate::core::strategy::MessageSigner>);
     let dns_resolver = http_state.dns_resolver.clone();
     let inflight = crate::core::scheduler::new_inflight_set();
     tokio::spawn(async move {
@@ -283,10 +282,15 @@ pub async fn setup_admin_key(
 
 /// Create a shared DNS resolver.
 /// Priority: relay.dns_server (config) > system /etc/resolv.conf.
-pub fn create_dns_resolver(config: &Config) -> AppResult<Arc<hickory_resolver::TokioAsyncResolver>> {
+pub fn create_dns_resolver(
+    config: &Config,
+) -> AppResult<Arc<hickory_resolver::TokioAsyncResolver>> {
     if let Some(ref addr_str) = config.relay.dns_server {
         let sa: std::net::SocketAddr = addr_str.parse().map_err(|e| {
-            AppError::Internal(format!("Invalid relay.dns_server address '{}': {e}", addr_str))
+            AppError::Internal(format!(
+                "Invalid relay.dns_server address '{}': {e}",
+                addr_str
+            ))
         })?;
         let mut resolver_cfg = hickory_resolver::config::ResolverConfig::new();
         resolver_cfg.add_name_server(hickory_resolver::config::NameServerConfig::new(
@@ -294,7 +298,10 @@ pub fn create_dns_resolver(config: &Config) -> AppResult<Arc<hickory_resolver::T
             hickory_resolver::config::Protocol::Udp,
         ));
         let opts = hickory_resolver::config::ResolverOpts::default();
-        Ok(Arc::new(hickory_resolver::TokioAsyncResolver::tokio(resolver_cfg, opts)))
+        Ok(Arc::new(hickory_resolver::TokioAsyncResolver::tokio(
+            resolver_cfg,
+            opts,
+        )))
     } else {
         hickory_resolver::TokioAsyncResolver::tokio_from_system_conf()
             .map(Arc::new)
@@ -303,24 +310,21 @@ pub fn create_dns_resolver(config: &Config) -> AppResult<Arc<hickory_resolver::T
 }
 
 /// Register the StrangerInterceptor for universal commands ([WHOAMI] etc.).
-pub fn register_stranger_interceptor(
-    http_state: &HttpState,
-) {
+pub fn register_stranger_interceptor(http_state: &HttpState) {
     let email_factory = http_state.factories.email.clone();
-    email_factory.env_factory.register_interceptor(
-        std::sync::Arc::new(
+    email_factory
+        .env_factory
+        .register_interceptor(std::sync::Arc::new(
             crate::core::stranger_interceptor::StrangerInterceptor::new(
                 email_factory.clone(),
                 "admin",
-            )
-        ) as std::sync::Arc<dyn crate::core::strategy::InboundInterceptor>,
-    );
+            ),
+        )
+            as std::sync::Arc<dyn crate::core::strategy::InboundInterceptor>);
 }
 
 /// Register the A2A board interceptor.
-pub fn register_board_interceptors(
-    http_state: &HttpState,
-) {
+pub fn register_board_interceptors(http_state: &HttpState) {
     let email_factory = http_state.factories.email.clone();
     let attachment_factory = http_state.factories.attachment.clone();
     let storage_path = http_state.config.storage.path.to_str().unwrap_or("");
@@ -342,8 +346,9 @@ pub fn spawn_cleanup_worker(
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(ttl_hours.max(1) * 3600 / 2));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+            ttl_hours.max(1) * 3600 / 2,
+        ));
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => break,

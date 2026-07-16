@@ -4,13 +4,13 @@
 //! and the sender email. Returns a CommandResponse.
 
 use crate::board::db;
-use std::collections::HashMap;
-use serde_json::json;
 use crate::board::models::*;
 use crate::board::notify::Notifier;
 use crate::core::errors::AppResult;
 use chrono::Utc;
 use rusqlite::Connection;
+use serde_json::json;
+use std::collections::HashMap;
 
 /// Execute a single A2A command.
 pub fn execute_command(
@@ -44,7 +44,7 @@ pub fn execute_command(
         "status" => handle_board_status(conn, cmd),
         "gateway-info" => handle_gateway_info(conn, cmd),
         "create" => handle_create(conn, notifier, cmd, sender),
-            "refresh" => handle_init(conn, notifier, cmd, sender),
+        "refresh" => handle_init(conn, notifier, cmd, sender),
         "init" => handle_init(conn, notifier, cmd, sender),
         "arbitrate" => handle_arbitrate(conn, notifier, cmd, sender),
         _ => Ok(CommandResponse {
@@ -65,14 +65,16 @@ fn require_role(conn: &Connection, board_id: &str, sender: &str, verb: &str) -> 
             if db::check_role_permission(conn, &m.role, verb)? {
                 Ok(())
             } else {
-                Err(crate::core::errors::AppError::Forbidden(
-                    format!("role '{}' not permitted for verb '{}'", m.role, verb),
-                ))
+                Err(crate::core::errors::AppError::Forbidden(format!(
+                    "role '{}' not permitted for verb '{}'",
+                    m.role, verb
+                )))
             }
         }
-        None => Err(crate::core::errors::AppError::Forbidden(
-            format!("sender not a board member: {}", sender),
-        )),
+        None => Err(crate::core::errors::AppError::Forbidden(format!(
+            "sender not a board member: {}",
+            sender
+        ))),
     }
 }
 
@@ -80,9 +82,10 @@ fn require_assignee(task: &Task, sender: &str) -> AppResult<()> {
     if task.assignee == sender {
         Ok(())
     } else {
-        Err(crate::core::errors::AppError::Forbidden(
-            format!("only assignee can perform this action: {}", sender),
-        ))
+        Err(crate::core::errors::AppError::Forbidden(format!(
+            "only assignee can perform this action: {}",
+            sender
+        )))
     }
 }
 
@@ -90,9 +93,10 @@ fn require_reviewer(task: &Task, sender: &str) -> AppResult<()> {
     if task.reviewer.as_deref() == Some(sender) {
         Ok(())
     } else {
-        Err(crate::core::errors::AppError::Forbidden(
-            format!("only the assigned reviewer can perform this action: {}", sender),
-        ))
+        Err(crate::core::errors::AppError::Forbidden(format!(
+            "only the assigned reviewer can perform this action: {}",
+            sender
+        )))
     }
 }
 
@@ -101,9 +105,9 @@ fn now() -> String {
 }
 
 fn extract_task_id(cmd: &A2aCommand) -> AppResult<String> {
-    cmd.task_id.clone().ok_or_else(|| {
-        crate::core::errors::AppError::BadRequest("task_id required".to_string())
-    })
+    cmd.task_id
+        .clone()
+        .ok_or_else(|| crate::core::errors::AppError::BadRequest("task_id required".to_string()))
 }
 
 fn ok_response(task: Option<Task>) -> CommandResponse {
@@ -126,7 +130,13 @@ fn data_response(data: serde_json::Value) -> CommandResponse {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-pub fn do_complete(conn: &Connection, notifier: &Notifier, task_id: &str, sender: &str, summary: Option<String>) -> AppResult<Task> {
+pub fn do_complete(
+    conn: &Connection,
+    notifier: &Notifier,
+    task_id: &str,
+    sender: &str,
+    summary: Option<String>,
+) -> AppResult<Task> {
     let mut task = db::get_task(conn, task_id)?;
     require_assignee(&task, sender)?;
 
@@ -143,14 +153,17 @@ pub fn do_complete(conn: &Connection, notifier: &Notifier, task_id: &str, sender
     }
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0,
-        task_id: task.id.clone(),
-        event_type: "completed".to_string(),
-        actor: sender.to_string(),
-        payload: None,
-        created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "completed".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts,
+        },
+    )?;
 
     if task.reviewer.is_some() {
         notifier.notify_review_needed(&task);
@@ -161,20 +174,36 @@ pub fn do_complete(conn: &Connection, notifier: &Notifier, task_id: &str, sender
     Ok(task)
 }
 
-fn handle_complete(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_complete(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    let summary = cmd.params.as_ref()
+    let summary = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("summary").and_then(|v| v.as_str()))
         .map(|s| s.to_string());
     let task = do_complete(conn, notifier, &task_id, sender, summary)?;
     Ok(ok_response(Some(task)))
 }
 
-fn handle_review(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_review(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    let reviewer = cmd.params.as_ref()
+    let reviewer = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("reviewer").and_then(|v| v.as_str()))
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("reviewer required".to_string()))?;
+        .ok_or_else(|| {
+            crate::core::errors::AppError::BadRequest("reviewer required".to_string())
+        })?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "review")?;
     task.reviewer = Some(reviewer.to_string());
@@ -185,7 +214,12 @@ fn handle_review(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     Ok(ok_response(Some(task)))
 }
 
-fn handle_approve(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_approve(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_reviewer(&task, sender)?;
@@ -195,38 +229,62 @@ fn handle_approve(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, send
     task.completed_at = Some(ts.clone());
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "approved".to_string(),
-        actor: sender.to_string(), payload: None, created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "approved".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts,
+        },
+    )?;
     notifier.notify_approved(&task);
     promote_children(conn, notifier, &task);
     Ok(ok_response(Some(task)))
 }
 
-fn handle_reject(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_reject(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_reviewer(&task, sender)?;
 
-    let reason = cmd.params.as_ref()
+    let reason = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("reason").and_then(|v| v.as_str()))
         .unwrap_or("");
     let ts = now();
     task.status = TaskStatus::Running;
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "rejected".to_string(),
-        actor: sender.to_string(),
-        payload: Some(serde_json::json!({"reason": reason})),
-        created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "rejected".to_string(),
+            actor: sender.to_string(),
+            payload: Some(serde_json::json!({"reason": reason})),
+            created_at: ts,
+        },
+    )?;
     notifier.notify_rejected(&task, reason);
     Ok(ok_response(Some(task)))
 }
 
-fn handle_block(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_block(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     // Worker can block their own tasks; orchestrator can block any
@@ -238,15 +296,27 @@ fn handle_block(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender
     task.status = TaskStatus::Blocked;
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "blocked".to_string(),
-        actor: sender.to_string(), payload: None, created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "blocked".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts,
+        },
+    )?;
     notifier.notify_blocked(&task, sender);
     Ok(ok_response(Some(task)))
 }
 
-fn handle_unblock(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_unblock(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "unblock")?;
@@ -255,10 +325,17 @@ fn handle_unblock(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, send
     task.status = TaskStatus::Running;
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "unblocked".to_string(),
-        actor: sender.to_string(), payload: None, created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "unblocked".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts,
+        },
+    )?;
     notifier.notify_unblocked(&task, sender);
     Ok(ok_response(Some(task)))
 }
@@ -266,52 +343,87 @@ fn handle_unblock(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, send
 pub fn do_heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()> {
     let mut task = db::get_task(conn, task_id)?;
     if task.assignee != actor {
-        return Err(crate::core::errors::AppError::Forbidden("only assignee can heartbeat".to_string()));
+        return Err(crate::core::errors::AppError::Forbidden(
+            "only assignee can heartbeat".to_string(),
+        ));
     }
     if task.status == TaskStatus::Ready {
         task.status = TaskStatus::Running;
         db::update_task(conn, &task)?;
     } else if task.status != TaskStatus::Running {
-        return Err(crate::core::errors::AppError::BadRequest(format!("heartbeat invalid for task status: {}", task.status)));
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "heartbeat invalid for task status: {}",
+            task.status
+        )));
     }
     db::touch_task(conn, task_id)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task_id.to_string(), event_type: "heartbeat".to_string(),
-        actor: actor.to_string(), payload: None, created_at: now(),
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task_id.to_string(),
+            event_type: "heartbeat".to_string(),
+            actor: actor.to_string(),
+            payload: None,
+            created_at: now(),
+        },
+    )?;
     Ok(())
 }
 
-fn handle_heartbeat(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_heartbeat(
+    conn: &Connection,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     do_heartbeat(conn, &task_id, sender)?;
     Ok(ok_response(None))
 }
 
-fn handle_comment(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_comment(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    let comment = cmd.params.as_ref()
+    let comment = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("text").and_then(|v| v.as_str()))
         .unwrap_or("");
     let ts = now();
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task_id.clone(), event_type: "comment".to_string(),
-        actor: sender.to_string(),
-        payload: Some(serde_json::json!({"text": comment})),
-        created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task_id.clone(),
+            event_type: "comment".to_string(),
+            actor: sender.to_string(),
+            payload: Some(serde_json::json!({"text": comment})),
+            created_at: ts,
+        },
+    )?;
 
     let task = db::get_task(conn, &task_id)?;
     notifier.notify_comment(&task, sender, comment);
     Ok(ok_response(None))
 }
 
-fn handle_cancel(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_cancel(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "cancel")?;
     if task.status != TaskStatus::Blocked {
-        return Err(crate::core::errors::AppError::BadRequest("cancel only allowed for blocked tasks".to_string()));
+        return Err(crate::core::errors::AppError::BadRequest(
+            "cancel only allowed for blocked tasks".to_string(),
+        ));
     }
 
     let ts = now();
@@ -319,24 +431,40 @@ fn handle_cancel(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     task.cancelled_at = Some(ts.clone());
     task.updated_at = ts.clone();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "cancelled".to_string(),
-        actor: sender.to_string(), payload: None, created_at: ts,
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "cancelled".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts,
+        },
+    )?;
     notifier.notify_cancelled(&task);
     Ok(ok_response(Some(task)))
 }
 
-fn handle_reassign(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_reassign(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "reassign")?;
 
-    let new_assignee = cmd.params.as_ref()
+    let new_assignee = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("assignee").and_then(|v| v.as_str()))
         .unwrap_or("");
     if new_assignee.is_empty() {
-        return Err(crate::core::errors::AppError::BadRequest("assignee required".to_string()));
+        return Err(crate::core::errors::AppError::BadRequest(
+            "assignee required".to_string(),
+        ));
     }
     task.assignee = new_assignee.to_string();
     task.updated_at = now();
@@ -363,12 +491,18 @@ fn handle_edit(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<C
     Ok(ok_response(Some(task)))
 }
 
-fn handle_deadline(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_deadline(
+    conn: &Connection,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "deadline")?;
 
-    let deadline = cmd.params.as_ref()
+    let deadline = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("deadline").and_then(|v| v.as_str()))
         .unwrap_or("");
     task.deadline = Some(deadline.to_string());
@@ -377,32 +511,51 @@ fn handle_deadline(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResu
     Ok(ok_response(Some(task)))
 }
 
-fn handle_continue(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_continue(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_assignee(&task, sender)?;
 
-    let progress = cmd.params.as_ref()
+    let progress = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("progress").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let note = cmd.params.as_ref()
+    let note = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("note").and_then(|v| v.as_str()))
         .unwrap_or("");
 
     task.summary = progress.to_string();
     task.updated_at = now();
     db::update_task(conn, &task)?;
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "continue_request".to_string(),
-        actor: sender.to_string(),
-        payload: Some(serde_json::json!({"progress": progress, "note": note})),
-        created_at: now(),
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "continue_request".to_string(),
+            actor: sender.to_string(),
+            payload: Some(serde_json::json!({"progress": progress, "note": note})),
+            created_at: now(),
+        },
+    )?;
     notifier.notify_assigned(&task);
     Ok(ok_response(Some(task)))
 }
 
-fn handle_output(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_output(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "output")?;
@@ -416,16 +569,24 @@ fn handle_output(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     // Verify pipeline integrity
     let issues = db::verify_pipeline_integrity(conn, &task.board_id)?;
     if !issues.is_empty() {
-        return Err(crate::core::errors::AppError::BadRequest(
-            format!("pipeline issues: {}", issues.join(", ")),
-        ));
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "pipeline issues: {}",
+            issues.join(", ")
+        )));
     }
 
     let ts = now();
-    db::insert_event(conn, &TaskEvent {
-        id: 0, task_id: task.id.clone(), event_type: "output".to_string(),
-        actor: sender.to_string(), payload: None, created_at: ts.clone(),
-    })?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "output".to_string(),
+            actor: sender.to_string(),
+            payload: None,
+            created_at: ts.clone(),
+        },
+    )?;
 
     let mut board = db::get_board(conn, &task.board_id)?;
     board.output_task_id = Some(task.id.clone());
@@ -441,12 +602,17 @@ fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     let task = db::get_task(conn, &task_id)?;
 
     // Collect parent summaries
-    let parent_summaries: Vec<serde_json::Value> = task.parent_ids.iter()
+    let parent_summaries: Vec<serde_json::Value> = task
+        .parent_ids
+        .iter()
         .filter_map(|pid| {
-            db::list_tasks(conn, &task.board_id, None, None).ok()?
-                .into_iter().find(|t| t.short_id == *pid)
+            db::list_tasks(conn, &task.board_id, None, None)
+                .ok()?
+                .into_iter()
+                .find(|t| t.short_id == *pid)
                 .map(|p| json!({"short_id": p.short_id, "title": p.title, "summary": p.summary}))
-        }).collect();
+        })
+        .collect();
 
     let mut resp = ok_response(Some(task));
     if !parent_summaries.is_empty() {
@@ -457,28 +623,39 @@ fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
 
 fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
     // params: board_id (from command params)
-    let board_id = cmd.params.as_ref()
+    let board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let status = cmd.params.as_ref()
+    let status = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("status").and_then(|v| v.as_str()));
-    let assignee = cmd.params.as_ref()
+    let assignee = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("assignee").and_then(|v| v.as_str()));
     let tasks = db::list_tasks(conn, board_id, status, assignee)?;
-    let task_list: Vec<serde_json::Value> = tasks.iter().map(|t| json!({
-        "id": t.id, "short_id": t.short_id, "title": t.title,
-        "status": t.status.to_string(), "assignee": t.assignee,
-        "reviewer": t.reviewer, "parent_ids": t.parent_ids,
-    })).collect();
+    let task_list: Vec<serde_json::Value> = tasks
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id, "short_id": t.short_id, "title": t.title,
+                "status": t.status.to_string(), "assignee": t.assignee,
+                "reviewer": t.reviewer, "parent_ids": t.parent_ids,
+            })
+        })
+        .collect();
     Ok(data_response(json!({"tasks": task_list})))
 }
 
- 
-
 pub fn do_roles(conn: &Connection) -> AppResult<HashMap<String, Vec<String>>> {
     let mut stmt = conn.prepare("SELECT role, verb FROM role_permissions ORDER BY role, verb")?;
-    let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .filter_map(|r| r.ok()).collect();
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
     let mut map = HashMap::new();
     for (role, verb) in rows {
         map.entry(role).or_insert_with(Vec::new).push(verb);
@@ -487,7 +664,9 @@ pub fn do_roles(conn: &Connection) -> AppResult<HashMap<String, Vec<String>>> {
 }
 
 fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    let _board_id = cmd.params.as_ref()
+    let _board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
     let roles = do_roles(conn)?;
@@ -497,24 +676,42 @@ fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandRespons
 }
 
 fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    let board_id = cmd.params.as_ref()
+    let board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+        .ok_or_else(|| {
+            crate::core::errors::AppError::BadRequest("board_id required".to_string())
+        })?;
     let board = db::get_board(conn, board_id)?;
     let tasks = db::list_tasks(conn, board_id, None, None)?;
-    
+
     let mut groups: HashMap<String, Vec<String>> = HashMap::new();
     for t in &tasks {
-        groups.entry(t.status.to_string()).or_default().push(t.short_id.clone());
+        groups
+            .entry(t.status.to_string())
+            .or_default()
+            .push(t.short_id.clone());
     }
-    let keys = ["Ready","Running","Reviewing","Done","Blocked","Cancelled"];
+    let keys = [
+        "Ready",
+        "Running",
+        "Reviewing",
+        "Done",
+        "Blocked",
+        "Cancelled",
+    ];
     let mut pipeline = serde_json::Map::new();
     for k in &keys {
         let list = groups.remove(*k).unwrap_or_default();
         pipeline.insert(k.to_string(), json!({"count": list.len(), "tasks": list}));
     }
-    
-    tracing::info!("[a2a_board] board_status: board={} status={:?}", board.short_id, board.status);
+
+    tracing::info!(
+        "[a2a_board] board_status: board={} status={:?}",
+        board.short_id,
+        board.status
+    );
     Ok(data_response(json!({
         "board": {"id": board.id, "short_id": board.short_id, "status": board.status.to_string()},
         "pipeline": pipeline
@@ -522,13 +719,20 @@ fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<Command
 }
 
 fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    let board_id = cmd.params.as_ref()
+    let board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
     let members = db::list_members(conn, board_id)?;
-    let member_list: Vec<serde_json::Value> = members.iter().map(|m| json!({
-        "email": m.email, "role": m.role, "display_name": m.display_name
-    })).collect();
+    let member_list: Vec<serde_json::Value> = members
+        .iter()
+        .map(|m| {
+            json!({
+                "email": m.email, "role": m.role, "display_name": m.display_name
+            })
+        })
+        .collect();
     Ok(data_response(json!({"members": member_list})))
 }
 
@@ -542,10 +746,19 @@ fn handle_gateway_info(_conn: &Connection, _cmd: &A2aCommand) -> AppResult<Comma
     })
 }
 
-fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
-    let board_id = cmd.params.as_ref()
+fn handle_create(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
+    let board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+        .ok_or_else(|| {
+            crate::core::errors::AppError::BadRequest("board_id required".to_string())
+        })?;
     require_role(conn, board_id, sender, "create")?;
 
     if let Some(params) = &cmd.params {
@@ -562,19 +775,38 @@ fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
                     short_id,
                     board_id: board_id.to_string(),
                     title: title.to_string(),
-                    body: t.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    body: t
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     status: if assignee.is_empty() {
                         TaskStatus::Triage
                     } else {
                         TaskStatus::Ready
                     },
                     assignee: assignee.to_string(),
-                    reviewer: t.get("reviewer").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                    parent_ids: t.get("parents").and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    reviewer: t
+                        .get("reviewer")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    parent_ids: t
+                        .get("parents")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
-                    tags: t.get("tags").and_then(|v| v.as_array())
-                        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    tags: t
+                        .get("tags")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(String::from))
+                                .collect()
+                        })
                         .unwrap_or_default(),
                     summary: String::new(),
                     metadata: t.get("metadata").map(|v| v.to_string()),
@@ -593,13 +825,22 @@ fn handle_create(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sende
     Ok(ok_response(None))
 }
 
-fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_init(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let board_id = &notifier.board_id;
     let short_id = &notifier.board_short_id;
     let ts = now();
 
-    let description = cmd.params.as_ref()
-        .and_then(|p| p.get("description")).and_then(|v| v.as_str()).map(String::from);
+    let description = cmd
+        .params
+        .as_ref()
+        .and_then(|p| p.get("description"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let board = Board {
         id: board_id.clone(),
         short_id: short_id.clone(),
@@ -608,11 +849,11 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
         status: BoardStatus::Active,
         output_task_id: None,
         plan_version: None,
-            plan_text: None,
+        plan_text: None,
         plan_confirmed_at: None,
         criteria_version: None,
-            criteria_text: None,
-            criteria_confirmed_at: None,
+        criteria_text: None,
+        criteria_confirmed_at: None,
         gateway_url: notifier.board_id.clone(),
         created_at: ts.clone(),
         completed_at: None,
@@ -620,38 +861,54 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
     db::create_board(conn, &board)?;
 
     // Add members (required)
-    let members_arr = cmd.params.as_ref()
+    let members_arr = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("members"))
         .and_then(|v| v.as_array())
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("members array required".to_string()))?;
+        .ok_or_else(|| {
+            crate::core::errors::AppError::BadRequest("members array required".to_string())
+        })?;
     for m in members_arr {
         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("worker");
-        let display_name = m.get("display_name").and_then(|v| v.as_str()).unwrap_or(email);
+        let display_name = m
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(email);
         if !email.is_empty() {
-            db::add_member(conn, &Member {
-                email: email.to_string(),
-                role: role.to_string(),
-                display_name: display_name.to_string(),
-                board_id: board_id.clone(),
-                board_token: Some(db::generate_board_token()),
-                joined_at: Some(ts.clone()),
-                domains: None,
-                capability_snapshot: None,
-            })?;
+            db::add_member(
+                conn,
+                &Member {
+                    email: email.to_string(),
+                    role: role.to_string(),
+                    display_name: display_name.to_string(),
+                    board_id: board_id.clone(),
+                    board_token: Some(db::generate_board_token()),
+                    joined_at: Some(ts.clone()),
+                    domains: None,
+                    capability_snapshot: None,
+                },
+            )?;
         }
     }
 
     // Hardcoded: only human can refresh board
     let sender_member = db::get_member(conn, board_id, sender)?;
     match sender_member {
-        Some(m) if m.role == "owner" => {},
-        _ => return Err(crate::core::errors::AppError::Forbidden("only human can refresh board".to_string())),
+        Some(m) if m.role == "owner" => {}
+        _ => {
+            return Err(crate::core::errors::AppError::Forbidden(
+                "only human can refresh board".to_string(),
+            ))
+        }
     }
 
     // Seed role_permissions: defaults first, then user overrides
     seed_default_role_permissions(conn)?;
-    if let Some(permissions) = cmd.params.as_ref()
+    if let Some(permissions) = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("role_permissions"))
         .and_then(|v| v.as_array())
     {
@@ -659,7 +916,8 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
             .iter()
             .filter_map(|entry| {
                 let role = entry.get("role")?.as_str()?.to_string();
-                let verbs: Vec<String> = entry.get("verbs")?
+                let verbs: Vec<String> = entry
+                    .get("verbs")?
                     .as_array()?
                     .iter()
                     .filter_map(|v| v.as_str().map(String::from))
@@ -668,27 +926,83 @@ fn handle_init(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender:
             })
             .collect();
         db::insert_role_permissions(conn, board_id, &perms)?;
-        tracing::info!("[a2a_board] role_permissions override: {} roles", perms.len());
+        tracing::info!(
+            "[a2a_board] role_permissions override: {} roles",
+            perms.len()
+        );
     }
 
     notifier.notify_all(board_id, &format!("Board {} initialized", short_id));
     Ok(ok_response(None))
 }
 
-
 /// Default role-permission mappings (secure defaults).
 /// Each verb is mapped to allowed roles. If role_permissions is provided in init,
 /// these defaults are overwritten by the user-specified values.
 fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     let defaults: &[(&str, &[&str])] = &[
-        ("orchestrator", &["create","assign","review","block","unblock",
-                           "cancel","reassign","edit","deadline","notify",
-                           "members","roles","config","arbitrate","comment","list","show",
-                           "status","heartbeat"]),
-        ("verifier",     &["verify","approve","reject","output","comment",
-                           "list","show","roles","members","status","heartbeat"]),
-        ("worker",       &["complete","commit","block","heartbeat","comment","list","show","roles","members","status"]),
-        ("owner",        &["create","unblock","reassign","reopen","comment","list","show","status","members","roles"]),
+        (
+            "orchestrator",
+            &[
+                "create",
+                "assign",
+                "review",
+                "block",
+                "unblock",
+                "cancel",
+                "reassign",
+                "edit",
+                "deadline",
+                "notify",
+                "members",
+                "roles",
+                "config",
+                "arbitrate",
+                "comment",
+                "list",
+                "show",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "verifier",
+            &[
+                "verify",
+                "approve",
+                "reject",
+                "output",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "worker",
+            &[
+                "complete",
+                "commit",
+                "block",
+                "heartbeat",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+            ],
+        ),
+        (
+            "owner",
+            &[
+                "create", "unblock", "reassign", "reopen", "comment", "list", "show", "status",
+                "members", "roles",
+            ],
+        ),
     ];
     for (role, verbs) in defaults {
         for verb in *verbs {
@@ -701,10 +1015,19 @@ fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-fn handle_reopen(conn: &Connection, _notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
-    let board_id = cmd.params.as_ref()
+fn handle_reopen(
+    conn: &Connection,
+    _notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
+    let board_id = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
-        .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;
+        .ok_or_else(|| {
+            crate::core::errors::AppError::BadRequest("board_id required".to_string())
+        })?;
     require_role(conn, board_id, sender, "reopen")?;
 
     let mut board = db::get_board(conn, board_id)?;
@@ -732,7 +1055,12 @@ fn handle_reopen(conn: &Connection, _notifier: &Notifier, cmd: &A2aCommand, send
     Ok(ok_response(None))
 }
 
-fn handle_arbitrate(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_arbitrate(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let task_id = cmd.task_id.clone().unwrap_or_default();
     let task = if task_id.is_empty() {
         None
@@ -749,7 +1077,9 @@ fn handle_arbitrate(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, se
         ));
     }
 
-    let dispute = cmd.params.as_ref()
+    let dispute = cmd
+        .params
+        .as_ref()
         .and_then(|p| p.get("dispute").and_then(|v| v.as_str()))
         .unwrap_or("");
     let admin_email = ""; // TODO: resolve from board config
@@ -781,16 +1111,15 @@ fn promote_children(conn: &Connection, notifier: &Notifier, parent: &Task) {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::db;
-    use std::cell::RefCell;
-use crate::board::models::*;
+    use crate::board::models::*;
     use crate::board::notify::Notifier;
     use crate::core::email::factory::EmailFactory;
     use rusqlite::Connection;
+    use std::cell::RefCell;
     use std::sync::Arc;
 
     fn setup() -> (Connection, String, Notifier) {
@@ -825,15 +1154,19 @@ use crate::board::models::*;
             ("worker@t.io", "worker"),
             ("human@t.io", "owner"),
         ] {
-            db::add_member(&conn, &Member {
-                email: email.to_string(),
-                role: role.to_string(),
-                display_name: email.to_string(),
-                board_id: board_id.to_string(),
-                joined_at: None,
-                domains: None,
-                capability_snapshot: None,
-            }).unwrap();
+            db::add_member(
+                &conn,
+                &Member {
+                    email: email.to_string(),
+                    role: role.to_string(),
+                    display_name: email.to_string(),
+                    board_id: board_id.to_string(),
+                    joined_at: None,
+                    domains: None,
+                    capability_snapshot: None,
+                },
+            )
+            .unwrap();
         }
 
         let notifier = Notifier {
@@ -847,7 +1180,11 @@ use crate::board::models::*;
         (conn, board_id.to_string(), notifier)
     }
 
-    fn make_cmd(verb: &str, task_id: Option<&str>, params: Option<serde_json::Value>) -> A2aCommand {
+    fn make_cmd(
+        verb: &str,
+        task_id: Option<&str>,
+        params: Option<serde_json::Value>,
+    ) -> A2aCommand {
         A2aCommand {
             verb: verb.to_string(),
             task_id: task_id.map(|s| s.to_string()),
@@ -1119,7 +1456,11 @@ use crate::board::models::*;
         let (conn, board_id, board) = setup_with_board();
         let nn = NullNotifier;
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("reassign", Some(&tid), Some(serde_json::json!({"assignee": "veri@t.io"})));
+        let cmd = make_cmd(
+            "reassign",
+            Some(&tid),
+            Some(serde_json::json!({"assignee": "veri@t.io"})),
+        );
         let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
@@ -1143,7 +1484,11 @@ use crate::board::models::*;
         let (conn, board_id, board) = setup_with_board();
         let nn = NullNotifier;
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("edit", Some(&tid), Some(serde_json::json!({"title": "New Title"})));
+        let cmd = make_cmd(
+            "edit",
+            Some(&tid),
+            Some(serde_json::json!({"title": "New Title"})),
+        );
         let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
@@ -1210,7 +1555,11 @@ use crate::board::models::*;
         };
         db::create_task(&conn, &t).unwrap();
         let tid = t.id.clone();
-        let cmd = make_cmd("reject", Some(&tid), Some(serde_json::json!({"reason": "needs revision"})));
+        let cmd = make_cmd(
+            "reject",
+            Some(&tid),
+            Some(serde_json::json!({"reason": "needs revision"})),
+        );
         execute_command(&conn, &nn.as_notifier(&board), &cmd, "veri@t.io").unwrap();
         let task = db::get_task(&conn, &tid).unwrap();
         assert_eq!(task.status, TaskStatus::Running);

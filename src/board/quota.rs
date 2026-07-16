@@ -6,7 +6,8 @@ use crate::core::errors::AppResult;
 pub trait BoardQuotaChecker: Send + Sync {
     fn check_active_boards(&self, system_id: &str) -> AppResult<()>;
     /// Invalidate cached board count — called after board create or archive.
-    fn invalidate_cache(&self) { /* default no-op */ }
+    fn invalidate_cache(&self) { /* default no-op */
+    }
 }
 
 /// Default no-op: no limits.

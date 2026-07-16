@@ -10,7 +10,6 @@ use crate::core::strategy::{SystemStore, WhitelistKeyResolver};
 
 /// Default resolver: single exact match (address-level only).
 
-
 /// Database-backed environment factory.
 #[derive(Clone)]
 pub struct EnvFactory {
@@ -44,11 +43,16 @@ impl EnvFactory {
     }
 
     // ── Interceptors ──
-    pub fn get_interceptors(&self) -> &Arc<RwLock<Vec<Arc<dyn crate::core::strategy::InboundInterceptor>>>> {
+    pub fn get_interceptors(
+        &self,
+    ) -> &Arc<RwLock<Vec<Arc<dyn crate::core::strategy::InboundInterceptor>>>> {
         &self.interceptors
     }
 
-    pub fn register_interceptor(&self, interceptor: Arc<dyn crate::core::strategy::InboundInterceptor>) {
+    pub fn register_interceptor(
+        &self,
+        interceptor: Arc<dyn crate::core::strategy::InboundInterceptor>,
+    ) {
         let mut list = self.interceptors.write().unwrap();
         list.push(interceptor);
         // Sort by priority (lowest first)
@@ -76,7 +80,10 @@ impl EnvFactory {
     ) -> AppResult<SystemDomainRecord> {
         // Pre-check: domain must be globally unique
         if self.lookup_domain_addr(domain).await?.is_some() {
-            return Err(AppError::Conflict(format!("Domain '{}' already exists", domain)));
+            return Err(AppError::Conflict(format!(
+                "Domain '{}' already exists",
+                domain
+            )));
         }
         let record = self
             .db
@@ -99,10 +106,7 @@ impl EnvFactory {
     /// Look up a system-domain record by domain_addr key.
     /// Key can be a bare domain ("example.com") or a full address ("user@example.com").
     /// Performs exact match — no fallback logic. Caller decides what to pass.
-    pub async fn lookup_domain_addr(
-        &self,
-        key: &str,
-    ) -> AppResult<Option<SystemDomainRecord>> {
+    pub async fn lookup_domain_addr(&self, key: &str) -> AppResult<Option<SystemDomainRecord>> {
         self.db.get_system_domain_by_name(key).await
     }
 
@@ -320,19 +324,22 @@ impl EnvFactory {
     }
 
     /// Count active whitelist entries for a scope (domain, directions).
-    /// 
+    ///
     /// P0 gate: used by HTTP send ("to"/"all") and SMTP receive ("from"/"all").
     /// Returns 0 → reject immediately (no whitelist protection at all).
     ///
     /// Uses WhitelistKeyResolver to determine lookup keys.
-   pub async fn count_whitelist_entries(
+    pub async fn count_whitelist_entries(
         &self,
         domain: &str,
         directions: &[&str],
     ) -> AppResult<i64> {
         let keys = self.domain_resolver.resolve(&self.db, domain).await?;
         for (system_id, lookup_key) in &keys {
-            let count = self.db.count_whitelist_entries(system_id, lookup_key, directions).await?;
+            let count = self
+                .db
+                .count_whitelist_entries(system_id, lookup_key, directions)
+                .await?;
             if count > 0 {
                 return Ok(count);
             }
@@ -361,7 +368,11 @@ impl EnvFactory {
     ) -> AppResult<bool> {
         let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
         for (system_id, lookup_key) in &keys {
-            if self.db.is_whitelisted(system_id, lookup_key, value, direction).await? {
+            if self
+                .db
+                .is_whitelisted(system_id, lookup_key, value, direction)
+                .await?
+            {
                 return Ok(true);
             }
         }
