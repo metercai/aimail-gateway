@@ -84,11 +84,8 @@ impl Server {
         let metrics = self.metrics;
         let config = self.config;
 
-        {
-            let endpoint = amail_base::core::server::api_endpoint_url(&config);
-            let has_tls = false;
-            info!(%endpoint, has_tls, "HTTP API endpoint");
-        }
+        let endpoint = amail_base::core::server::api_endpoint_url(&config);
+        info!(%endpoint, "HTTP API endpoint");
 
         let db_arc = Arc::new(db.clone());
 
