@@ -86,7 +86,7 @@ impl Server {
 
         {
             let endpoint = amail_base::core::server::api_endpoint_url(&config);
-    let has_tls = false;
+            let has_tls = false;
             info!(%endpoint, has_tls, "HTTP API endpoint");
         }
 
