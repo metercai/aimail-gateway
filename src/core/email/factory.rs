@@ -792,11 +792,26 @@ pub struct AttachmentFactory {
     attachments_dir: PathBuf,
 }
 
-/// Bundle of both factories, always used together.
+/// Bundle of both factories, always used together — stores Arcs internally
+/// so HttpState clone and per-connection SMTP cloning are both O(1).
 #[derive(Clone)]
 pub struct MailFactories {
-    pub email: EmailFactory,
-    pub attachment: AttachmentFactory,
+    pub email: Arc<EmailFactory>,
+    pub attachment: Arc<AttachmentFactory>,
+}
+
+impl MailFactories {
+    /// Create both factories from shared dependencies.
+    pub fn new(
+        db: Arc<Database>,
+        attachments_dir: PathBuf,
+        system_store: Arc<dyn SystemStore>,
+    ) -> Self {
+        Self {
+            email: Arc::new(EmailFactory::new(db.clone(), attachments_dir.clone(), system_store)),
+            attachment: Arc::new(AttachmentFactory::new(db, attachments_dir)),
+        }
+    }
 }
 
 impl AttachmentFactory {

@@ -26,8 +26,8 @@ pub fn spawn_smtp(
     let metrics = http_state.metrics.clone();
 
     // Extract owned Arc values before entering async move
-    let email_factory = Arc::new(http_state.factories.email.clone());
-    let attachment_factory = Arc::new(http_state.factories.attachment.clone());
+    let email_factory = http_state.factories.email.clone();
+    let attachment_factory = http_state.factories.attachment.clone();
     let arc_config = Arc::new(http_state.config.clone());
     let trigger_tx = http_state.trigger_tx.clone();
     let inbound_security = http_state.extensions.inbound_security.clone();
@@ -214,8 +214,8 @@ pub fn spawn_retry_worker(
     deps: RetryDependencies,
     cancel: CancellationToken,
 ) -> JoinHandle<AppResult<()>> {
-    let email_factory = http_state.factories.email.clone();
-    let attachment_factory = http_state.factories.attachment.clone();
+    let email_factory = (*http_state.factories.email).clone();
+    let attachment_factory = (*http_state.factories.attachment).clone();
     let config = http_state.config.clone();
     let metrics = (*http_state.metrics).clone();
     let dkim_signer = Some(http_state.extensions.dkim_signer.clone() as Arc<dyn crate::core::strategy::MessageSigner>);
@@ -313,7 +313,7 @@ pub fn create_dns_resolver(config: &Config) -> AppResult<Arc<hickory_resolver::T
 pub fn register_stranger_interceptor(
     http_state: &HttpState,
 ) {
-    let email_factory = Arc::new(http_state.factories.email.clone());
+    let email_factory = http_state.factories.email.clone();
     email_factory.env_factory.register_interceptor(
         std::sync::Arc::new(
             crate::core::stranger_interceptor::StrangerInterceptor::new(
@@ -328,8 +328,8 @@ pub fn register_stranger_interceptor(
 pub fn register_board_interceptors(
     http_state: &HttpState,
 ) {
-    let email_factory = Arc::new(http_state.factories.email.clone());
-    let attachment_factory = Arc::new(http_state.factories.attachment.clone());
+    let email_factory = http_state.factories.email.clone();
+    let attachment_factory = http_state.factories.attachment.clone();
     let storage_path = http_state.config.storage.path.to_str().unwrap_or("");
     let endpoint = api_endpoint_url(&http_state.config);
     let board_quota = http_state.extensions.board_quota.clone();

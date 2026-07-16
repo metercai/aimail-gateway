@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
-use crate::core::email::factory::{AttachmentFactory, EmailFactory, MailFactories};
+use crate::core::email::factory::MailFactories;
 use crate::core::storage::{ApiKeyRecord, SystemDomainRecord, SystemRecord, WhitelistRecord};
 use crate::core::strategy::ExtensionProviders;
 

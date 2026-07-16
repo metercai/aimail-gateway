@@ -7,8 +7,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use amail_base::core::config::Config;
-use amail_base::core::email::factory::AttachmentFactory;
-use amail_base::core::email::factory::EmailFactory;
 use amail_base::core::errors::AppResult;
 use amail_base::core::storage::Database;
 
@@ -98,22 +96,13 @@ impl Server {
         let system_store: Arc<dyn amail_base::core::strategy::SystemStore> =
             Arc::new(amail_base::base::strategy::BaseSystemStore);
 
-        let email_factory = Arc::new(EmailFactory::new(
-            db_arc.clone(),
-            config.storage.attachments_dir(),
-            system_store.clone(),
-        ));
-        let attachment_factory = Arc::new(AttachmentFactory::new(
-            db_arc.clone(),
-            config.storage.attachments_dir(),
-        ));
-
         let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
         let http_state = amail_base::core::api::types::HttpState {
-            factories: amail_base::core::email::factory::MailFactories {
-                email: (*email_factory).clone(),
-                attachment: (*attachment_factory).clone(),
-            },
+            factories: amail_base::core::email::factory::MailFactories::new(
+                db_arc.clone(),
+                config.storage.attachments_dir(),
+                system_store.clone(),
+            ),
             metrics: metrics.clone(),
             config: config.clone(),
             trigger_tx: trigger_tx.clone(),
