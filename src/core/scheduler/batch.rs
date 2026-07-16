@@ -132,4 +132,7 @@ pub(crate) async fn process_batch(
             }
         }
     }
+
+    // ── Flow 5: Board lifecycle management ──
+    crate::board::sweeper::board_sweeper_flow(config);
 }
