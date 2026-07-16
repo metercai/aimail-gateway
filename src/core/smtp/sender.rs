@@ -66,9 +66,10 @@ impl SmtpRelay {
         let transport = if has_relay {
             SmtpTransportMode::Relay(build_transport(config, hostname)?)
         } else if let Some(resolver) = dns_resolver {
+            let mx_overrides = config.mx_dns_override.clone().unwrap_or_default();
             SmtpTransportMode::DirectMx(Arc::new(MxDelivererImpl::new(
                 resolver,
-                std::collections::HashMap::new(),
+                mx_overrides,
             )))
         } else {
             return Err(AppError::Config(

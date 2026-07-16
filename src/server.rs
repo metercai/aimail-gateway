@@ -175,6 +175,21 @@ impl Server {
 
         let metrics_for_worker = (*metrics).clone();
         let inflight = scheduler::new_inflight_set();
+        // Shared DNS resolver — priority: relay.dns_server > system resolv.conf
+        let dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>> = if let Some(ref addr_str) = config.relay.dns_server {
+            let sa: std::net::SocketAddr = addr_str.parse().unwrap_or_else(|_| {
+                panic!("Invalid relay.dns_server address: {addr_str}")
+            });
+            let mut resolver_cfg = hickory_resolver::config::ResolverConfig::new();
+            resolver_cfg.add_name_server(hickory_resolver::config::NameServerConfig::new(
+                sa,
+                hickory_resolver::config::Protocol::Udp,
+            ));
+            let opts = hickory_resolver::config::ResolverOpts::default();
+            Some(Arc::new(hickory_resolver::TokioAsyncResolver::tokio(resolver_cfg, opts)))
+        } else {
+            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok().map(Arc::new)
+        };
         let mut retry_handle = amail_base::core::server::spawn_retry_worker(
             (*email_factory).clone(),
             (*attachment_factory).clone(),
@@ -184,8 +199,7 @@ impl Server {
             cancel.clone(),
             inflight,
             Some(dkim_signer.clone() as Arc<dyn MessageSigner>),
-            // MX direct delivery: use system DNS resolver
-            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok().map(std::sync::Arc::new),
+            dns_resolver,
         );
         let mut http_handle =
             amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());

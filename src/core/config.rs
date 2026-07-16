@@ -211,6 +211,11 @@ pub struct RelayConfig {
     pub smtp_server: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Custom DNS server address (host:port) for all DNS queries (SPF, MX, DKIM).
+    /// Takes precedence over system /etc/resolv.conf.
+    /// Override precedence: mx_dns_override > dns_server > resolv.conf
+    #[serde(default)]
+    pub dns_server: Option<String>,
     #[serde(default = "default_auto_reply_from")]
     pub auto_reply_from: Option<String>,
     #[serde(default = "default_auto_reply_subject_prefix")]
@@ -221,6 +226,10 @@ pub struct RelayConfig {
     /// for this long before being finalized to "completed". Default: 7200s (2h).
     #[serde(default = "default_delivery_window")]
     pub delivery_window_secs: u64,
+    /// MX DNS overrides for direct delivery mode (domain -> host:port).
+    /// Only used when relay.smtp_server is empty (direct MX mode).
+    #[serde(default)]
+    pub mx_dns_override: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for RelayConfig {
@@ -229,10 +238,12 @@ impl Default for RelayConfig {
             smtp_server: None,
             username: None,
             password: None,
+            dns_server: None,
             auto_reply_from: default_auto_reply_from(),
             auto_reply_subject_prefix: default_auto_reply_subject_prefix(),
             auto_reply_body: default_auto_reply_body(),
             delivery_window_secs: default_delivery_window(),
+            mx_dns_override: None,
         }
     }
 }
