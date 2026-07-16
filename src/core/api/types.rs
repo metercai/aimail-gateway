@@ -7,15 +7,14 @@ use tokio::sync::mpsc;
 
 use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
-use crate::core::email::factory::{AttachmentFactory, EmailFactory};
+use crate::core::email::factory::{AttachmentFactory, EmailFactory, MailFactories};
 use crate::core::storage::{ApiKeyRecord, SystemDomainRecord, SystemRecord, WhitelistRecord};
 use crate::core::strategy::ExtensionProviders;
 
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
 pub struct HttpState {
-    pub email_factory: EmailFactory,
-    pub attachment_factory: AttachmentFactory,
+    pub factories: MailFactories,
     pub metrics: Arc<Metrics>,
     pub config: Config,
     pub trigger_tx: mpsc::Sender<String>,

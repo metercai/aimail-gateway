@@ -163,8 +163,7 @@ pub async fn batch_generate_codes(
     let count = body.get("count").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
 
     if let Some(email) = email {
-        let record = state
-            .email_factory
+        let record = state.factories.email
             .env_factory
             .lookup_domain_addr(email)
             .await
@@ -192,8 +191,7 @@ pub async fn batch_generate_codes(
             }))),
             _ => {}
         }
-        let meta = state
-            .email_factory
+        let meta = state.factories.email
             .env_factory
             .resolve_domain_addr_meta(email)
             .await
@@ -215,7 +213,7 @@ pub async fn batch_generate_codes(
     }
 
     let raw_codes = generate_activation_codes(
-        &state.email_factory.env_factory.db,
+        &state.factories.email.env_factory.db,
         system_id,
         domain,
         email,
@@ -269,8 +267,7 @@ pub async fn activate_address_handler(
 
     let email_domain = email.rsplit('@').next().unwrap_or("");
     if !email_domain.is_empty() {
-        let has_domain = state
-            .email_factory
+        let has_domain = state.factories.email
             .env_factory
             .lookup_domain_addr(email_domain)
             .await
@@ -292,11 +289,11 @@ pub async fn activate_address_handler(
     }
 
     let (raw_key, api_key_id) = activate_address_code(
-        &state.email_factory.env_factory.db,
+        &state.factories.email.env_factory.db,
         code,
         email,
         &scopes,
-        &state.email_factory.env_factory,
+        &state.factories.email.env_factory,
     )
     .await
     .map_err(|e| {

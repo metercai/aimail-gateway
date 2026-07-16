@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::board::quota::BoardQuotaChecker;
 use crate::core::storage::Database;
 
 // ── InboundSecurity ───────────────────────────────────────────────────
@@ -146,4 +147,5 @@ pub struct ExtensionProviders {
     pub quota_checker: Arc<dyn QuotaChecker>,
     pub dkim_signer: Arc<dyn MessageSigner>,
     pub inbound_security: Arc<dyn InboundSecurity>,
+    pub board_quota: Arc<dyn BoardQuotaChecker>,
 }

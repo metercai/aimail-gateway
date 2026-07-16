@@ -10,7 +10,6 @@ use amail_base::core::config::Config;
 use amail_base::core::email::factory::AttachmentFactory;
 use amail_base::core::email::factory::EmailFactory;
 use amail_base::core::errors::AppResult;
-use amail_base::board::quota::NoopBoardQuota;
 use amail_base::core::storage::Database;
 
 use amail_base::core::api::http::create_router;
@@ -109,31 +108,21 @@ impl Server {
             config.storage.attachments_dir(),
         ));
 
-        // ── Register interceptors (a2a_board, [WHOAMI]) ──
-        {
-            let endpoint = amail_base::core::server::api_endpoint_url(&config);
-            amail_base::core::server::register_stranger_interceptor(
-                &email_factory,
-                "admin",
-            );
-            amail_base::core::server::register_board_interceptors(
-                &email_factory,
-                &attachment_factory,
-                config.storage.path.to_str().unwrap_or(""),
-                &endpoint,
-                Arc::new(NoopBoardQuota),
-            );
-        }
-
         let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
         let http_state = amail_base::core::api::types::HttpState {
-            email_factory: (*email_factory).clone(),
-            attachment_factory: (*attachment_factory).clone(),
+            factories: amail_base::core::email::factory::MailFactories {
+                email: (*email_factory).clone(),
+                attachment: (*attachment_factory).clone(),
+            },
             metrics: metrics.clone(),
             config: config.clone(),
             trigger_tx: trigger_tx.clone(),
             extensions: extensions.clone(),
         };
+
+        // ── Register interceptors (a2a_board, [WHOAMI]) ──
+        amail_base::core::server::register_stranger_interceptor(&http_state);
+        amail_base::core::server::register_board_interceptors(&http_state);
         let base_hook: Arc<dyn RouterHook> = Arc::new(
             amail_base::base::strategy::BaseRouterHook(http_state.clone()),
         );

@@ -7,6 +7,7 @@ use crate::core::errors::{AppError, AppResult};
 
 use std::sync::Arc;
 
+use crate::board::quota::NoopBoardQuota;
 use crate::core::strategy::{
     ExtensionProviders, InboundSecurity, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook,
     SystemStore,
@@ -86,7 +87,7 @@ pub struct BaseRouterHook(pub crate::core::api::types::HttpState);
 
 impl RouterHook for BaseRouterHook {
     fn mount(&self, router: axum::Router) -> axum::Router {
-        let api_env_factory = self.0.email_factory.env_factory.clone();
+        let api_env_factory = self.0.factories.email.env_factory.clone();
         let batch = axum::Router::new()
             .route(
                 "/api/v1/admin/activation-codes/batch",
@@ -110,6 +111,7 @@ impl ExtensionProviders {
             quota_checker: Arc::new(BaseQuotaChecker),
             dkim_signer: Arc::new(BaseMessageSigner),
             inbound_security: Arc::new(BaseInboundSecurity),
+            board_quota: Arc::new(NoopBoardQuota),
         }
     }
 }

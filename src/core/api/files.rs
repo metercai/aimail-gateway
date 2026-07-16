@@ -80,8 +80,7 @@ pub async fn upload_attachment(
     let attachment_id = Uuid::new_v4().to_string();
 
     // Use AttachmentFactory::save_attachment with mail_id="" and recipient=email_address
-    match state
-        .attachment_factory
+    match state.factories.attachment
         .save_attachment(
             &state.config.storage,
             &api_key.email_address,
@@ -149,7 +148,7 @@ pub async fn download_attachment(
 ) -> Result<Response<Body>, (StatusCode, Json<ErrorResponse>)> {
     require_scope(&api_key, "agent")?;
 
-    let record = match state.attachment_factory.get_meta(&id).await {
+    let record = match state.factories.attachment.get_meta(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return Err((
@@ -172,8 +171,7 @@ pub async fn download_attachment(
     };
 
     // Check permission
-    match state
-        .attachment_factory
+    match state.factories.attachment
         .consume_download(&id, &api_key.email_address)
         .await
     {
@@ -192,8 +190,7 @@ pub async fn download_attachment(
 
     // Compute file path from sender_email and attachment_id
     let ext = record.filename.rsplit('.').next().unwrap_or("dat");
-    let file_path = state
-        .attachment_factory
+    let file_path = state.factories.attachment
         .file_path(&record.sender_email, &id, ext);
 
     match AttachmentFactory::open_attachment(&file_path).await {

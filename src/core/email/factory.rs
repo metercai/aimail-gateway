@@ -792,6 +792,13 @@ pub struct AttachmentFactory {
     attachments_dir: PathBuf,
 }
 
+/// Bundle of both factories, always used together.
+#[derive(Clone)]
+pub struct MailFactories {
+    pub email: EmailFactory,
+    pub attachment: AttachmentFactory,
+}
+
 impl AttachmentFactory {
     pub fn new(db: Arc<Database>, attachments_dir: PathBuf) -> Self {
         AttachmentFactory {

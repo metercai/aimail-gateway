@@ -43,7 +43,7 @@ pub fn create_router(
         .with_state(state.clone());
 
     // API routes: auth layer
-    let api_env_factory = state.email_factory.env_factory.clone();
+    let api_env_factory = state.factories.email.env_factory.clone();
     let api = Router::new()
         // API Key CRUD
         .route("/api/v1/key/rotate", post(rotate_own_key))
@@ -156,7 +156,7 @@ async fn rotate_own_key(
     let raw_key = Uuid::new_v4().to_string().replace('-', "");
     let key_hash = sha256_hex(&raw_key);
     let new_prefix = &raw_key[..8];
-    match state.email_factory.env_factory.rotate_api_key(api_key.id, &key_hash, new_prefix).await {
+    match state.factories.email.env_factory.rotate_api_key(api_key.id, &key_hash, new_prefix).await {
         Ok(Some(_record)) => Ok(Json(serde_json::json!({"raw_key": raw_key}))),
         Ok(None) => Err((StatusCode::NOT_FOUND, Json(ErrorResponse { error: "API key not found".to_string(), detail: None }))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string(), detail: Some(e.to_string()) }))),
@@ -193,7 +193,7 @@ pub async fn create_system_domain(
         }
     }
     // Verify system exists
-    match state.email_factory.env_factory.resolve_system(&tid).await {
+    match state.factories.email.env_factory.resolve_system(&tid).await {
         Ok(Some(_)) => {
             // ── Domain quota check (only for bare domains) ──
             state
@@ -231,8 +231,7 @@ pub async fn create_system_domain(
         }
     }
 
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .create_domain(
             &req.id,
@@ -303,8 +302,7 @@ async fn register_address(
     }
 
     // Verify system exists
-    let system = state
-        .email_factory
+    let system = state.factories.email
         .env_factory
         .resolve_system(&tid)
         .await
@@ -328,8 +326,7 @@ async fn register_address(
     }
 
     // Verify bare domain already exists under this system
-    let domain_record = state
-        .email_factory
+    let domain_record = state.factories.email
         .env_factory
         .lookup_domain_addr(bare_domain)
         .await
@@ -366,8 +363,7 @@ async fn register_address(
     }
 
     // Create system_domains + domain_addr_meta for the agent email
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .create_domain(
             &req.id,
@@ -391,7 +387,7 @@ async fn register_address(
 
             if query.generate_code {
                 match crate::core::api::activation::generate_activation_codes(
-                    &state.email_factory.env_factory.db,
+                    &state.factories.email.env_factory.db,
                     &tid,
                     bare_domain,
                     Some(&req.email),
@@ -454,8 +450,7 @@ async fn list_system_domains(
     Path(tid): Path<String>,
 ) -> Result<Json<Vec<SystemDomainResponse>>, (StatusCode, Json<ErrorResponse>)> {
     require_scope_any(&api_key, &["system"])?;
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .list_domains_by_system(&tid)
         .await
@@ -485,8 +480,7 @@ async fn check_domain_exists(
             detail: None,
         })));
     }
-    let exists = state
-        .email_factory
+    let exists = state.factories.email
         .env_factory
         .lookup_domain_addr(domain)
         .await
@@ -509,7 +503,7 @@ async fn update_system_domain(
 ) -> Result<Json<SystemDomainResponse>, (StatusCode, Json<ErrorResponse>)> {
     require_scope_any(&api_key, &["system"])?;
     // Verify existence and domain ownership
-    let existing_domain = match state.email_factory.env_factory.resolve_domain(&id).await {
+    let existing_domain = match state.factories.email.env_factory.resolve_domain(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return Err((
@@ -544,8 +538,7 @@ async fn update_system_domain(
         }
     }
 
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .update_domain(
             &id,
@@ -586,7 +579,7 @@ async fn delete_system_domain(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     require_scope_any(&api_key, &["system"])?;
     // Verify existence and domain ownership
-    let existing_domain = match state.email_factory.env_factory.resolve_domain(&id).await {
+    let existing_domain = match state.factories.email.env_factory.resolve_domain(&id).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return Err((
@@ -619,7 +612,7 @@ async fn delete_system_domain(
         }
     }
 
-    match state.email_factory.env_factory.delete_domain(&id).await {
+    match state.factories.email.env_factory.delete_domain(&id).await {
         Ok(()) => {
             info!(operation = "domain_deleted", system_domain_id = %id, "System domain deleted");
             Ok(StatusCode::NO_CONTENT)
@@ -647,8 +640,7 @@ async fn update_agent_meta(
     require_scope_any(&api_key, &["system"])?;
 
     let email = email.to_lowercase();
-    let existing = state
-        .email_factory
+    let existing = state.factories.email
         .env_factory
         .resolve_domain_addr_meta(&email)
         .await
@@ -697,8 +689,7 @@ async fn update_agent_meta(
         .as_deref()
         .unwrap_or(&existing.agent_persona);
 
-    state
-        .email_factory
+    state.factories.email
         .env_factory
         .upsert_domain_addr_meta(
             &email,
@@ -725,8 +716,7 @@ async fn update_agent_meta(
         let _system_id = &existing.system_id;
         // Remove old manager whitelist entry if it existed
         if !existing.manager_address.is_empty() {
-            let _ = state
-                .email_factory
+            let _ = state.factories.email
                 .env_factory
                 .delete_whitelist_entry_by_value(
                     &email,
@@ -736,8 +726,7 @@ async fn update_agent_meta(
         }
         // Create new manager whitelist entry
         if !manager.is_empty() {
-            let _ = state
-                .email_factory
+            let _ = state.factories.email
                 .env_factory
                 .create_whitelist_entry(
                     &email,
@@ -768,8 +757,7 @@ async fn create_whitelist(
     if is_agent_scope(&api_key) || is_agent_admin_scope(&api_key) {
         // AA: verify manager binding via domain_addr_meta
         let agent_key_id = if is_agent_admin_scope(&api_key) {
-            let meta = state
-                .email_factory
+            let meta = state.factories.email
                 .env_factory
                 .resolve_domain_addr_meta(&req.domain_addr)
                 .await
@@ -802,8 +790,7 @@ async fn create_whitelist(
                 ));
             }
             // Find the agent's API key to bind the whitelist entry
-            state
-                .email_factory
+            state.factories.email
                 .env_factory
                 .resolve_api_key_by_email(&req.domain_addr)
                 .await
@@ -823,8 +810,7 @@ async fn create_whitelist(
         };
         // Whitelist per-key limit enforced by advanced edition
         // via RouterHook middleware (POST /api/v1/whitelists intercept).
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .create_whitelist_entry_full(
                 &req.domain_addr,
@@ -856,8 +842,7 @@ async fn create_whitelist(
     } else if is_system_admin_scope(&api_key) {
         // SystemAdmin: can create DOMAIN-level whitelist entries only
         check_whitelist_access(&api_key, &req.domain_addr)?;
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .create_whitelist_entry(
                 &req.domain_addr,
@@ -920,8 +905,7 @@ async fn list_whitelists(
     let domain = query.domain.as_deref().unwrap_or("");
     if is_agent_scope(&api_key) {
         // Agent: only return category='agent' AND api_key_id=their own key id
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .list_whitelist_entries(domain)
             .await
@@ -945,8 +929,7 @@ async fn list_whitelists(
     } else if is_agent_admin_scope(&api_key) {
         // AA: return category='agent' entries for agents they manage
         // Fetch all managed agent emails from domain_addr_meta, then filter whitelist
-        let all = state
-            .email_factory
+        let all = state.factories.email
             .env_factory
             .list_whitelist_entries(domain)
             .await
@@ -964,8 +947,7 @@ async fn list_whitelists(
             if entry.category != "agent" {
                 continue;
             }
-            if let Ok(Some(meta)) = state
-                .email_factory
+            if let Ok(Some(meta)) = state.factories.email
                 .env_factory
                 .resolve_domain_addr_meta(&entry.domain_addr)
                 .await
@@ -977,8 +959,7 @@ async fn list_whitelists(
         }
         Ok(Json(managed))
     } else if is_admin_scope(&api_key) {
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .list_whitelist_entries(domain)
             .await
@@ -1045,8 +1026,7 @@ async fn check_whitelist(
     }
     // AgentAdmin: verify manager binding via domain_addr_meta
     if is_agent_admin {
-        let meta = state
-            .email_factory
+        let meta = state.factories.email
             .env_factory
             .resolve_domain_addr_meta(&query.domain_addr)
             .await
@@ -1092,8 +1072,7 @@ async fn check_whitelist(
         ));
     }
     // Proceed with check
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .check_whitelisted(&query.domain_addr, &query.value, &query.direction)
         .await
@@ -1123,8 +1102,7 @@ async fn update_whitelist(
 ) -> Result<Json<WhitelistResponse>, (StatusCode, Json<ErrorResponse>)> {
     if is_agent_scope(&api_key) || is_agent_admin_scope(&api_key) {
         // Agent/AA: can only update own entries (AA via manager binding)
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .get_whitelist_entry_by_id(id)
             .await
@@ -1132,8 +1110,7 @@ async fn update_whitelist(
             Ok(Some(entry)) => {
                 // AA: verify manager binding via domain_addr_meta
                 if is_agent_admin_scope(&api_key) {
-                    let meta = state
-                        .email_factory
+                    let meta = state.factories.email
                         .env_factory
                         .resolve_domain_addr_meta(&entry.domain_addr)
                         .await
@@ -1211,8 +1188,7 @@ async fn update_whitelist(
         ));
     }
 
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .update_whitelist_entry(id, req.is_active, req.direction)
         .await
@@ -1261,8 +1237,7 @@ async fn delete_whitelist_by_params(
         // Agent/AA: can only delete own entries (AA via manager binding)
         // AA: verify manager binding first
         if is_agent_admin_scope(&api_key) {
-            let meta = state
-                .email_factory
+            let meta = state.factories.email
                 .env_factory
                 .resolve_domain_addr_meta(&query.domain_addr)
                 .await
@@ -1295,8 +1270,7 @@ async fn delete_whitelist_by_params(
                 ));
             }
         }
-        let entries = state
-            .email_factory
+        let entries = state.factories.email
             .env_factory
             .list_whitelist_entries(&query.domain_addr)
             .await
@@ -1315,8 +1289,7 @@ async fn delete_whitelist_by_params(
         });
         match found {
             Some(entry) => {
-                state
-                    .email_factory
+                state.factories.email
                     .env_factory
                     .delete_whitelist_entry(entry.id)
                     .await
@@ -1342,8 +1315,7 @@ async fn delete_whitelist_by_params(
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
         check_whitelist_access(&api_key, &query.domain_addr)?;
-        let entries = state
-            .email_factory
+        let entries = state.factories.email
             .env_factory
             .list_whitelist_entries(&query.domain_addr)
             .await
@@ -1372,8 +1344,7 @@ async fn delete_whitelist_by_params(
                         }),
                     ));
                 }
-                state
-                    .email_factory
+                state.factories.email
                     .env_factory
                     .delete_whitelist_entry(entry.id)
                     .await
@@ -1425,8 +1396,7 @@ async fn update_whitelist_by_params(
         // Agent/AA: can only update own entries (AA via manager binding)
         // AA: verify manager binding first
         if is_agent_admin_scope(&api_key) {
-            let meta = state
-                .email_factory
+            let meta = state.factories.email
                 .env_factory
                 .resolve_domain_addr_meta(&query.domain_addr)
                 .await
@@ -1459,8 +1429,7 @@ async fn update_whitelist_by_params(
                 ));
             }
         }
-        let entries = state
-            .email_factory
+        let entries = state.factories.email
             .env_factory
             .list_whitelist_entries(&query.domain_addr)
             .await
@@ -1479,8 +1448,7 @@ async fn update_whitelist_by_params(
         });
         match found {
             Some(entry) => {
-                let result = state
-                    .email_factory
+                let result = state.factories.email
                     .env_factory
                     .update_whitelist_entry(entry.id, req.is_active, req.direction)
                     .await
@@ -1522,8 +1490,7 @@ async fn update_whitelist_by_params(
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
         check_whitelist_access(&api_key, &query.domain_addr)?;
-        let entries = state
-            .email_factory
+        let entries = state.factories.email
             .env_factory
             .list_whitelist_entries(&query.domain_addr)
             .await
@@ -1552,8 +1519,7 @@ async fn update_whitelist_by_params(
                         }),
                     ));
                 }
-                let result = state
-                    .email_factory
+                let result = state.factories.email
                     .env_factory
                     .update_whitelist_entry(entry.id, req.is_active, req.direction)
                     .await
@@ -1611,8 +1577,7 @@ async fn delete_whitelist(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     if is_agent_scope(&api_key) || is_agent_admin_scope(&api_key) {
         // Agent/AA: can only delete own entries (AA via manager binding)
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .get_whitelist_entry_by_id(id)
             .await
@@ -1620,8 +1585,7 @@ async fn delete_whitelist(
             Ok(Some(entry)) => {
                 // AA: verify manager binding via domain_addr_meta
                 if is_agent_admin_scope(&api_key) {
-                    let meta = state
-                        .email_factory
+                    let meta = state.factories.email
                         .env_factory
                         .resolve_domain_addr_meta(&entry.domain_addr)
                         .await
@@ -1687,8 +1651,7 @@ async fn delete_whitelist(
         }
     } else if is_system_admin_scope(&api_key) {
         // SystemAdmin: unrestricted access.
-        let existing = state
-            .email_factory
+        let existing = state.factories.email
             .env_factory
             .get_whitelist_entry_by_id(id)
             .await
@@ -1727,8 +1690,7 @@ async fn delete_whitelist(
 
     // PA/SA cannot delete agent-category entries
     if is_platform_admin_scope(&api_key) || is_system_admin_scope(&api_key) {
-        let entry = state
-            .email_factory
+        let entry = state.factories.email
             .env_factory
             .get_whitelist_entry_by_id(id)
             .await
@@ -1761,8 +1723,7 @@ async fn delete_whitelist(
         }
     }
 
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .delete_whitelist_entry(id)
         .await
@@ -1803,8 +1764,7 @@ async fn get_agent_state(
             detail: None,
         })));
     }
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .db
         .agent_state_get(agent_addr, &key)
@@ -1843,8 +1803,7 @@ async fn put_agent_state(
             detail: None,
         })));
     }
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .db
         .agent_state_put(agent_addr, &key, &body.value)
@@ -1875,8 +1834,7 @@ async fn delete_agent_state(
             detail: None,
         })));
     }
-    match state
-        .email_factory
+    match state.factories.email
         .env_factory
         .db
         .agent_state_delete(agent_addr, &key)
@@ -1910,7 +1868,7 @@ async fn put_contact_profile(
             detail: None,
         })));
     }
-    let db = &state.email_factory.env_factory.db;
+    let db = &state.factories.email.env_factory.db;
 
     // Extract new name
     let new_name: String = serde_json::from_str::<serde_json::Value>(&body.profile)
@@ -1978,7 +1936,7 @@ async fn get_contact_profile(
             detail: None,
         })));
     }
-    let db = &state.email_factory.env_factory.db;
+    let db = &state.factories.email.env_factory.db;
     match db
         .agent_state_get(agent_addr, &format!("profile:{}", address))
         .await
@@ -2017,7 +1975,7 @@ async fn get_contacts_by_name(
             detail: None,
         })));
     }
-    let db = &state.email_factory.env_factory.db;
+    let db = &state.factories.email.env_factory.db;
     let name_key = query.name.to_lowercase();
 
     let index_value = db
@@ -2064,7 +2022,7 @@ async fn put_thread_summary(
             detail: None,
         })));
     }
-    let db = &state.email_factory.env_factory.db;
+    let db = &state.factories.email.env_factory.db;
 
     // Resolve thread_id from message metadata
     let thread_id = match db
@@ -2120,7 +2078,7 @@ async fn get_thread_summary(
             detail: None,
         })));
     }
-    let db = &state.email_factory.env_factory.db;
+    let db = &state.factories.email.env_factory.db;
 
     // Resolve thread_id from message metadata
     let thread_id = match db
@@ -2281,8 +2239,7 @@ async fn list_pending_deliveries(
         Some(effective_filter)
     };
 
-    let records = state
-        .email_factory
+    let records = state.factories.email
         .env_factory
         .db
         .list_pending_deliveries(system_id, req.limit, use_domains.as_deref())
@@ -2355,8 +2312,7 @@ async fn ack_pending_deliveries(
         ));
     }
 
-    let count = state
-        .email_factory
+    let count = state.factories.email
         .env_factory
         .db
         .ack_deliveries(&req.ids)

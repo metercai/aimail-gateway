@@ -42,8 +42,7 @@ pub async fn send_email(
     // ── 1b. Daily email quota (emails_per_day from system plans) ──
     {
         let system_id = api_key.system_id.as_str();
-        let _system = match state
-            .email_factory
+        let _system = match state.factories.email
             .env_factory
             .resolve_system(system_id)
             .await
@@ -129,8 +128,7 @@ pub async fn send_email(
 
     // ── 2b. Append agent signature if configured ──
     let mut markdown_body = req.markdown.clone();
-    if let Ok(Some(meta)) = state
-        .email_factory
+    if let Ok(Some(meta)) = state.factories.email
         .env_factory
         .resolve_domain_addr_meta(sender)
         .await
@@ -221,8 +219,7 @@ pub async fn send_email(
     // Batch name resolution: fetch whitelist entries once per sender domain
     if !bare_emails.is_empty() {
         let domain = domain_from_email(&bare_emails[0]);
-        let all_entries = state
-            .email_factory
+        let all_entries = state.factories.email
             .env_factory
             .list_whitelist_entries(domain)
             .await
@@ -400,8 +397,7 @@ pub async fn send_email(
     }
 
     // ── 3a. P0: Empty whitelist → 403 ──
-    let whitelist_count = match state
-        .email_factory
+    let whitelist_count = match state.factories.email
         .env_factory
         .count_whitelist_entries(sender, &["to", "all"])
         .await
@@ -434,8 +430,7 @@ pub async fn send_email(
     let mut valid_recipients: Vec<String> = Vec::new();
 
     for recipient in &recipients {
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .check_whitelisted(sender, recipient, "to")
             .await
@@ -455,7 +450,7 @@ pub async fn send_email(
     let mut unregistered: Vec<String> = Vec::new();  // Type 2 hit but Type 1 miss
 
     for recipient in &valid_recipients {
-        let env = &state.email_factory.env_factory;
+        let env = &state.factories.email.env_factory;
         // Type 1: exact match on full address
         match env.lookup_domain_addr(recipient).await {
             Ok(Some(ref inner)) if inner.is_active && inner.system_id == api_key.system_id => {
@@ -485,8 +480,7 @@ pub async fn send_email(
     // ── 6. Inbound whitelist: for internal recipients, verify sender against their "from"/"all" rules ──
     let mut final_internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     for (recipient, domain, webhook_url, webhook_secret) in internal {
-        match state
-            .email_factory
+        match state.factories.email
             .env_factory
             .check_whitelisted(&recipient, sender, "from")
             .await
@@ -545,7 +539,7 @@ pub async fn send_email(
             "Pong intercepted at HTTP API — redirecting as inbound"
         );
 
-        state.email_factory
+        state.factories.email
             .create_inbound(
                 &new_id,
                 &api_key.system_id,
@@ -597,8 +591,7 @@ pub async fn send_email(
             cc: external_cc,
         }
         .to_json();
-        match state
-            .email_factory
+        match state.factories.email
             .create_outbound(
                 &email_id,
                 &api_key.system_id,
@@ -627,8 +620,7 @@ pub async fn send_email(
                 // the scheduler, so cleanup sees the mail_id reference.
                 if let Some(ref attachments) = req.attachments {
                     for att in attachments {
-                        if let Err(e) = state
-                            .attachment_factory
+                        if let Err(e) = state.factories.attachment
                             .add_mail_id(&att.attachment_id, &record.id)
                             .await
                         {
@@ -687,8 +679,7 @@ pub async fn send_email(
         .to_json();
 
         // Build webhook endpoints: per-recipient → domain fallback
-        let endpoints_str = state
-            .email_factory
+        let endpoints_str = state.factories.email
             .build_endpoints_for_recipients(&internal_emails)
             .await;
         let endpoints = if endpoints_str == "{}" || endpoints_str.is_empty() {
@@ -697,8 +688,7 @@ pub async fn send_email(
             Some(endpoints_str)
         };
 
-        match state
-            .email_factory
+        match state.factories.email
             .create_inbound(
                 &email_id,
                 &api_key.system_id,
@@ -718,8 +708,7 @@ pub async fn send_email(
                 for (recipient, _, _, _) in &final_internal {
                     if let Some(attachments) = &req.attachments {
                         for att in attachments {
-                            if let Err(e) = state
-                                .attachment_factory
+                            if let Err(e) = state.factories.attachment
                                 .create_permission(&att.attachment_id, recipient)
                                 .await
                             {
@@ -742,8 +731,7 @@ pub async fn send_email(
                 // Register this email on every attachment
                 if let Some(ref attachments) = req.attachments {
                     for att in attachments {
-                        if let Err(e) = state
-                            .attachment_factory
+                        if let Err(e) = state.factories.attachment
                             .add_mail_id(&att.attachment_id, &record.id)
                             .await
                         {
@@ -767,10 +755,10 @@ pub async fn send_email(
     }
 
     // ── 8. Auto-reply if any recipients were filtered ──
-    send_filtered_notification(&state.email_factory, &state.config, &api_key.system_id, sender, &filtered).await;
+    send_filtered_notification(&state.factories.email, &state.config, &api_key.system_id, sender, &filtered).await;
 
     // ── 8b. Auto-reply for unregistered addresses (domain exists but address not registered) ──
-    send_unregistered_notification(&state.email_factory, &state.config, &api_key.system_id, sender, &unregistered).await;
+    send_unregistered_notification(&state.factories.email, &state.config, &api_key.system_id, sender, &unregistered).await;
 
     let status = if created_ids.is_empty() {
         // All recipients were filtered — no emails created

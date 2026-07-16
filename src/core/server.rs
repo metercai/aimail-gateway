@@ -26,8 +26,8 @@ pub fn spawn_smtp(
     let metrics = http_state.metrics.clone();
 
     // Extract owned Arc values before entering async move
-    let email_factory = Arc::new(http_state.email_factory.clone());
-    let attachment_factory = Arc::new(http_state.attachment_factory.clone());
+    let email_factory = Arc::new(http_state.factories.email.clone());
+    let attachment_factory = Arc::new(http_state.factories.attachment.clone());
     let arc_config = Arc::new(http_state.config.clone());
     let trigger_tx = http_state.trigger_tx.clone();
     let inbound_security = http_state.extensions.inbound_security.clone();
@@ -214,8 +214,8 @@ pub fn spawn_retry_worker(
     deps: RetryDependencies,
     cancel: CancellationToken,
 ) -> JoinHandle<AppResult<()>> {
-    let email_factory = http_state.email_factory.clone();
-    let attachment_factory = http_state.attachment_factory.clone();
+    let email_factory = http_state.factories.email.clone();
+    let attachment_factory = http_state.factories.attachment.clone();
     let config = http_state.config.clone();
     let metrics = (*http_state.metrics).clone();
     let dkim_signer = Some(http_state.extensions.dkim_signer.clone() as Arc<dyn crate::core::strategy::MessageSigner>);
@@ -311,32 +311,33 @@ pub fn create_dns_resolver(config: &Config) -> AppResult<Arc<hickory_resolver::T
 
 /// Register the StrangerInterceptor for universal commands ([WHOAMI] etc.).
 pub fn register_stranger_interceptor(
-    email_factory: &Arc<EmailFactory>,
-    admin_system_id: &str,
+    http_state: &HttpState,
 ) {
+    let email_factory = Arc::new(http_state.factories.email.clone());
     email_factory.env_factory.register_interceptor(
         std::sync::Arc::new(
             crate::core::stranger_interceptor::StrangerInterceptor::new(
                 email_factory.clone(),
-                admin_system_id,
+                "admin",
             )
         ) as std::sync::Arc<dyn crate::core::strategy::InboundInterceptor>,
     );
 }
 
-/// Register the A2A board interceptor on the given email factory.
+/// Register the A2A board interceptor.
 pub fn register_board_interceptors(
-    email_factory: &Arc<EmailFactory>,
-    attachment_factory: &Arc<AttachmentFactory>,
-    storage_path: &str,
-    endpoint: &str,
-    board_quota: Arc<dyn BoardQuotaChecker>,
+    http_state: &HttpState,
 ) {
+    let email_factory = Arc::new(http_state.factories.email.clone());
+    let attachment_factory = Arc::new(http_state.factories.attachment.clone());
+    let storage_path = http_state.config.storage.path.to_str().unwrap_or("");
+    let endpoint = api_endpoint_url(&http_state.config);
+    let board_quota = http_state.extensions.board_quota.clone();
     crate::board::interceptor::register(
-        email_factory,
-        attachment_factory,
+        &email_factory,
+        &attachment_factory,
         storage_path,
-        endpoint,
+        &endpoint,
         board_quota,
     );
 }

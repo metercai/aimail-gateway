@@ -19,8 +19,6 @@ impl RouterHook for BoardRouter {
     fn mount(&self, router: Router) -> Router {
         tracing::info!("[a2a_board] BoardRouter mount with State<HttpState>");
 
-        let _env_factory = self.state.email_factory.env_factory.clone();
-
         let board_api = Router::new()
             .route("/api/v1/board/:board_id/task/:task_id", get(handlers::handle_get_task))
             .route("/api/v1/board/:board_id/tasks", get(handlers::handle_list_tasks))
