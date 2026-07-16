@@ -207,7 +207,7 @@ pub fn generate_board_token() -> String {
 
 
 /// Insert multiple role-permission relationships (from init email).
-pub fn insert_role_permissions(conn: &Connection, board_id: &str, permissions: &[(String, Vec<String>)]) -> AppResult<()> {
+pub fn insert_role_permissions(conn: &Connection, _board_id: &str, permissions: &[(String, Vec<String>)]) -> AppResult<()> {
     for (role, verbs) in permissions {
         for verb in verbs {
             conn.execute(

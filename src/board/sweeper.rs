@@ -8,13 +8,14 @@ use std::time::Duration;
 
 use crate::board::db;
 use crate::board::models::*;
-use crate::board::notify::Notifier;
 use crate::core::config::Config;
 use crate::core::email::factory::EmailFactory;
 use crate::core::errors::AppResult;
 
 pub struct BoardSweeper {
     storage_path: String,
+    // Reserved for future notification emails (e.g. board completion alerts)
+    #[allow(dead_code)]
     email_factory: Arc<EmailFactory>,
     config: Config,
 }
@@ -67,7 +68,7 @@ impl BoardSweeper {
                         if elapsed > threshold as i64 && elapsed >= 0 {
                             let mut t = task;
                             t.status = TaskStatus::Blocked;
-                            let reason = format!("worker silence: last heartbeat at {}", t.updated_at);
+                            let _reason = format!("worker silence: last heartbeat at {}", t.updated_at);
                             let _ = db::update_task(&conn, &t);
                             tracing::warn!("[a2a_board] sweeper: blocking stale task {} ({}s silent)", t.short_id, elapsed);
                         }

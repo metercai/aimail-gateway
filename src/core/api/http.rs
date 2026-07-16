@@ -721,7 +721,7 @@ async fn update_agent_meta(
 
     // Sync whitelist when manager_address changes
     if manager != existing.manager_address {
-        let system_id = &existing.system_id;
+        let _system_id = &existing.system_id;
         // Remove old manager whitelist entry if it existed
         if !existing.manager_address.is_empty() {
             let _ = state

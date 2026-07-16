@@ -91,6 +91,7 @@ fn is_reply_boundary(line: &str) -> Option<&'static str> {
 }
 
 /// Check if a line starts with `> ` followed by quoted content (not just bare `>`).
+#[allow(dead_code)]
 fn is_gt_quote(line: &str) -> bool {
     let t = line.trim_start();
     t.starts_with(">") && t.len() > 1
@@ -550,6 +551,7 @@ mod tests {
 // ═══════════════════════════════════════════════════════════════
 
 /// Load a fixture file from `agentmail/tests/fixtures/<name>.txt`
+#[cfg(test)]
 fn load_fixture(name: &str) -> String {
     let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().unwrap()

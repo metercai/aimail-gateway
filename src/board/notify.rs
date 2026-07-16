@@ -5,7 +5,6 @@
 
 use crate::board::models::*;
 use crate::core::email::factory::EmailFactory;
-use crate::core::errors::AppResult;
 use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::task::JoinHandle;

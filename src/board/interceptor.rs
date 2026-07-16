@@ -2,13 +2,12 @@
 
 use crate::board::commands;
 use crate::board::db;
-use crate::board::quota::{BoardQuotaChecker, NoopBoardQuota};
+use crate::board::quota::BoardQuotaChecker;
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
 use crate::board::notify::Notifier;
 use crate::core::email::factory::AttachmentFactory;
 use std::cell::RefCell;
 use crate::core::email::factory::EmailFactory;
-use crate::core::errors::AppResult;
 use crate::core::strategy::InboundInterceptor;
 use async_trait::async_trait;
 use serde_json::Value;

@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 use mailin::{Handler, Response};
 use mailparse;

@@ -5,7 +5,6 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::core::errors::AppResult;
 use crate::core::storage::Database;
-use crate::core::storage::SystemDomainRecord;
 
 #[derive(Debug, Clone)]
 pub struct AttachmentPermissionRecord {

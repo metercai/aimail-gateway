@@ -6,7 +6,6 @@
 use crate::board::db;
 use std::collections::HashMap;
 use serde_json::json;
-use std::cell::RefCell;
 use crate::board::models::*;
 use crate::board::notify::Notifier;
 use crate::core::errors::AppResult;
@@ -405,7 +404,7 @@ fn handle_continue(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sen
 
 fn handle_output(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    let mut task = db::get_task(conn, &task_id)?;
+    let task = db::get_task(conn, &task_id)?;
     require_role(conn, &task.board_id, sender, "output")?;
 
     if task.status != TaskStatus::Done {
@@ -702,7 +701,7 @@ fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-fn handle_reopen(conn: &Connection, notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_reopen(conn: &Connection, _notifier: &Notifier, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let board_id = cmd.params.as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .ok_or_else(|| crate::core::errors::AppError::BadRequest("board_id required".to_string()))?;

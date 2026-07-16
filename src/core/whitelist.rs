@@ -30,7 +30,7 @@
 //!   Returns 0 → reject immediately (no whitelist protection).
  
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;

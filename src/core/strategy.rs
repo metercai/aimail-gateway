@@ -6,10 +6,7 @@
 use crate::core::email::storage::EmailRecord;
 use crate::core::errors::AppResult;
 use async_trait::async_trait;
-use lettre::message::MultiPart;
-use lettre::Address;
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use crate::core::storage::Database;
 

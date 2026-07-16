@@ -14,7 +14,6 @@ use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
 use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::errors::{AppError, AppResult};
-use crate::core::factory::EnvFactory;
 use crate::core::strategy::{InboundSecurity, QuotaChecker, RateLimitChecker};
 use hex;
 use rand::Rng;

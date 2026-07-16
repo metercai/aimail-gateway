@@ -4,15 +4,12 @@ mod server;
 
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
-use std::process;
 
 use amail_base::core::cli::daemon;
 use amail_base::core::cli::{
-    cmd_status, cmd_stop, init_tracing, is_process_alive, read_pid_file, Cli, Commands,
+    cmd_status, cmd_stop, init_tracing, Cli, Commands,
 };
-use amail_base::core::config::LoggingConfig;
-use amail_base::core::errors::{AppError, AppResult};
+use amail_base::core::errors::AppResult;
 
 pub use amail_base::core::config::Config;
 pub use amail_base::core::email::factory::{AttachmentFactory, EmailFactory};

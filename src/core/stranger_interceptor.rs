@@ -6,7 +6,6 @@
 //! and handles the command without re-checking whitelists.
 
 use crate::core::email::factory::EmailFactory;
-use crate::core::storage::Database;
 use crate::core::strategy::{InboundInterceptor, InterceptorDecision};
 use async_trait::async_trait;
 use std::sync::Arc;
