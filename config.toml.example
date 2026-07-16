@@ -34,10 +34,12 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 # smtp_server = "smtp://smtp.example.com:587"  # upstream SMTP relay URL
 # username = "relay@example.com"               # SMTP auth username
 # password = "your-password"                   # SMTP auth password
+# dns_server = "127.0.0.1:53"                  # custom DNS server for SPF/MX/DKIM queries (takes precedence over /etc/resolv.conf)
 # auto_reply_from = "noreply@yourdomain.com"   # From address for system auto-replies (NDR, notifications). Falls back to admin.email.
 # auto_reply_subject_prefix = "[Auto-Reply] "  # prefix prepended to all system-generated email subjects
 # auto_reply_body = "This is an automated message from the amail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
 # delivery_window_secs = 7200                  # NDR bounce correlation window in seconds (default 7200 = 2h)
+# mx_dns_override = { "example.com" = "127.0.0.1:25" }  # per-domain MX overrides for direct delivery mode
 
 # ── Retry / backoff ─────────────────────────────────────────────────────
 
@@ -54,6 +56,7 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 [storage]
 path = "./data"                           # data directory. DB → {path}/amail.db, attachments → {path}/attachments/ (default ./data)
 # pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
+# encryption = false                      # SQLCipher page-level encryption (default false)
 # attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)
 # attachment_lifetime_hours = 720         # attachment cleanup age in hours (default 720 = 30 days)
 # attachment_max_attachments = 5          # max attachments per inbound email (default 5)
@@ -69,3 +72,12 @@ path = "./data"                           # data directory. DB → {path}/amail.
 
 [admin]
 # email = "admin@yourdomain.com"          # owner contact email (shown on /health), fallback From address for system auto-replies
+
+# ── Board ───────────────────────────────────────────────────────────────
+
+[board]
+# heartbeat_stale_seconds = 14400         # agent heartbeat TTL before marking stale (default 14400 = 4h)
+# task_timeout_seconds = 259200           # task inactivity timeout before auto-completion (default 259200 = 3d)
+# sweeper_interval_seconds = 900          # board sweeper cron interval (default 900 = 15m)
+# max_active_boards = 5                   # max concurrent active boards per system (default 5)
+# archive_retention_days = 90             # archived board retention in days (default unlimited)
