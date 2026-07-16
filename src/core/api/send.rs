@@ -70,6 +70,7 @@ pub async fn send_email(
         };
         // Delegate quota check to QuotaChecker trait
         state
+            .extensions
             .quota_checker
             .check_send_quota(system_id)
             .await
@@ -87,7 +88,7 @@ pub async fn send_email(
     // ── 1a. Per-system rate limit ──
     {
         let system_id = api_key.system_id.as_str();
-        match state.rate_limiter.check(system_id) {
+        match state.extensions.rate_limiter.check(system_id) {
             Ok(()) => { /* allowed */ }
             Err(wait) => {
                 state.metrics.inc_rate_limited();

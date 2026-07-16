@@ -4,35 +4,36 @@ use axum::Router;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, trace, warn};
 
 use crate::board::quota::BoardQuotaChecker;
-use crate::core::api::monitor::Metrics;
+use crate::core::api::types::HttpState;
 use crate::core::config::Config;
 use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::errors::{AppError, AppResult};
-use crate::core::strategy::{InboundSecurity, QuotaChecker, RateLimitChecker};
 use hex;
 use rand::Rng;
 
 pub fn spawn_smtp(
-    config: &crate::core::config::SmtpConfig,
-    email_factory: Arc<EmailFactory>,
-    attachment_factory: Arc<AttachmentFactory>,
-    arc_config: Arc<Config>,
-    trigger_tx: mpsc::Sender<String>,
+    http_state: &HttpState,
     cancel: CancellationToken,
-    metrics: Arc<Metrics>,
-    inbound_security: Arc<dyn InboundSecurity>,
-    rate_limiter: Arc<dyn RateLimitChecker>,
-    quota_checker: Arc<dyn QuotaChecker>,
 ) -> AppResult<JoinHandle<AppResult<()>>> {
-    let listen_addr = config.bind.clone();
-    let max_connections = config.max_connections;
+    let listen_addr = http_state.config.smtp.bind.clone();
+    let max_connections = http_state.config.smtp.max_connections;
     let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(max_connections));
+    let metrics = http_state.metrics.clone();
+
+    // Extract owned Arc values before entering async move
+    let email_factory = Arc::new(http_state.email_factory.clone());
+    let attachment_factory = Arc::new(http_state.attachment_factory.clone());
+    let arc_config = Arc::new(http_state.config.clone());
+    let trigger_tx = http_state.trigger_tx.clone();
+    let inbound_security = http_state.extensions.inbound_security.clone();
+    let rate_limiter = http_state.extensions.rate_limiter.clone();
+    let quota_checker = http_state.extensions.quota_checker.clone();
+
     info!(
         operation = "smtp_max_connections",
         max_connections = max_connections,

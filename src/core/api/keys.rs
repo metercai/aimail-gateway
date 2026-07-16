@@ -55,6 +55,7 @@ pub async fn create_api_key(
         };
         // Delegate quota check to QuotaChecker trait
         state
+            .extensions
             .quota_checker
             .check_key_quota(&req.system_id)
             .await

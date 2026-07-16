@@ -5,8 +5,10 @@ use async_trait::async_trait;
 
 use crate::core::errors::{AppError, AppResult};
 
+use std::sync::Arc;
+
 use crate::core::strategy::{
-    InboundSecurity, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook,
+    ExtensionProviders, InboundSecurity, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook,
     SystemStore,
 };
 
@@ -95,6 +97,20 @@ impl RouterHook for BaseRouterHook {
                 crate::core::api::auth::auth_layer(api_env_factory.clone(), req, next)
             }));
         router.merge(batch)
+    }
+}
+
+// ── Base ExtensionProviders ───────────────────────────────────────
+
+impl ExtensionProviders {
+    /// Create providers with Base (no-op) implementations.
+    pub fn base() -> Self {
+        Self {
+            rate_limiter: Arc::new(BaseRateLimitChecker),
+            quota_checker: Arc::new(BaseQuotaChecker),
+            dkim_signer: Arc::new(BaseMessageSigner),
+            inbound_security: Arc::new(BaseInboundSecurity),
+        }
     }
 }
 

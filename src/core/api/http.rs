@@ -197,6 +197,7 @@ pub async fn create_system_domain(
         Ok(Some(_)) => {
             // ── Domain quota check (only for bare domains) ──
             state
+                .extensions
                 .quota_checker
                 .check_domain_quota(&tid)
                 .await

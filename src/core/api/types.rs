@@ -9,7 +9,7 @@ use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
 use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::storage::{ApiKeyRecord, SystemDomainRecord, SystemRecord, WhitelistRecord};
-use crate::core::strategy::{QuotaChecker, RateLimitChecker};
+use crate::core::strategy::ExtensionProviders;
 
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
@@ -18,9 +18,8 @@ pub struct HttpState {
     pub attachment_factory: AttachmentFactory,
     pub metrics: Arc<Metrics>,
     pub config: Config,
-    pub rate_limiter: Arc<dyn RateLimitChecker>,
-    pub quota_checker: Arc<dyn QuotaChecker>,
     pub trigger_tx: mpsc::Sender<String>,
+    pub extensions: Arc<ExtensionProviders>,
 }
 
 // ── Request/Response types ──

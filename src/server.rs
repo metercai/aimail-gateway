@@ -16,9 +16,9 @@ use amail_base::core::storage::Database;
 use amail_base::core::api::http::create_router;
 use amail_base::core::api::monitor::Metrics;
 use amail_base::core::scheduler;
-use amail_base::core::strategy::{InboundSecurity, MessageSigner, RouterHook};
+use amail_base::core::strategy::{MessageSigner, RouterHook};
 
-use amail_base::base::strategy::{BaseInboundSecurity, BaseMessageSigner};
+use amail_base::base::strategy::BaseMessageSigner;
 
 /// amail-gateway server: SMTP, HTTP, and retry worker.
 pub struct Server {
@@ -89,7 +89,6 @@ impl Server {
         let db = self.db;
         let metrics = self.metrics;
         let config = self.config;
-        let arc_config = Arc::new(config.clone());
 
         {
             let endpoint = amail_base::core::server::api_endpoint_url(&config);
@@ -128,41 +127,27 @@ impl Server {
             );
         }
 
-        let inbound_security: Arc<dyn InboundSecurity> = Arc::new(BaseInboundSecurity);
         let dkim_signer: Arc<dyn MessageSigner> = Arc::new(BaseMessageSigner);
 
-        let rate_limiter: Arc<dyn amail_base::core::strategy::RateLimitChecker> =
-            Arc::new(amail_base::base::strategy::BaseRateLimitChecker);
-        let quota_checker: Arc<dyn amail_base::core::strategy::QuotaChecker> =
-            Arc::new(amail_base::base::strategy::BaseQuotaChecker);
-        let smtp_rate_limiter = rate_limiter.clone();
+        let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
         let http_state = amail_base::core::api::types::HttpState {
             email_factory: (*email_factory).clone(),
             attachment_factory: (*attachment_factory).clone(),
             metrics: metrics.clone(),
             config: config.clone(),
-            rate_limiter,
-            quota_checker: quota_checker.clone(),
             trigger_tx: trigger_tx.clone(),
+            extensions: extensions.clone(),
         };
         let base_hook: Arc<dyn RouterHook> = Arc::new(
             amail_base::base::strategy::BaseRouterHook(http_state.clone()),
         );
         let router_hook: Arc<dyn RouterHook> = base_hook;
-        let router = create_router(http_state, router_hook, None, None);
-
         let smtp_handle = amail_base::core::server::spawn_smtp(
-            &config.smtp,
-            email_factory.clone(),
-            attachment_factory.clone(),
-            arc_config.clone(),
-            trigger_tx,
+            &http_state,
             cancel.clone(),
-            metrics.clone(),
-            inbound_security.clone(),
-            smtp_rate_limiter,
-            quota_checker.clone(),
         )?;
+
+        let router = create_router(http_state, router_hook, None, None);
 
         let metrics_for_worker = (*metrics).clone();
         let inflight = scheduler::new_inflight_set();

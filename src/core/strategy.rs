@@ -7,6 +7,7 @@ use crate::core::email::storage::EmailRecord;
 use crate::core::errors::AppResult;
 use async_trait::async_trait;
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use crate::core::storage::Database;
 
@@ -133,4 +134,16 @@ pub trait WhitelistKeyResolver: Send + Sync {
         db: &Database,
         addr: &str,
     ) -> AppResult<Vec<(String, String)>>;
+}
+
+// ── ExtensionProviders ─────────────────────────────────────────────
+
+/// Bundle of edition-specific extension points.
+/// Base edition: all fields default to no-op implementations.
+/// Advanced edition: each field can be replaced individually.
+pub struct ExtensionProviders {
+    pub rate_limiter: Arc<dyn RateLimitChecker>,
+    pub quota_checker: Arc<dyn QuotaChecker>,
+    pub dkim_signer: Arc<dyn MessageSigner>,
+    pub inbound_security: Arc<dyn InboundSecurity>,
 }
