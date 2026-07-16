@@ -95,6 +95,7 @@ impl Server {
         let system_store: Arc<dyn amail_base::core::strategy::SystemStore> =
             Arc::new(amail_base::base::strategy::BaseSystemStore);
 
+        let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
         let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
         let http_state = amail_base::core::api::types::HttpState {
             factories: amail_base::core::email::factory::MailFactories::new(
@@ -106,6 +107,7 @@ impl Server {
             config: config.clone(),
             trigger_tx: trigger_tx.clone(),
             extensions: extensions.clone(),
+            dns_resolver: Some(dns_resolver.clone()),
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──
@@ -124,13 +126,9 @@ impl Server {
         let http_state_for_worker = http_state.clone();
         let router = create_router(http_state, router_hook, None, None);
 
-        let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
         let retry_handle = amail_base::core::server::spawn_retry_worker(
             &http_state_for_worker,
-            amail_base::core::server::RetryDependencies::new(
-                trigger_rx,
-                Some(dns_resolver.clone()),
-            ),
+            trigger_rx,
             cancel.clone(),
         );
         let http_handle =

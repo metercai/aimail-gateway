@@ -10,6 +10,7 @@ use crate::core::config::Config;
 use crate::core::email::factory::MailFactories;
 use crate::core::storage::{ApiKeyRecord, SystemDomainRecord, SystemRecord, WhitelistRecord};
 use crate::core::strategy::ExtensionProviders;
+use hickory_resolver::TokioAsyncResolver;
 
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
@@ -19,6 +20,7 @@ pub struct HttpState {
     pub config: Config,
     pub trigger_tx: mpsc::Sender<String>,
     pub extensions: Arc<ExtensionProviders>,
+    pub dns_resolver: Option<Arc<TokioAsyncResolver>>,
 }
 
 // ── Request/Response types ──

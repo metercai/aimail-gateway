@@ -198,34 +198,11 @@ pub fn spawn_http_single_port(
     })
 }
 
-// ── RetryDependencies ─────────────────────────────────────────────
-
-/// Dependencies specific to the retry worker that aren't in HttpState.
-pub struct RetryDependencies {
-    pub trigger_rx: tokio::sync::mpsc::Receiver<String>,
-    pub inflight: crate::core::scheduler::InflightSet,
-    pub dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
-}
-
-impl RetryDependencies {
-    /// Create dependencies; `inflight` is initialized automatically.
-    pub fn new(
-        trigger_rx: tokio::sync::mpsc::Receiver<String>,
-        dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
-    ) -> Self {
-        Self {
-            trigger_rx,
-            inflight: crate::core::scheduler::new_inflight_set(),
-            dns_resolver,
-        }
-    }
-}
-
 // ── retry worker ──────────────────────────────────────────────────
 
 pub fn spawn_retry_worker(
     http_state: &HttpState,
-    deps: RetryDependencies,
+    trigger_rx: tokio::sync::mpsc::Receiver<String>,
     cancel: CancellationToken,
 ) -> JoinHandle<AppResult<()>> {
     let email_factory = (*http_state.factories.email).clone();
@@ -233,17 +210,19 @@ pub fn spawn_retry_worker(
     let config = http_state.config.clone();
     let metrics = (*http_state.metrics).clone();
     let dkim_signer = Some(http_state.extensions.dkim_signer.clone() as Arc<dyn crate::core::strategy::MessageSigner>);
+    let dns_resolver = http_state.dns_resolver.clone();
+    let inflight = crate::core::scheduler::new_inflight_set();
     tokio::spawn(async move {
         crate::core::scheduler::run_retry_worker_with_trigger(
             email_factory,
             attachment_factory,
             config,
-            deps.trigger_rx,
+            trigger_rx,
             metrics,
             cancel,
-            deps.inflight,
+            inflight,
             dkim_signer,
-            deps.dns_resolver,
+            dns_resolver,
         )
         .await
     })
