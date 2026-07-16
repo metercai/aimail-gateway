@@ -90,13 +90,6 @@ fn is_reply_boundary(line: &str) -> Option<&'static str> {
     None
 }
 
-/// Check if a line starts with `> ` followed by quoted content (not just bare `>`).
-#[allow(dead_code)]
-fn is_gt_quote(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with(">") && t.len() > 1
-}
-
 // ═══════════════════════════════════════════════════════════════
 // HTML → Markdown
 // ═══════════════════════════════════════════════════════════════
