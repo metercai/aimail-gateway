@@ -112,28 +112,19 @@ impl Server {
             config.storage.attachments_dir(),
         ));
 
-        // ── Register a2a_board interceptor ──
+        // ── Register interceptors (a2a_board, [WHOAMI]) ──
         {
-            let gw_domain = config.smtp.bind.rsplit_once(':')
-                .map(|(h,_)| h.to_string())
-                .unwrap_or_else(|| config.smtp.bind.clone());
             let endpoint = amail_base::core::server::api_endpoint_url(&config);
-            // Register StrangerInterceptor for universal commands ([WHOAMI] etc.)
-        email_factory.env_factory.register_interceptor(
-            std::sync::Arc::new(
-                amail_base::core::stranger_interceptor::StrangerInterceptor::new(
-                    email_factory.clone(),
-                    "admin",
-                )
-            ) as std::sync::Arc<dyn amail_base::core::strategy::InboundInterceptor>
-        );
-
-        amail_base::board::interceptor::register(
-            &email_factory,
-            &attachment_factory,
-            config.storage.path.to_str().unwrap_or(""),
-            &endpoint,
-            Arc::new(NoopBoardQuota),
+            amail_base::core::server::register_stranger_interceptor(
+                &email_factory,
+                "admin",
+            );
+            amail_base::core::server::register_board_interceptors(
+                &email_factory,
+                &attachment_factory,
+                config.storage.path.to_str().unwrap_or(""),
+                &endpoint,
+                Arc::new(NoopBoardQuota),
             );
         }
 
@@ -160,7 +151,7 @@ impl Server {
         let router_hook: Arc<dyn RouterHook> = base_hook;
         let router = create_router(http_state, router_hook, None, None);
 
-        let mut smtp_handle = amail_base::core::server::spawn_smtp(
+        let smtp_handle = amail_base::core::server::spawn_smtp(
             &config.smtp,
             email_factory.clone(),
             attachment_factory.clone(),
@@ -175,22 +166,8 @@ impl Server {
 
         let metrics_for_worker = (*metrics).clone();
         let inflight = scheduler::new_inflight_set();
-        // Shared DNS resolver — priority: relay.dns_server > system resolv.conf
-        let dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>> = if let Some(ref addr_str) = config.relay.dns_server {
-            let sa: std::net::SocketAddr = addr_str.parse().unwrap_or_else(|_| {
-                panic!("Invalid relay.dns_server address: {addr_str}")
-            });
-            let mut resolver_cfg = hickory_resolver::config::ResolverConfig::new();
-            resolver_cfg.add_name_server(hickory_resolver::config::NameServerConfig::new(
-                sa,
-                hickory_resolver::config::Protocol::Udp,
-            ));
-            let opts = hickory_resolver::config::ResolverOpts::default();
-            Some(Arc::new(hickory_resolver::TokioAsyncResolver::tokio(resolver_cfg, opts)))
-        } else {
-            hickory_resolver::TokioAsyncResolver::tokio_from_system_conf().ok().map(Arc::new)
-        };
-        let mut retry_handle = amail_base::core::server::spawn_retry_worker(
+        let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
+        let retry_handle = amail_base::core::server::spawn_retry_worker(
             (*email_factory).clone(),
             (*attachment_factory).clone(),
             config.clone(),
@@ -199,30 +176,16 @@ impl Server {
             cancel.clone(),
             inflight,
             Some(dkim_signer.clone() as Arc<dyn MessageSigner>),
-            dns_resolver,
+            Some(dns_resolver.clone()),
         );
-        let mut http_handle =
+        let http_handle =
             amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
 
-        {
-            let db = db_arc.clone();
-            let ttl = config.webhook.pending_ttl_hours;
-            let cancel = cancel.clone();
-            tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(tokio::time::Duration::from_secs(ttl.max(1) * 3600 / 2));
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        _ = interval.tick() => {
-                            if let Err(e) = db.cleanup_deliveries(ttl).await {
-                                tracing::warn!(error = %e, "Failed to cleanup pending deliveries");
-                            }
-                        }
-                    }
-                }
-            });
-        }
+        amail_base::core::server::spawn_cleanup_worker(
+            db_arc.clone(),
+            config.webhook.pending_ttl_hours,
+            cancel.clone(),
+        );
 
         amail_base::core::cli::graceful::wait_for_services(
             cancel,
