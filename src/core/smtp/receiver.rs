@@ -274,13 +274,15 @@ impl Handler for ConnectionHandler {
         ) {
             Ok(Some(rec)) => {
                 // Exact match — full address is the domain record
+                // Always detect persona regardless of which path resolved the address
+                let (_base, p) = strip_persona(to);
                 self.system_id = match self.system_id.take() {
                     None => Some(rec.system_id.clone()),
                     Some(prev) if prev == rec.system_id => Some(prev),
                     Some(prev) => Some(format!("{}|{}", prev, rec.system_id)),
                 };
                 self.domain = Some(rec.domain.clone());
-                (full_lower, String::new())
+                (full_lower, p)
             }
             Ok(None) => {
                 // Exact match failed — try stripping persona prefix

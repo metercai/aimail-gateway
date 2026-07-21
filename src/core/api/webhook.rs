@@ -336,8 +336,8 @@ pub async fn process_email_webhook(
                             warn!(email_id = %record.id, domain = %d.domain, error = %e,
                                   "Failed to mark endpoint success for pull domain");
                         }
+                        pull_domains.insert(ep_key);
                     }
-                    pull_domains.insert(ep_key);
                 }
             }
         }

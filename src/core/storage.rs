@@ -54,7 +54,11 @@ impl Database {
 
         // Set SQLCipher key as the first operation on each connection.
         let manager = if let Some(key) = encryption_key {
-            let key_owned = key.to_string();
+            // Escape single quotes in the key to prevent SQL injection.
+            // Key is derived via HMAC-SHA256 (hex-encoded), so quotes are
+            // extremely unlikely, but defense-in-depth is appropriate here.
+            let safe_key = key.replace('\'', "''");
+            let key_owned = safe_key;
             manager.with_init(move |conn| {
                 conn.execute_batch(&format!("PRAGMA key = '{}';", key_owned))?;
                 Ok(())
@@ -369,6 +373,9 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             send_count      INTEGER NOT NULL DEFAULT 0,
             last_sent_at    TEXT NOT NULL DEFAULT (datetime('now')),
             next_retry_at   TEXT,
+            -- DEFAULT 5 here is a safety net for direct DB scripts;
+            -- the application always passes max_attempts explicitly via
+            -- insert_email(). The config default is config::default_max_attempts() = 3.
             max_attempts    INTEGER NOT NULL DEFAULT 5,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             sender_signature  TEXT

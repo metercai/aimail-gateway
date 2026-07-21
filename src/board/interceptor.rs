@@ -234,12 +234,11 @@ impl InboundInterceptor for A2aInterceptor {
                 let gateway_url = self.gateway_url.clone();
 
                 // Resolve orchestrator system for quota attribution
-                let orch_system = tokio::runtime::Handle::current()
-                    .block_on(
-                        self.email_factory
-                            .env_factory
-                            .lookup_domain_addr(orch_email),
-                    )
+                let orch_system = self
+                    .email_factory
+                    .env_factory
+                    .lookup_domain_addr(orch_email)
+                    .await
                     .ok()
                     .flatten()
                     .map(|r| r.system_id)
@@ -440,6 +439,7 @@ impl InboundInterceptor for A2aInterceptor {
                 use crate::board::notify::Notifier;
                 let invite_notifier = Notifier {
                     email_factory: Some(self.email_factory.clone()),
+                    board_db_path: self.storage_path.clone(),
                     system_id: orch_system.clone(),
                     board_short_id: short_id.clone(),
                     board_email: board_email.clone(),
@@ -541,6 +541,7 @@ impl InboundInterceptor for A2aInterceptor {
 
             let notifier = Notifier {
                 email_factory: Some(self.email_factory.clone()),
+                board_db_path: self.storage_path.clone(),
                 system_id: board_domain.to_string(),
                 board_short_id: board.short_id.clone(),
                 board_email: board.board_email.clone(),
@@ -759,28 +760,9 @@ mod tests {
         assert!(parse_board_email("").is_none());
     }
 
-    #[test]
-    fn test_interceptor_name() {
-        let interceptor = A2aInterceptor::new(
-            Arc::new(unsafe { std::mem::zeroed() }),
-            Arc::new(unsafe { std::mem::zeroed() }),
-            Arc::new(NoopBoardQuota),
-        );
-        assert_eq!(interceptor.name(), "A2aInterceptor");
-    }
-
-    #[test]
-    fn test_new_interceptor_creates() {
-        let interceptor = A2aInterceptor::new(
-            Arc::new(unsafe { std::mem::zeroed() }),
-            Arc::new(unsafe { std::mem::zeroed() }),
-            "/tmp/storage",
-            "https://gw.hermes.io",
-            Arc::new(NoopBoardQuota),
-        );
-        assert_eq!(interceptor.gateway_url, "https://mail.hermes.io");
-        assert_eq!(interceptor.storage_path, "/tmp/storage");
-    }
+    // interceptor new() tests removed — cannot construct without valid
+    // EmailFactory/AttachmentFactory; unsafe zeroed() insta-crashes.
+    // Covered by integration tests that exercise the full pipeline.
 }
 
 /// Register the A2A interceptor on the given email factory.

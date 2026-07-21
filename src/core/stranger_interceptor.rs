@@ -62,7 +62,7 @@ impl StrangerInterceptor {
                 None,
                 None,
                 None,
-                3,
+                5, // auto-reply retry attempts (TODO: use config.retry.max_attempts)
             )
             .await
         {

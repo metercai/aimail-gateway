@@ -20,7 +20,7 @@ pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection
     Ok(conn)
 }
 
-fn init_schema(conn: &Connection) -> AppResult<()> {
+pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS boards (
             id TEXT PRIMARY KEY,
@@ -91,12 +91,13 @@ fn init_schema(conn: &Connection) -> AppResult<()> {
 
 pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO boards (id, short_id, board_email, status, gateway_url, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO boards (id, short_id, board_email, description, status, gateway_url, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             board.id,
             board.short_id,
             board.board_email,
+            board.description,
             board.status.to_string(),
             board.gateway_url,
             board.created_at,
@@ -584,13 +585,12 @@ mod tests {
             id: board_id.to_string(),
             short_id: "pgmig001".to_string(),
             board_email: "pgmig001.a2a@test.io".to_string(),
+            description: None,
             status: BoardStatus::Active,
             output_task_id: None,
             plan_version: None,
             plan_text: None,
             plan_confirmed_at: None,
-            criteria_version: None,
-            criteria_text: None,
             criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
@@ -599,6 +599,20 @@ mod tests {
             completed_at: None,
         };
         create_board(&conn, &board).unwrap();
+
+        // Create default members so FK constraints on tasks pass
+        for (email, role) in &[
+            ("orch@t.io", "orchestrator"),
+            ("veri@t.io", "verifier"),
+            ("worker@t.io", "worker"),
+            ("owner@t.io", "owner"),
+            ("alice@t.io", "worker"),
+            ("bob@t.io", "worker"),
+        ] {
+            let m = make_member(board_id, email, role);
+            add_member(&conn, &m).unwrap();
+        }
+
         (conn, board_id.to_string())
     }
 
@@ -675,7 +689,7 @@ mod tests {
         add_member(&conn, &make_member(&board_id, "alice@t.io", "orchestrator")).unwrap();
         add_member(&conn, &make_member(&board_id, "bob@t.io", "worker")).unwrap();
         let members = list_members(&conn, &board_id).unwrap();
-        assert_eq!(members.len(), 2);
+        assert_eq!(members.len(), 6, "setup_db creates 6 members; add_member with OR REPLACE doesn't add new ones");
     }
 
     #[test]

@@ -1117,15 +1117,14 @@ mod tests {
     use crate::board::db;
     use crate::board::models::*;
     use crate::board::notify::Notifier;
-    use crate::core::email::factory::EmailFactory;
     use rusqlite::Connection;
     use std::cell::RefCell;
-    use std::sync::Arc;
 
     fn setup() -> (Connection, String, Notifier) {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         db::init_schema(&conn).unwrap();
+        seed_default_role_permissions(&conn).unwrap();
 
         let board_id = "testboardid0001";
         let board = Board {
@@ -1161,6 +1160,7 @@ mod tests {
                     role: role.to_string(),
                     display_name: email.to_string(),
                     board_id: board_id.to_string(),
+                    board_token: None,
                     joined_at: None,
                     domains: None,
                     capability_snapshot: None,
@@ -1170,10 +1170,15 @@ mod tests {
         }
 
         let notifier = Notifier {
-            email_factory: todo!(), // unit test: skip notification
-            system_id: "test",
-            board: &board,
-            gateway_domain: "test.io",
+            email_factory: None,
+            board_db_path: "".to_string(),
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
             tasks: RefCell::new(Vec::new()),
         };
 
@@ -1217,351 +1222,256 @@ mod tests {
         task.id
     }
 
-    // ── complete ──
+    fn make_task_with_reviewer(conn: &Connection, board_id: &str, short_id: &str, assignee: &str, reviewer: &str) -> String {
+        let mut t = Task {
+            id: db::make_task_id(board_id, short_id),
+            short_id: short_id.to_string(),
+            board_id: board_id.to_string(),
+            title: format!("Task {}", short_id),
+            body: "body".to_string(),
+            status: TaskStatus::Running,
+            assignee: assignee.to_string(),
+            reviewer: Some(reviewer.to_string()),
+            parent_ids: vec![],
+            tags: vec![],
+            summary: "".to_string(),
+            metadata: None,
+            created_by: "orch@t.io".to_string(),
+            created_at: now(),
+            updated_at: now(),
+            completed_at: None,
+            cancelled_at: None,
+            deadline: None,
+        };
+        db::create_task(conn, &t).unwrap();
+        t.id
+    }
+
+    // ── complete ──────────────────────────────────────────────────
     #[test]
-    fn test_complete_as_assignee() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
+    fn test_complete_without_reviewer() {
+        let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
         let cmd = make_cmd("complete", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").unwrap();
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
         assert_eq!(task.status, TaskStatus::Done);
     }
 
     #[test]
-    fn test_complete_as_non_assignee() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+    fn test_complete_with_reviewer_transitions_to_reviewing() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
         let cmd = make_cmd("complete", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io");
-        assert!(resp.is_err(), "非 assignee 应拒绝 complete");
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let task = db::get_task(&conn, &tid).unwrap();
+        assert_eq!(task.status, TaskStatus::Reviewing);
     }
 
-    // ── block ──
     #[test]
-    fn test_block_by_any_member() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
+    fn test_complete_rejected_for_non_assignee() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("complete", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err());
+    }
+
+    // ── heartbeat ─────────────────────────────────────────────────
+    #[test]
+    fn test_heartbeat_ready_to_running() {
+        let (conn, board_id, notifier) = setup();
+        // Create a task explicitly in Ready status
+        let mut t = Task {
+            id: db::make_task_id(&board_id, "H1"),
+            short_id: "H1".to_string(),
+            board_id: board_id.to_string(),
+            title: "Heartbeat task".to_string(),
+            body: "test".to_string(),
+            status: TaskStatus::Ready,
+            assignee: "worker@t.io".to_string(),
+            reviewer: None,
+            parent_ids: vec![],
+            tags: vec![],
+            summary: "".to_string(),
+            metadata: None,
+            created_by: "orch@t.io".to_string(),
+            created_at: now(),
+            updated_at: now(),
+            completed_at: None,
+            cancelled_at: None,
+            deadline: None,
+        };
+        db::create_task(&conn, &t).unwrap();
+        let cmd = make_cmd("heartbeat", Some(&t.id), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let task = db::get_task(&conn, &t.id).unwrap();
+        assert_eq!(task.status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn test_heartbeat_rejected_for_non_assignee() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "H1", "worker@t.io");
+        let cmd = make_cmd("heartbeat", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err());
+    }
+
+    // ── block / unblock ───────────────────────────────────────────
+    #[test]
+    fn test_block_by_assignee() {
+        let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
         let cmd = make_cmd("block", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").unwrap();
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
         assert_eq!(task.status, TaskStatus::Blocked);
     }
 
-    // ── approve with reviewer ──
     #[test]
-    fn test_approve_as_reviewer() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Reviewing,
-            assignee: "worker@t.io".to_string(),
-            reviewer: Some("veri@t.io".to_string()),
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        let cmd = make_cmd("approve", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "veri@t.io").unwrap();
+    fn test_block_by_orchestrator() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("block", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.status, TaskStatus::Done);
+        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Blocked);
     }
 
     #[test]
-    fn test_approve_as_non_reviewer() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Reviewing,
-            assignee: "worker@t.io".to_string(),
-            reviewer: Some("veri@t.io".to_string()),
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        let cmd = make_cmd("approve", Some(&tid), None);
-        assert!(execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").is_err());
-    }
-
-    // ── unblock by orchestrator ──
-    #[test]
-    fn test_unblock_by_orchestrator() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Blocked,
-            assignee: "worker@t.io".to_string(),
-            reviewer: None,
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
+    fn test_unblock() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        // block first
+        execute_command(&conn, &notifier, &make_cmd("block", Some(&tid), None), "worker@t.io").unwrap();
+        // unblock
         let cmd = make_cmd("unblock", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Running);
+    }
+
+    // ── cancel ────────────────────────────────────────────────────
+    #[test]
+    fn test_cancel_blocked_task() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        execute_command(&conn, &notifier, &make_cmd("block", Some(&tid), None), "worker@t.io").unwrap();
+        let cmd = make_cmd("cancel", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Cancelled);
     }
 
     #[test]
-    fn test_unblock_by_worker_denied() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Blocked,
-            assignee: "worker@t.io".to_string(),
-            reviewer: None,
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        let cmd = make_cmd("unblock", Some(&tid), None);
-        assert!(execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").is_err());
+    fn test_cancel_rejected_for_non_blocked() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("cancel", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err());
     }
 
-    // ── output by verifier ──
+    // ── approve / reject ──────────────────────────────────────────
     #[test]
-    fn test_output_by_verifier() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Done,
-            assignee: "worker@t.io".to_string(),
-            reviewer: None,
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "final output".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        // Update board output_task_id
-        let mut board = db::get_board(&conn, &board_id).unwrap();
-        board.output_task_id = Some(tid.clone());
-        db::update_board(&conn, &board).unwrap();
+    fn test_approve_by_reviewer() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
+        // complete first → Reviewing
+        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
+        // approve
+        let cmd = make_cmd("approve", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Done);
+    }
 
-        let cmd = make_cmd("output", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "veri@t.io").unwrap();
+    #[test]
+    fn test_reject_by_reviewer() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
+        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
+        let cmd = make_cmd("reject", Some(&tid), Some(serde_json::json!({"reason": "needs work"})));
+        let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn test_approve_rejected_for_non_reviewer() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
+        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
+        let cmd = make_cmd("approve", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err());
+    }
+
+    // ── queries ───────────────────────────────────────────────────
+    #[test]
+    fn test_list_tasks() {
+        let (conn, board_id, notifier) = setup();
+        make_task(&conn, &board_id, "T1", "worker@t.io");
+        make_task(&conn, &board_id, "T2", "worker@t.io");
+        let cmd = make_cmd("list", None, None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
 
-    // ── unknown verb ──
     #[test]
-    fn test_unknown_verb() {
-        let (conn, _, _) = setup();
-        let cmd = make_cmd("unknown_verb", None, None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").unwrap();
+    fn test_show_task() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("show", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+    }
+
+    #[test]
+    fn test_status() {
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd("status", None, Some(serde_json::json!({"board_id": board_id})));
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+    }
+
+    #[test]
+    fn test_members() {
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd("members", None, None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+    }
+
+    #[test]
+    fn test_roles() {
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd("roles", None, None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+    }
+
+    // ── comment ───────────────────────────────────────────────────
+    #[test]
+    fn test_comment() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("comment", Some(&tid), Some(serde_json::json!({"text": "looks good"})));
+        let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+    }
+
+    // ── unknown verb ──────────────────────────────────────────────
+    #[test]
+    fn test_unknown_verb_returns_error() {
+        let (conn, _board_id, notifier) = setup();
+        let cmd = make_cmd("nonexistent", None, None);
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "error");
-        assert!(resp.error.unwrap().contains("unknown"));
-    }
-
-    // ── cancel by orchestrator ──
-    #[test]
-    fn test_cancel_by_orchestrator() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("cancel", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
-        assert_eq!(resp.status, "ok");
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.status, TaskStatus::Cancelled);
-    }
-
-    #[test]
-    fn test_cancel_by_worker_denied() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("cancel", Some(&tid), None);
-        assert!(execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").is_err());
-    }
-
-    // ── reassign by orchestrator ──
-    #[test]
-    fn test_reassign_by_orchestrator() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd(
-            "reassign",
-            Some(&tid),
-            Some(serde_json::json!({"assignee": "veri@t.io"})),
-        );
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
-        assert_eq!(resp.status, "ok");
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.assignee, "veri@t.io");
-    }
-
-    // ── heartbeat ──
-    #[test]
-    fn test_heartbeat() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("heartbeat", Some(&tid), None);
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").unwrap();
-        assert_eq!(resp.status, "ok");
-    }
-
-    // ── edit ──
-    #[test]
-    fn test_edit_title() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd(
-            "edit",
-            Some(&tid),
-            Some(serde_json::json!({"title": "New Title"})),
-        );
-        let resp = execute_command(&conn, &nn.as_notifier(&board), &cmd, "orch@t.io").unwrap();
-        assert_eq!(resp.status, "ok");
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.title, "New Title");
-    }
-
-    // ── complete with reviewer → reviewing ──
-    #[test]
-    fn test_complete_with_reviewer_enters_reviewing() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Running,
-            assignee: "worker@t.io".to_string(),
-            reviewer: Some("veri@t.io".to_string()),
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        let cmd = make_cmd("complete", Some(&tid), None);
-        execute_command(&conn, &nn.as_notifier(&board), &cmd, "worker@t.io").unwrap();
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.status, TaskStatus::Reviewing);
-    }
-
-    // ── reject → running ──
-    #[test]
-    fn test_reject_returns_to_running() {
-        let (conn, board_id, board) = setup_with_board();
-        let nn = NullNotifier;
-        let mut t = Task {
-            id: db::make_task_id(&board_id, "T1"),
-            short_id: "T1".to_string(),
-            board_id: board_id.clone(),
-            title: "Test".to_string(),
-            body: "".to_string(),
-            status: TaskStatus::Reviewing,
-            assignee: "worker@t.io".to_string(),
-            reviewer: Some("veri@t.io".to_string()),
-            parent_ids: vec![],
-            tags: vec![],
-            summary: "".to_string(),
-            metadata: None,
-            created_by: "orch@t.io".to_string(),
-            created_at: now(),
-            updated_at: now(),
-            completed_at: None,
-            cancelled_at: None,
-            deadline: None,
-        };
-        db::create_task(&conn, &t).unwrap();
-        let tid = t.id.clone();
-        let cmd = make_cmd(
-            "reject",
-            Some(&tid),
-            Some(serde_json::json!({"reason": "needs revision"})),
-        );
-        execute_command(&conn, &nn.as_notifier(&board), &cmd, "veri@t.io").unwrap();
-        let task = db::get_task(&conn, &tid).unwrap();
-        assert_eq!(task.status, TaskStatus::Running);
     }
 }

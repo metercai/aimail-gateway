@@ -139,6 +139,100 @@ pub(crate) async fn deliver_webhook(
     }
 }
 
+// ── Shared attachment cascade ──────────────────────────────────────
+
+/// Cascade-delete one attachment: file, MIME copy, permissions, metadata, empty dirs.
+///
+/// This is the shared helper used by both `cleanup_completed_email` and
+/// `process_expired_attachments` to avoid duplicated cleanup logic.
+///
+/// - When `perm_count == 0 && mail_count <= 1`: full cascade (no other references).
+/// - Otherwise: shared attachment — only remove this `mail_id` reference.
+pub(crate) async fn cascade_delete_attachment(
+    attachment_factory: &AttachmentFactory,
+    email_factory: &EmailFactory,
+    attachment_id: &str,
+    extension: &str,
+    sender_email: &str,
+    perm_count: i64,
+    mail_count: i64,
+    mail_id: &str,
+) {
+    if perm_count == 0 && mail_count <= 1 {
+        // ── Full cascade: no other references ──
+
+        // 1. Delete the attachment file from disk
+        let full_path = attachment_factory.file_path(sender_email, attachment_id, extension);
+        let full_path_for_log = full_path.clone();
+        match tokio::task::spawn_blocking(move || std::fs::remove_file(&full_path)).await {
+            Ok(Ok(())) => {
+                debug!(attachment_id, path = %full_path_for_log.display(), "Deleted attachment file");
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(Err(e)) => {
+                warn!(attachment_id, %e, "Failed to delete attachment file (non-fatal)");
+            }
+            Err(join_err) => {
+                warn!(attachment_id, error = %join_err, "spawn_blocking panicked during file deletion (non-fatal)");
+            }
+        }
+
+        // 2. Delete the MIME copy
+        let mime_path = email_factory
+            .attachment_hash_dir(sender_email)
+            .join("mime")
+            .join(attachment_id);
+        match tokio::task::spawn_blocking(move || std::fs::remove_file(&mime_path)).await {
+            Ok(Ok(())) => {
+                debug!(attachment_id, "Deleted MIME copy");
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(Err(e)) => {
+                warn!(attachment_id, %e, "Failed to delete MIME copy (non-fatal)");
+            }
+            Err(join_err) => {
+                warn!(attachment_id, error = %join_err, "spawn_blocking panicked during MIME deletion (non-fatal)");
+            }
+        }
+
+        // 3. Revoke download permissions
+        if let Err(e) = attachment_factory.revoke_all(attachment_id).await {
+            warn!(attachment_id, %e, "Failed to revoke permissions (non-fatal)");
+        }
+
+        // 4. Delete attachment metadata
+        if let Err(e) = attachment_factory.delete_meta(attachment_id).await {
+            warn!(attachment_id, %e, "Failed to delete metadata (non-fatal)");
+        }
+
+        // 5. Clean up empty hash-prefix directories
+        let hash_dir = email_factory.attachment_hash_dir(sender_email);
+        let mime_dir = hash_dir.join("mime");
+        let _ = tokio::task::spawn_blocking(move || {
+            if std::fs::metadata(&mime_dir).is_ok() {
+                let _ = std::fs::remove_dir(&mime_dir);
+            }
+            if std::fs::metadata(&hash_dir).is_ok() {
+                let _ = std::fs::remove_dir(&hash_dir);
+            }
+        })
+        .await;
+    } else {
+        // ── Shared attachment: only remove this mail_id reference ──
+        info!(
+            attachment_id, perm_count, mail_count,
+            "Attachment shared — removing mail_id reference only"
+        );
+        if let Err(e) = attachment_factory
+            .remove_mail_id(attachment_id, mail_id)
+            .await
+        {
+            warn!(attachment_id, mail_id, %e,
+                  "Failed to remove mail_id reference (non-fatal)");
+        }
+    }
+}
+
 // ── Post-completion cleanup ────────────────────────────────────────
 
 /// Cascade-delete email and all associated data after completion: revoke permissions,
@@ -152,155 +246,36 @@ pub(crate) async fn cleanup_completed_email(
 ) {
     // Parse attachment IDs from the record's JSON field
     let attachment_ids = record.attachment_ids();
-    if !attachment_ids.is_empty() {
-        for attachment_id in &attachment_ids {
-            // Determine file extension from attachment metadata
-            let extension = attachment_factory
-                .get_meta(attachment_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|m| m.file_extension().to_string())
-                .unwrap_or_else(|| "bin".to_string());
+    for attachment_id in &attachment_ids {
+        // Determine file extension from attachment metadata
+        let extension = attachment_factory
+            .get_meta(attachment_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|m| m.file_extension().to_string())
+            .unwrap_or_else(|| "bin".to_string());
 
-            let perm_count = attachment_factory
-                .count_permissions(attachment_id)
-                .await
-                .unwrap_or(0);
-            let mail_count = attachment_factory
-                .count_mail_ids(attachment_id)
-                .await
-                .unwrap_or(0);
+        let perm_count = attachment_factory
+            .count_permissions(attachment_id)
+            .await
+            .unwrap_or(0);
+        let mail_count = attachment_factory
+            .count_mail_ids(attachment_id)
+            .await
+            .unwrap_or(0);
 
-            if perm_count == 0 && mail_count <= 1 {
-                // ── Full cascade: no other references ──
-
-                // 1. Delete the attachment file from disk
-                let full_path =
-                    attachment_factory.file_path(&record.sender, attachment_id, &extension);
-                let full_path_for_log = full_path.clone();
-                match tokio::task::spawn_blocking(move || std::fs::remove_file(&full_path)).await {
-                    Ok(Ok(())) => {
-                        debug!(
-                            operation = "cleanup_file_deleted",
-                            attachment_id = %attachment_id,
-                            path = %full_path_for_log.display(),
-                            "Deleted attachment file during completed-email cleanup"
-                        );
-                    }
-                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Ok(Err(e)) => {
-                        warn!(
-                            operation = "cleanup_failed",
-                            email_id = %record.id,
-                            attachment_id = %attachment_id,
-                            error = %e,
-                            "Failed to delete attachment file during cleanup (non-fatal)"
-                        );
-                    }
-                    Err(join_err) => {
-                        warn!(
-                            operation = "cleanup_failed",
-                            email_id = %record.id,
-                            attachment_id = %attachment_id,
-                            error = %join_err,
-                            "Spawn_blocking panicked during attachment cleanup (non-fatal)"
-                        );
-                    }
-                }
-
-                // 2. Delete the MIME copy
-                let mime_path = email_factory
-                    .attachment_hash_dir(&record.sender)
-                    .join("mime")
-                    .join(attachment_id);
-                match tokio::task::spawn_blocking(move || std::fs::remove_file(&mime_path)).await {
-                    Ok(Ok(())) => {
-                        debug!(
-                            operation = "cleanup_mime_deleted",
-                            attachment_id = %attachment_id,
-                            "Deleted MIME copy during completed-email cleanup"
-                        );
-                    }
-                    Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Ok(Err(e)) => {
-                        warn!(
-                            operation = "cleanup_failed",
-                            email_id = %record.id,
-                            attachment_id = %attachment_id,
-                            error = %e,
-                            "Failed to delete MIME copy during cleanup (non-fatal)"
-                        );
-                    }
-                    Err(join_err) => {
-                        warn!(
-                            operation = "cleanup_failed",
-                            email_id = %record.id,
-                            attachment_id = %attachment_id,
-                            error = %join_err,
-                            "Spawn_blocking panicked during MIME cleanup (non-fatal)"
-                        );
-                    }
-                }
-
-                // 3. Revoke download permissions
-                if let Err(e) = attachment_factory.revoke_all(attachment_id).await {
-                    warn!(
-                        operation = "cleanup_failed",
-                        email_id = %record.id,
-                        attachment_id = %attachment_id,
-                        error = %e,
-                        "Failed to delete attachment permissions during cleanup (non-fatal)"
-                    );
-                }
-
-                // 4. Delete attachment metadata
-                if let Err(e) = attachment_factory.delete_meta(attachment_id).await {
-                    warn!(
-                        operation = "cleanup_failed",
-                        email_id = %record.id,
-                        attachment_id = %attachment_id,
-                        error = %e,
-                        "Failed to delete attachment metadata during cleanup (non-fatal)"
-                    );
-                }
-
-                // 5. Clean up empty hash-prefix directories
-                let hash_dir = email_factory.attachment_hash_dir(&record.sender);
-                let mime_dir = hash_dir.join("mime");
-                let _ = tokio::task::spawn_blocking(move || {
-                    if std::fs::metadata(&mime_dir).is_ok() {
-                        let _ = std::fs::remove_dir(&mime_dir);
-                    }
-                    if std::fs::metadata(&hash_dir).is_ok() {
-                        let _ = std::fs::remove_dir(&hash_dir);
-                    }
-                })
-                .await;
-            } else {
-                // ── Shared attachment: only remove this mail_id reference ──
-                info!(
-                    operation = "cleanup_shared_attachment",
-                    email_id = %record.id,
-                    attachment_id = %attachment_id,
-                    perm_count,
-                    mail_count,
-                    "Attachment shared with other emails — removing mail_id reference only"
-                );
-                if let Err(e) = attachment_factory
-                    .remove_mail_id(attachment_id, &record.id)
-                    .await
-                {
-                    warn!(
-                        operation = "cleanup_failed",
-                        email_id = %record.id,
-                        attachment_id = %attachment_id,
-                        error = %e,
-                        "Failed to remove mail_id reference during cleanup (non-fatal)"
-                    );
-                }
-            }
-        }
+        cascade_delete_attachment(
+            attachment_factory,
+            email_factory,
+            attachment_id,
+            &extension,
+            &record.sender,
+            perm_count,
+            mail_count,
+            &record.id,
+        )
+        .await;
     }
 
     // Delete the email record itself

@@ -43,8 +43,8 @@ use crate::core::strategy::WhitelistKeyResolver;
 /// Maximum length for a whitelist pattern value.
 const MAX_PATTERN_LEN: usize = 128;
 
-/// Time-to-live for cached compiled regex patterns.
-const CACHE_TTL: Duration = Duration::from_secs(5);
+/// Time-to-live for cached compiled regex patterns (30 seconds).
+const CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Compile a whitelist pattern value into a regex.
 ///
@@ -109,8 +109,6 @@ impl WhitelistCache {
 
         {
             let mut cache = self.inner.write().unwrap();
-            // Clean expired entries while we're here
-            cache.retain(|_, (_, created)| created.elapsed() < CACHE_TTL);
             cache.insert(value.to_string(), (regex.clone(), Instant::now()));
         }
 
@@ -119,14 +117,26 @@ impl WhitelistCache {
 
     /// Remove a specific pattern from the cache, forcing recompilation on next lookup.
     pub fn invalidate(&self, value: &str) {
-        let mut cache = self.inner.write().unwrap();
-        cache.remove(value);
+        match self.inner.write() {
+            Ok(mut cache) => { cache.remove(value); }
+            Err(_) => {
+                // Poisoned RwLock — a previous writer panicked.
+                // Worst case: stale entry survives for CACHE_TTL (30s).
+                // The cache is write-through (always backed by DB), so this
+                // is a transient inconsistency that resolves on next TTL expiry.
+            }
+        }
     }
 
     /// Clear all cached entries.
     pub fn invalidate_all(&self) {
-        let mut cache = self.inner.write().unwrap();
-        cache.clear();
+        match self.inner.write() {
+            Ok(mut cache) => { cache.clear(); }
+            Err(_) => {
+                // Poisoned RwLock — all entries will naturally expire
+                // within CACHE_TTL (30s). No explicit recovery needed.
+            }
+        }
     }
 }
 

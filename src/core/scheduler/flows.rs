@@ -12,6 +12,42 @@ use super::deliver::{cleanup_completed_email, deliver_smtp, deliver_webhook};
 
 use super::exhaustion::{insert_exhaustion_auto_reply, insert_exhaustion_notification};
 
+// ── Post-delivery finalization ──────────────────────────────────────
+
+/// After a successful SMTP delivery, decide whether to keep the record for
+/// NDR bounce correlation (MX direct mode) or finalize immediately (relay mode).
+///
+/// - **MX direct mode** (no relay configured): marks as "delivered" — the record
+///   stays in the DB for `delivery_window_secs` so incoming bounce/NDR emails
+///   can be matched. The expired_delivered batch in `batch.rs` finalizes them later.
+/// - **Relay mode** (upstream SMTP configured): immediately completes + cleans up,
+///   since the relay handles bounces on its own.
+async fn finalize_after_delivery(
+    email_factory: &EmailFactory,
+    attachment_factory: &AttachmentFactory,
+    config: &Config,
+    record: &EmailRecord,
+    delivery_type: &str,
+) {
+    let direct_delivery = config
+        .relay
+        .smtp_server
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true);
+    if direct_delivery && delivery_type != "webhook" {
+        if let Err(e) = email_factory.mark_delivered(&record.id).await {
+            error!(email_id = %record.id, %e, "Failed to mark delivered");
+        }
+    } else {
+        if let Err(e) = email_factory.complete(&record.id).await {
+            error!(email_id = %record.id, %e, "Failed to mark completed");
+        } else {
+            cleanup_completed_email(attachment_factory, email_factory, config, record).await;
+        }
+    }
+}
+
 // ── Flow 1: Overlimit handling ─────────────────────────────────────
 
 /// Process an exhausted email: send auto-reply and mark completed.
@@ -92,27 +128,7 @@ pub(crate) async fn periodic_inspection(
     // Success → mark completed or delivered
     if last_error.is_none() {
         info!(email_id = %record.id, "Retry delivery succeeded, marking completed");
-        // MX direct mode: no relay.smtp_server → keep record for NDR window
-        // Webhook deliveries don't need NDR window → complete immediately
-        let direct_delivery = config
-            .relay
-            .smtp_server
-            .as_deref()
-            .map(|s| s.is_empty())
-            .unwrap_or(true);
-        if direct_delivery && delivery_type != "webhook" {
-            // MX direct mode: keep the record for the NDR window
-            if let Err(e) = email_factory.mark_delivered(&record.id).await {
-                error!(email_id = %record.id, %e, "Failed to mark delivered");
-            }
-        } else {
-            // Relay mode: immediately finalize and clean up
-            if let Err(e) = email_factory.complete(&record.id).await {
-                error!(email_id = %record.id, %e, "Failed to mark retry email as completed");
-            } else {
-                cleanup_completed_email(attachment_factory, email_factory, config, record).await;
-            }
-        }
+        finalize_after_delivery(email_factory, attachment_factory, config, record, delivery_type).await;
         return;
     }
 
@@ -214,26 +230,7 @@ pub(crate) async fn immediate_forward(
 
     if last_error.is_none() {
         debug!(email_id = %record.id, "Immediate forward succeeded, marking completed");
-        // MX direct mode: no relay.smtp_server → keep record for NDR window
-        let direct_delivery = config
-            .relay
-            .smtp_server
-            .as_deref()
-            .map(|s| s.is_empty())
-            .unwrap_or(true);
-        if direct_delivery {
-            // MX direct mode: keep the record for the NDR window
-            if let Err(e) = email_factory.mark_delivered(&record.id).await {
-                error!(email_id = %record.id, %e, "Failed to mark delivered");
-            }
-        } else {
-            // Relay mode: immediately finalize and clean up
-            if let Err(e) = email_factory.complete(&record.id).await {
-                error!(email_id = %record.id, %e, "Failed to mark completed");
-            } else {
-                cleanup_completed_email(attachment_factory, email_factory, config, record).await;
-            }
-        }
+        finalize_after_delivery(email_factory, attachment_factory, config, record, delivery_type).await;
         return;
     }
 
@@ -366,108 +363,28 @@ pub(crate) async fn process_expired_attachments(
 
         if perm_count == 0 && mail_count <= 1 {
             // ── Full cascade: no other references ──
-
-            // 1. Delete the attachment file from disk
+            // Track file size before deletion for metrics
             let full_path =
                 attachment_factory.file_path(&attachment.sender_email, &attachment.id, &extension);
-            let full_path_for_log = full_path.clone();
-            let (file_size, remove_result) = tokio::task::spawn_blocking(move || {
-                let size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
-                (size, std::fs::remove_file(&full_path))
+            let file_size = tokio::task::spawn_blocking(move || {
+                std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0)
             })
             .await
-            .unwrap_or((
-                0,
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "spawn_blocking panicked",
-                )),
-            ));
-            match remove_result {
-                Ok(()) => {
-                    info!(
-                        attachment_id = %attachment.id,
-                        path = %full_path_for_log.display(),
-                        "Deleted expired attachment file"
-                    );
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    warn!(
-                        attachment_id = %attachment.id,
-                        path = %full_path_for_log.display(),
-                        "Expired attachment file not found on disk (may have been already removed)"
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        attachment_id = %attachment.id,
-                        path = %full_path_for_log.display(),
-                        %e,
-                        "Failed to delete expired attachment file"
-                    );
-                }
-            }
+            .unwrap_or(0);
 
-            // 2. Delete the MIME copy
-            let mime_path = email_factory
-                .attachment_hash_dir(&attachment.sender_email)
-                .join("mime")
-                .join(&attachment.id);
-            let mime_result = tokio::task::spawn_blocking(move || std::fs::remove_file(&mime_path))
-                .await
-                .unwrap_or(Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "spawn_blocking panicked",
-                )));
-            match mime_result {
-                Ok(()) => {
-                    info!(
-                        attachment_id = %attachment.id,
-                        "Deleted MIME copy during expiry cleanup"
-                    );
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
-                    warn!(
-                        attachment_id = %attachment.id,
-                        %e,
-                        "Failed to delete MIME copy during expiry cleanup (non-fatal)"
-                    );
-                }
-            }
-
-            // 3. Delete permissions
-            if let Err(e) = attachment_factory.revoke_all(&attachment.id).await {
-                warn!(
-                    attachment_id = %attachment.id,
-                    %e,
-                    "Failed to delete attachment permissions during expiry cleanup (non-fatal)"
-                );
-            }
-
-            // 4. Delete metadata
-            if let Err(e) = attachment_factory.delete_meta(&attachment.id).await {
-                warn!(
-                    attachment_id = %attachment.id,
-                    %e,
-                    "Failed to delete attachment metadata during expiry cleanup (non-fatal)"
-                );
-            }
-
-            // 5. Clean up empty hash-prefix directories
-            let hash_dir = email_factory.attachment_hash_dir(&attachment.sender_email);
-            let mime_dir = hash_dir.join("mime");
-            let _ = tokio::task::spawn_blocking(move || {
-                if std::fs::metadata(&mime_dir).is_ok() {
-                    let _ = std::fs::remove_dir(&mime_dir);
-                }
-                if std::fs::metadata(&hash_dir).is_ok() {
-                    let _ = std::fs::remove_dir(&hash_dir);
-                }
-            })
+            super::deliver::cascade_delete_attachment(
+                attachment_factory,
+                email_factory,
+                &attachment.id,
+                &extension,
+                &attachment.sender_email,
+                perm_count,
+                mail_count,
+                &attachment.id,
+            )
             .await;
 
-            // 6. Update metrics
+            // Update metrics
             metrics.inc_attachment_expired_deleted();
             metrics.add_storage_attachments_bytes(-(file_size as i64));
 
