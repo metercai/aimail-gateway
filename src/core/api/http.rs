@@ -128,8 +128,12 @@ pub fn create_router(
 
     let router = router_hook.mount(base_router);
     // Auto-register a2a_board toolset API (available to all consumers)
-    let board_routes = Router::new()
-        .route(
+    let board_routes = {
+        // Board routes use Bearer token auth (board_members.board_token),
+        // NOT API key auth. Each handler calls verify_board_token() internally.
+        // Routes are intentionally outside the api auth_layer.
+        Router::new()
+            .route(
             "/api/v1/board/:board_id/task/:task_id",
             get(crate::board::handlers::handle_get_task),
         )
@@ -153,7 +157,8 @@ pub fn create_router(
             "/api/v1/board/:board_id/task/:task_id/heartbeat",
             post(crate::board::handlers::handle_post_heartbeat),
         )
-        .with_state(state.clone());
+        .with_state(state.clone())
+    }; // end board_routes block
     router.merge(board_routes)
 }
 
@@ -485,7 +490,22 @@ async fn list_system_domains(
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
     Path(tid): Path<String>,
 ) -> Result<Json<Vec<SystemDomainResponse>>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["system"])?;
+    // Platform admin: unrestricted access to all systems
+    if is_platform_admin_scope(&api_key) {
+        // allowed
+    } else {
+        require_scope_any(&api_key, &["system"])?;
+        // Guard: system-scoped key only sees own system's domains
+        if api_key.system_id != tid {
+            return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
+                error: "Cross-system access denied".into(),
+                detail: Some(format!(
+                    "Key system '{}' cannot list domains of system '{}'",
+                    api_key.system_id, tid
+                )),
+            })));
+        }
+    }
     match state
         .factories
         .email

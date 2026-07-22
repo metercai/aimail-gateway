@@ -56,9 +56,10 @@ pub async fn auth_layer(env_factory: EnvFactory, mut req: Request, next: Next) -
                 .unwrap();
         }
         Err(e) => {
+            tracing::error!(%e, "auth_layer: DB error during API key verification");
             let err_body = serde_json::to_string(&ErrorResponse {
                 error: "Authentication error".to_string(),
-                detail: Some(e.to_string()),
+                detail: None,
             })
             .unwrap_or_default();
             return Response::builder()
@@ -119,46 +120,13 @@ pub fn require_scope(
     Ok(())
 }
 
-/// Verify target email/system matches API key's email_address.
-pub fn require_domain_match(
+/// Internal: check API key's domain/address match against target email.
+/// Used by `require_domain_match` and `require_agent_match` — logic is identical,
+/// only the error message label differs.
+fn check_domain_access(
     key: &ApiKeyRecord,
-    target_email: &str,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    // System admin (admin system) may operate across all
-    if key.system_id == "admin" {
-        return Ok(());
-    }
-    // System-level key (email_address == "") can manage any address-level key in the same system
-    if key.email_address.is_empty() {
-        return Ok(());
-    }
-    // Domain-level admin: email_address is a bare domain, matches target's domain
-    if !key.email_address.contains('@') {
-        let target_domain = target_email.rsplit('@').next().unwrap_or("");
-        if key.email_address == target_domain {
-            return Ok(());
-        }
-    }
-    if key.email_address == target_email {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "forbidden".into(),
-                detail: Some(format!(
-                    "API key email '{}' does not match target email '{}' — cross-address access denied",
-                    key.email_address, target_email
-                )),
-            }),
-        ))
-    }
-}
-
-/// Verify agent-level access: exact email match or system-level bypass.
-pub fn require_agent_match(
-    key: &ApiKeyRecord,
-    target_email: &str,
+    target: &str,
+    role_label: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // Admin system bypass
     if key.system_id == "admin" {
@@ -168,28 +136,40 @@ pub fn require_agent_match(
     if key.email_address.is_empty() {
         return Ok(());
     }
-    // Domain-level: bare domain matches target's domain
+    // Domain-level: bare domain matches target's domain suffix
     if !key.email_address.contains('@') {
-        let target_domain = target_email.rsplit('@').next().unwrap_or("");
+        let target_domain = target.rsplit('@').next().unwrap_or("");
         if key.email_address == target_domain {
             return Ok(());
         }
     }
-    // Address-level: exact email match only
-    if key.email_address == target_email {
-        Ok(())
-    } else {
-        Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "forbidden".into(),
-                detail: Some(format!(
-                    "AgentAdmin email '{}' does not match target '{}'",
-                    key.email_address, target_email
-                )),
-            }),
-        ))
+    // Address-level: exact email match
+    if key.email_address == target {
+        return Ok(());
     }
+    Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
+        error: "forbidden".into(),
+        detail: Some(format!(
+            "{} email '{}' does not match target '{}' — cross-address access denied",
+            role_label, key.email_address, target
+        )),
+    })))
+}
+
+/// Verify target email matches API key's email_address.
+pub fn require_domain_match(
+    key: &ApiKeyRecord,
+    target_email: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_domain_access(key, target_email, "API key")
+}
+
+/// Verify agent-level access: exact email match or system-level bypass.
+pub fn require_agent_match(
+    key: &ApiKeyRecord,
+    target_email: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    check_domain_access(key, target_email, "AgentAdmin")
 }
 
 /// Check whitelist access: admin keys get full pass; AgentAdmin gets domain suffix match; Agent gets own email.

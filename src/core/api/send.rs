@@ -42,14 +42,8 @@ pub async fn send_email(
     // ── 1b. Daily email quota (emails_per_day from system plans) ──
     {
         let system_id = api_key.system_id.as_str();
-        let _system = match state
-            .factories
-            .email
-            .env_factory
-            .resolve_system(system_id)
-            .await
-        {
-            Ok(Some(t)) => t,
+        match state.factories.email.env_factory.resolve_system(system_id).await {
+            Ok(Some(_)) => { /* system exists, proceed to quota check */ }
             Ok(None) => {
                 return Err((
                     StatusCode::NOT_FOUND,

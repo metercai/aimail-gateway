@@ -187,6 +187,34 @@ impl Database {
         }).await
     }
 
+    /// Batch lookup: fetch multiple attachments in a single DB call.
+    /// Uses `WHERE id IN (...)` with one spawn_blocking instead of N.
+    pub async fn get_attachment_meta_batch(
+        &self,
+        ids: &[String],
+    ) -> AppResult<Vec<AttachmentMetaRecord>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Build dynamic IN (...) clause; parameter count is bounded by caller
+        let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT id, filename, content_type, sender_email, mail_id, created_at FROM attachments_meta WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let ids = ids.to_vec();
+        self.call(move |conn| {
+            let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params.as_slice(), attachment_meta_row)?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        }).await
+    }
+
     /// List attachments associated with a given mail_id.
     /// Uses json_each for exact match inside the JSON array stored in mail_id column.
     pub async fn get_attachments_by_mail_id(
@@ -421,17 +449,19 @@ impl Database {
     /// This prevents concurrent delivery from trigger + interval batch.
     pub async fn claim_ready(&self, id: &str) -> AppResult<Option<EmailRecord>> {
         let id = id.to_string();
-        self.call(move |conn| {
+        self.call_tx(move |tx| {
             // Atomic CAS: update only if current status is 'ready'
-            let rows = conn.execute(
+            // Wrapped in a transaction so UPDATE + SELECT are atomic —
+            // prevents orphaned 'sending' state if SELECT fails.
+            let rows = tx.execute(
                 "UPDATE emails SET status = 'sending', last_sent_at = (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?1 AND status = 'ready'",
                 params![id],
             )?;
             if rows == 0 {
                 return Ok(None);
             }
-            // Read the updated record
-            let result = conn.query_row(
+            // Read the updated record within the same transaction
+            let result = tx.query_row(
                 &format!("{} WHERE id = ?1", EMAIL_SELECT),
                 params![id],
                 email_row,

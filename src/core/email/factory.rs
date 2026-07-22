@@ -69,9 +69,10 @@ impl EmailFactory {
 
     // ── Create ────────────────────────────────────────────────────────
 
-    /// Create an inbound email record and return the inserted row.
-    pub async fn create_inbound(
+    /// Create an email record (inbound or outbound) and return the inserted row.
+    async fn create_email(
         &self,
+        direction: &str,
         id: &str,
         system_id: &str,
         sender: &str,
@@ -84,51 +85,26 @@ impl EmailFactory {
         max_attempts: i32,
     ) -> AppResult<EmailRecord> {
         self.db
-            .insert_email(
-                id,
-                system_id,
-                "inbound",
-                sender,
-                recipients,
-                subject,
-                body,
-                endpoints,
-                attachments,
-                headers,
-                max_attempts,
-            )
+            .insert_email(id, system_id, direction, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts)
             .await
     }
 
-    /// Create an outbound email record and return the inserted row.
-    pub async fn create_outbound(
-        &self,
-        id: &str,
-        system_id: &str,
-        sender: &str,
-        recipients: &str,
-        subject: &str,
-        body: &str,
-        endpoints: Option<&str>,
-        attachments: Option<&str>,
-        headers: Option<&str>,
-        max_attempts: i32,
+    /// Create an inbound email record.
+    pub async fn create_inbound(
+        &self, id: &str, system_id: &str, sender: &str, recipients: &str,
+        subject: &str, body: &str, endpoints: Option<&str>,
+        attachments: Option<&str>, headers: Option<&str>, max_attempts: i32,
     ) -> AppResult<EmailRecord> {
-        self.db
-            .insert_email(
-                id,
-                system_id,
-                "outbound",
-                sender,
-                recipients,
-                subject,
-                body,
-                endpoints,
-                attachments,
-                headers,
-                max_attempts,
-            )
-            .await
+        self.create_email("inbound", id, system_id, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts).await
+    }
+
+    /// Create an outbound email record.
+    pub async fn create_outbound(
+        &self, id: &str, system_id: &str, sender: &str, recipients: &str,
+        subject: &str, body: &str, endpoints: Option<&str>,
+        attachments: Option<&str>, headers: Option<&str>, max_attempts: i32,
+    ) -> AppResult<EmailRecord> {
+        self.create_email("outbound", id, system_id, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts).await
     }
 
     // ── Status transitions ────────────────────────────────────────────
@@ -205,8 +181,8 @@ impl EmailFactory {
     }
 
     /// Mark an outbound email as delivered (MX accepted, waiting for NDR window).
-    pub async fn mark_delivered(&self, id: &str) -> AppResult<bool> {
-        Ok(self.db.update_email_delivered(id).await?.is_some())
+    pub async fn mark_delivered(&self, id: &str) -> AppResult<Option<EmailRecord>> {
+        self.db.update_email_delivered(id).await
     }
 
     /// Update only send_count without changing status.
@@ -281,18 +257,23 @@ impl EmailFactory {
 
     /// Resolve attachment IDs to human-readable "filename (type)" strings.
     /// Used for notification body display — not for file access.
+    /// Uses batch lookup (single DB call) instead of N+1 queries.
     pub async fn attachment_display_list(&self, ids: &[String]) -> Vec<String> {
-        let mut list = Vec::new();
-        for id in ids {
-            match self.db.get_attachment_meta(id).await {
-                Ok(Some(meta)) => {
-                    let ct = meta.content_type.as_deref().unwrap_or("unknown");
-                    list.push(format!("{} ({})", meta.filename, ct));
-                }
-                _ => list.push(format!("{} (deleted)", id)),
-            }
+        if ids.is_empty() {
+            return Vec::new();
         }
-        list
+        let metas = self.db.get_attachment_meta_batch(ids).await.unwrap_or_default();
+        let mut map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for meta in &metas {
+            map.insert(meta.id.as_str(), meta.filename.as_str());
+        }
+        ids.iter()
+            .map(|id| match map.get(id.as_str()) {
+                Some(filename) => format!("{} ({})", filename,
+                    metas.iter().find(|m| m.id == *id).and_then(|m| m.content_type.as_deref()).unwrap_or("unknown")),
+                None => format!("{} (deleted)", id),
+            })
+            .collect()
     }
 
     // ── Recipient resolution ──────────────────────────────────────────
