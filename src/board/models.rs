@@ -255,34 +255,34 @@ mod tests {
     fn test_derive_board_id_deterministic() {
         let id1 = derive_board_id("pgmig001", "mail.hermes.io");
         let id2 = derive_board_id("pgmig001", "mail.hermes.io");
-        assert_eq!(id1, id2, "同输入应产生相同 board_id");
-        assert_eq!(id1.len(), 20, "board_id 应为 20 hex 字符");
+        assert_eq!(id1, id2, "same input should produce same board_id");
+        assert_eq!(id1.len(), 20, "board_id should be 20 hex chars");
     }
 
     #[test]
     fn test_derive_board_id_different_domain() {
         let id1 = derive_board_id("pgmig001", "mail.hermes.io");
         let id2 = derive_board_id("pgmig001", "mail.other.io");
-        assert_ne!(id1, id2, "不同 domain 应产生不同 board_id");
+        assert_ne!(id1, id2, "different domains should produce different board_id");
     }
 
     #[test]
     fn test_derive_board_id_different_short_id() {
         let id1 = derive_board_id("pgmig001", "mail.hermes.io");
         let id2 = derive_board_id("costv2", "mail.hermes.io");
-        assert_ne!(id1, id2, "不同 short_id 应产生不同 board_id");
+        assert_ne!(id1, id2, "different short_ids should produce different board_id");
     }
 
     #[test]
     fn test_derive_board_id_length() {
         let id = derive_board_id("test1234", "domain.com");
-        assert_eq!(id.len(), 20, "board_id 应为 10 字节 = 20 hex 字符");
+        assert_eq!(id.len(), 20, "board_id should be 10 bytes = 20 hex chars");
     }
 
     #[test]
     fn test_parse_board_email_valid() {
         let result = parse_board_email("pgmig001.a2a@mail.hermes.io");
-        assert!(result.is_some(), "有效地址应解析成功");
+        assert!(result.is_some(), "valid address should parse successfully");
         let (short_id, board_id, domain) = result.unwrap();
         assert_eq!(short_id, "pgmig001");
         assert_eq!(domain, "mail.hermes.io");
@@ -292,19 +292,19 @@ mod tests {
     #[test]
     fn test_parse_board_email_missing_a2a() {
         let result = parse_board_email("pgmig001@mail.hermes.io");
-        assert!(result.is_none(), "缺少 .a2a 后缀应返回 None");
+        assert!(result.is_none(), "missing .a2a suffix should return None");
     }
 
     #[test]
     fn test_parse_board_email_no_at() {
         let result = parse_board_email("invalid");
-        assert!(result.is_none(), "缺少 @ 应返回 None");
+        assert!(result.is_none(), "missing @ should return None");
     }
 
     #[test]
     fn test_parse_board_email_empty() {
         let result = parse_board_email("");
-        assert!(result.is_none(), "空字符串应返回 None");
+        assert!(result.is_none(), "empty string should return None");
     }
 
     #[test]

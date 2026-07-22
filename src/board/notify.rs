@@ -9,6 +9,21 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+/// Detect if text contains CJK characters.
+fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3000}'..='\u{303f}' | '\u{ff00}'..='\u{ffef}'))
+}
+
+/// Return `cn` if the task's subject or body contains Chinese, otherwise `en`.
+fn t<'a>(task: &Task, cn: &'a str, en: &'a str) -> &'a str {
+    if has_cjk(&task.title) || has_cjk(&task.body) {
+        cn
+    } else {
+        en
+    }
+}
+
 pub struct Notifier {
     pub email_factory: Option<Arc<EmailFactory>>,
     pub system_id: String,
@@ -27,14 +42,23 @@ impl Notifier {
     pub fn take_tasks(&self) -> Vec<JoinHandle<()>> {
         self.tasks.borrow_mut().drain(..).collect()
     }
-    fn format_body(&self, label: &str, task: &Task, context: &str, action: &str) -> String {
+    fn format_body(&self, cn: bool, label: &str, task: &Task, context: &str, action: &str) -> String {
+        let (task_l, board_l, ctx_l, act_l) = if cn {
+            ("任务", "看板", "上下文", "操作")
+        } else {
+            ("Task", "Board", "Context", "Action")
+        };
         format!(
-            "── A2A Board ──\n\n{label}\n  任务: {sid} — {title}\n  看板: {bsid}\n\n── 上下文 ──\n{context}\n\n── 操作 ──\n{action}",
+            "── A2A Board ──\n\n{label}\n  {task_l}: {sid} — {title}\n  {board_l}: {bsid}\n\n── {ctx_l} ──\n{context}\n\n── {act_l} ──\n{action}",
             label = label,
+            task_l = task_l,
             sid = task.short_id,
             title = task.title,
+            board_l = board_l,
             bsid = self.board_short_id,
+            ctx_l = ctx_l,
             context = context,
+            act_l = act_l,
             action = action,
         )
     }
@@ -102,34 +126,46 @@ impl Notifier {
 
     // ── C1: task assignment ──
     pub fn notify_assigned(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
         let context = format!(
-            "描述: {}\n分配人: {}\n审阅者: {}\n创建人: {}",
-            task.body,
+            "{}\n{}: {}\n{}: {}\n{}: {}",
+            t(task, "描述", "Description"),
+            t(task, "分配人", "Assignee"),
             task.assignee,
-            task.reviewer.as_deref().unwrap_or("(无)"),
+            t(task, "审阅者", "Reviewer"),
+            task.reviewer.as_deref().unwrap_or(t(task, "(无)", "(none)")),
+            t(task, "创建人", "Created by"),
             task.created_by,
         );
         let body = self.format_body(
-            "新任务分配",
+            cn,
+            t(task, "新任务分配", "New Task Assigned"),
             task,
             &context,
-            &format!("开始执行后发 [A2A] heartbeat {}", task.short_id),
+            &format!(
+                "{} [A2A] heartbeat {}",
+                t(task, "开始执行后发", "Send after starting:"),
+                task.short_id,
+            ),
         );
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C2: pending review ──
     pub fn notify_review_needed(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] review-needed {}: {}", task.short_id, task.title);
-        let context = format!("完成人: {}\n产出物: {}", task.assignee, task.summary,);
+        let context = format!("{}: {}\n{}: {}", t(task, "完成人", "Completed by"), task.assignee, t(task, "产出物", "Output"), task.summary);
         let body = self.format_body(
-            "待审阅",
+            cn,
+            t(task, "待审阅", "Pending Review"),
             task,
             &context,
             &format!(
-                "[A2A] approve {}  — 通过\n  [A2A] reject {}   — 退回",
-                task.short_id, task.short_id
+                "[A2A] approve {}  — {}\n  [A2A] reject {}   — {}",
+                task.short_id, t(task, "通过", "Approve"),
+                task.short_id, t(task, "退回", "Reject"),
             ),
         );
         if let Some(reviewer) = &task.reviewer {
@@ -139,37 +175,44 @@ impl Notifier {
 
     // ── C3: review approved ──
     pub fn notify_approved(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
-        let context = format!("审阅人: {}", task.reviewer.as_deref().unwrap_or("(无)"));
-        let body = self.format_body("审阅通过", task, &context, "已完成，无后续操作");
+        let context = format!("{}: {}", t(task, "审阅人", "Reviewer"), task.reviewer.as_deref().unwrap_or(t(task, "(无)", "(none)")));
+        let body = self.format_body(cn, t(task, "审阅通过", "Approved"), task, &context, t(task, "已完成，无后续操作", "Completed, no further action"));
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C4: review rejected ──
     pub fn notify_rejected(&self, task: &Task, reason: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] rejected {}: {}", task.short_id, task.title);
         let context = format!(
-            "审阅人: {}\n原因: {}",
+            "{}: {}\n{}: {}",
+            t(task, "审阅人", "Reviewer"),
             task.reviewer.as_deref().unwrap_or("unknown"),
+            t(task, "原因", "Reason"),
             reason,
         );
         let body = self.format_body(
-            "审阅退回",
+            cn,
+            t(task, "审阅退回", "Rejected"),
             task,
             &context,
-            &format!("修改后重新 [A2A] complete {}", task.short_id),
+            &format!("{} [A2A] complete {}", t(task, "修改后重新", "Revise and re-submit"), task.short_id),
         );
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C5: blocked ──
     pub fn notify_blocked(&self, task: &Task, blocker: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] blocked {}: {}", task.short_id, task.title);
         let body = self.format_body(
-            "任务阻塞",
+            cn,
+            t(task, "任务阻塞", "Task Blocked"),
             task,
-            &format!("阻挡人: {}", blocker),
-            "Orchestrator 协调处理",
+            &format!("{}: {}", t(task, "阻挡人", "Blocker"), blocker),
+            t(task, "Orchestrator 协调处理", "Orchestrator will coordinate"),
         );
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db(&self.board_db_path, &task.board_id).unwrap(),
@@ -185,32 +228,43 @@ impl Notifier {
 
     // ── C6: unblocked ──
     pub fn notify_unblocked(&self, task: &Task, unblocker: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] unblocked {}: {}", task.short_id, task.title);
         let body = self.format_body(
-            "阻塞解除",
+            cn,
+            t(task, "阻塞解除", "Unblocked"),
             task,
-            &format!("解除人: {}", unblocker),
-            "继续执行",
+            &format!("{}: {}", t(task, "解除人", "Unblocked by"), unblocker),
+            t(task, "继续执行", "Resume execution"),
         );
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C7: cancelled ──
     pub fn notify_cancelled(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] cancelled {}: {}", task.short_id, task.title);
-        let body = self.format_body("任务取消", task, "已终止", "停止工作等待新分配");
+        let body = self.format_body(
+            cn,
+            t(task, "任务取消", "Task Cancelled"),
+            task,
+            t(task, "已终止", "Terminated"),
+            t(task, "停止工作等待新分配", "Stop work, await re-assignment"),
+        );
         self.create_email(&task.assignee, &subject, &body);
     }
 
     // ── C8: project output ──
     pub fn notify_output(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] output: {} {}", self.board_short_id, task.title);
-        let context = format!("最终输出: {}\nsummary: {}", task.title, task.summary);
+        let context = format!("{}: {}\nsummary: {}", t(task, "最终输出", "Final Output"), task.title, task.summary);
         let body = self.format_body(
-            "项目输出",
+            cn,
+            t(task, "项目输出", "Project Output"),
             task,
             &context,
-            &format!("[Confirm] output {} — 验收通过", self.board_short_id),
+            &format!("[Confirm] output {} — {}", self.board_short_id, t(task, "验收通过", "Accepted")),
         );
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db("", &self.board_id).unwrap(),
@@ -226,12 +280,14 @@ impl Notifier {
 
     // ── C9: comment ──
     pub fn notify_comment(&self, task: &Task, commenter: &str, text: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] comment {}: {}", task.short_id, task.title);
         let body = self.format_body(
-            "新评论",
+            cn,
+            t(task, "新评论", "New Comment"),
             task,
-            &format!("来自: {}\n{}", commenter, text),
-            "直接回复邮件参与讨论",
+            &format!("{}: {}\n{}", t(task, "来自", "From"), commenter, text),
+            t(task, "直接回复邮件参与讨论", "Reply directly to join the discussion"),
         );
         let recipient = if commenter == task.assignee {
             task.reviewer.as_deref().unwrap_or("")
@@ -264,8 +320,15 @@ impl Notifier {
         short_id: &str,
     ) {
         let body = format!(
-            "── A2A Board ──\n\nBoard 邀请\n  看板: {}\n  Board Email: {}\n\n── 信息 ──\nAPI: {}\nBoard ID: {}\nToken: {}",
-            short_id, board_email, self.gateway_url, board_id, board_token
+            "── A2A Board ──\n\n{}\n  {}: {}\n  Board Email: {}\n\n── {} ──\nAPI: {}\nBoard ID: {}\nToken: {}",
+            "Board Invitation",
+            "Board",
+            short_id,
+            board_email,
+            "Information",
+            self.gateway_url,
+            board_id,
+            board_token,
         );
         let subject = format!("[A2A] invite: {}", short_id);
         self.create_email(member_email, &subject, &body);
@@ -279,18 +342,25 @@ impl Notifier {
         admin_email: &str,
         dispute: &str,
     ) {
+        let cn = task.map_or(false, |t| has_cjk(&t.title) || has_cjk(&t.body));
+        let task_label = if cn { "任务" } else { "Task" };
         let task_info = task
-            .map(|t| format!("任务: {} ({})", t.short_id, t.title))
+            .map(|t| format!("{}: {} ({})", task_label, t.short_id, t.title))
             .unwrap_or_default();
         let subject = format!("[A2A] arbitrate: {}", self.board_short_id);
+        let (arb_req, from, dispute_l, submitted) = if cn {
+            ("仲裁请求", "来自", "争议", "仲裁请求已提交给 Admin。")
+        } else {
+            ("Arbitration Request", "From", "Dispute", "Arbitration request submitted to Admin.")
+        };
         let body = format!(
-            "仲裁请求\n来自: {}\n{}\n争议: {}",
-            requester, task_info, dispute
+            "{}\n{}: {}\n{}\n{}: {}",
+            arb_req, from, requester, task_info, dispute_l, dispute
         );
         if !admin_email.is_empty() {
             self.create_email(admin_email, &subject, &body);
         }
-        self.create_email(requester, &subject, "仲裁请求已提交给 Admin。");
+        self.create_email(requester, &subject, submitted);
     }
 }
 

@@ -1,4 +1,4 @@
-//! MX direct delivery — domain-grouped SMTP with built-in DNS resolution.
+//! MX direct delivery — per-recipient endpoint tracking with internal re-resolve retry.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -7,6 +7,7 @@ use lettre::message::MultiPart;
 use lettre::{Address, AsyncTransport};
 use tracing::{info, warn};
 
+use crate::core::email::factory::EmailFactory;
 use crate::core::email::storage::EmailRecord;
 use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mx::{resolve_mx, MxTransportPool};
@@ -31,7 +32,12 @@ impl MxDelivererImpl {
         }
     }
 
-    /// Deliver an email directly to MX hosts, grouped by recipient domain.
+    /// Deliver via MX with per-recipient endpoint tracking.
+    ///
+    /// - Reads `record.endpoints` to skip already-success recipients (retry path).
+    /// - For pending recipients: resolve MX → try all hosts → re-resolve once → retry.
+    /// - Marks individual recipients as "success" on delivery.
+    /// - Returns Ok when all pending recipients delivered, Err otherwise.
     pub async fn deliver_via_mx(
         &self,
         dkim_signer: &Option<Arc<dyn MessageSigner>>,
@@ -39,143 +45,197 @@ impl MxDelivererImpl {
         recipients: &[Address],
         email_body: &MultiPart,
         record: &EmailRecord,
+        email_factory: &EmailFactory,
     ) -> AppResult<()> {
-        let mut domain_groups: HashMap<String, (Vec<String>, Vec<Address>)> = HashMap::new();
-        let mut dropped_count = 0usize;
+        let endpoints = record.endpoints_parsed().unwrap_or_default();
 
+        // ── Phase 1: group pending recipients by domain ──
+        let mut domain_groups: HashMap<String, Vec<Address>> = HashMap::new();
         for addr in recipients {
-            let domain = addr.domain().to_lowercase();
-            if let Some(group) = domain_groups.get_mut(&domain) {
-                group.1.push(addr.clone());
+            let key = addr.to_string().to_lowercase();
+            if endpoints
+                .get(&key)
+                .and_then(|v| v.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("success")
+            {
                 continue;
             }
-            let mx_hosts: Vec<String> =
-                match resolve_mx(&domain, &self.mx_overrides, &self.resolver).await {
-                    Ok(hosts) if !hosts.is_empty() => {
-                        hosts.into_iter().map(|r| r.exchange).collect()
-                    }
-                    Ok(_) => {
-                        dropped_count += 1;
-                        warn!(domain=%domain, "MX: no records, dropping");
-                        continue;
-                    }
-                    Err(e) => {
-                        dropped_count += 1;
-                        warn!(domain=%domain, error=%e, "MX: lookup failed");
-                        continue;
-                    }
-                };
-            domain_groups.insert(domain, (mx_hosts, vec![addr.clone()]));
+            domain_groups
+                .entry(addr.domain().to_lowercase())
+                .or_default()
+                .push(addr.clone());
         }
 
         if domain_groups.is_empty() {
-            return Err(AppError::Smtp(format!(
-                "no MX hosts found ({} dropped)",
-                dropped_count
-            )));
-        }
-        if dropped_count > 0 {
-            warn!(
-                operation = "mx_dropped",
-                dropped = dropped_count,
-                total = recipients.len()
-            );
+            return Ok(());
         }
 
-        let subject = if record.subject.is_empty() {
-            "(no subject)"
-        } else {
-            record.subject.as_str()
-        };
-        let headers_val = record.headers_parsed();
-        let name_map = name_map_from_headers(&serde_json::Value::Object(headers_val.clone()));
-        let from_name: Option<String> =
-            headers_val
-                .get("from")
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    if let Some(pos) = s.find('<') {
-                        let n = s[..pos].trim().to_string();
-                        if n.is_empty() {
-                            None
-                        } else {
-                            Some(n)
-                        }
-                    } else {
-                        None
-                    }
-                });
+        // Build message once (all recipients share same body/headers)
+        let raw_to_send = build_mx_message(
+            dkim_signer,
+            from_addr,
+            recipients,
+            email_body,
+            record,
+        )
+        .await?;
 
-        let mut builder = lettre::Message::builder()
-            .from(lettre::message::Mailbox::new(from_name, from_addr.clone()))
-            .subject(subject);
-        for addr in recipients {
-            let display = name_map.get(&addr.to_string().to_lowercase()).cloned();
-            builder = builder.to(lettre::message::Mailbox::new(display, addr.clone()));
-        }
-        if let Some(v) = headers_val
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            builder = builder.header(lettre::message::header::MessageId::from(v.to_string()));
-        }
-        if let Some(v) = headers_val
-            .get("in_reply_to")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            builder = builder.header(lettre::message::header::InReplyTo::from(v.to_string()));
-        }
-        if let Some(v) = headers_val
-            .get("references")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-        {
-            builder = builder.header(lettre::message::header::References::from(v.to_string()));
-        }
-        let email = builder
-            .multipart(email_body.clone())
-            .map_err(|e| AppError::Smtp(format!("build MIME: {}", e)))?;
-        let raw = email.formatted();
-        let raw_to_send = match dkim_signer {
-            Some(signer) => signer.apply_sign(&raw, &record.id).await,
-            None => std::borrow::Cow::Borrowed(raw.as_slice()),
-        };
+        let mut any_failed = false;
 
-        let mut last_error = None;
-        for (_domain, (mx_hosts, domain_recipients)) in &domain_groups {
+        // ── Phase 2: per-domain resolve + send ──
+        for (domain, addrs) in &domain_groups {
             let envelope = lettre::address::Envelope::new(
                 Some(from_addr.clone()),
-                domain_recipients.iter().cloned().collect(),
+                addrs.iter().cloned().collect(),
             )
             .map_err(|_| AppError::Smtp("bad envelope".into()))?;
 
-            let mut delivered = false;
-            for host in mx_hosts {
-                match self.pool.get_or_create(host.as_str(), None).await {
-                    Ok(transport) => match transport.send_raw(&envelope, &*raw_to_send).await {
-                        Ok(_) => {
-                            info!(mx=%host, "MX delivery OK");
-                            delivered = true;
-                            break;
-                        }
-                        Err(e) => {
-                            last_error = Some(AppError::Smtp(format!("{}: {}", host, e)));
-                        }
-                    },
-                    Err(e) => {
-                        last_error = Some(e);
-                    }
+            let delivered = self
+                .try_deliver_domain(
+                    domain,
+                    &envelope,
+                    &raw_to_send,
+                    from_addr,
+                    dkim_signer,
+                    record,
+                )
+                .await;
+
+            for addr in addrs {
+                let key = addr.to_string().to_lowercase();
+                if delivered {
+                    let _ = email_factory
+                        .update_endpoint_status(&record.id, &key, "success")
+                        .await;
+                } else {
+                    any_failed = true;
                 }
             }
-            if !delivered {
-                return Err(last_error
-                    .unwrap_or_else(|| AppError::Smtp("no MX transport available".into())));
+        }
+
+        if any_failed {
+            Err(AppError::Smtp("partial MX delivery failure".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Resolve MX for a domain → try all hosts → re-resolve once → retry.
+    async fn try_deliver_domain(
+        &self,
+        domain: &str,
+        envelope: &lettre::address::Envelope,
+        raw_to_send: &[u8],
+        _from_addr: &Address,
+        _dkim_signer: &Option<Arc<dyn MessageSigner>>,
+        _record: &EmailRecord,
+    ) -> bool {
+        // Resolve MX
+        let mx_hosts = match resolve_mx(domain, &self.mx_overrides, &self.resolver).await {
+            Ok(h) if !h.is_empty() => h.into_iter().map(|r| r.exchange).collect::<Vec<_>>(),
+            _ => {
+                warn!(domain = %domain, "MX: initial resolve failed");
+                return false;
+            }
+        };
+
+        // Try all MX hosts in priority order
+        if self.try_mx_hosts(&mx_hosts, envelope, raw_to_send).await {
+            return true;
+        }
+
+        // Re-resolve once (catch DNS flap / MX switch) and retry
+        warn!(domain = %domain, "MX: all hosts failed, re-resolving");
+        let mx_hosts2 = match resolve_mx(domain, &self.mx_overrides, &self.resolver).await {
+            Ok(h) if !h.is_empty() => h.into_iter().map(|r| r.exchange).collect::<Vec<_>>(),
+            _ => return false,
+        };
+        self.try_mx_hosts(&mx_hosts2, envelope, raw_to_send).await
+    }
+
+    /// Try each MX host in priority order. Returns true on first success.
+    async fn try_mx_hosts(
+        &self,
+        hosts: &[String],
+        envelope: &lettre::address::Envelope,
+        raw_to_send: &[u8],
+    ) -> bool {
+        for host in hosts {
+            match self.pool.get_or_create(host.as_str(), None).await {
+                Ok(transport) => match transport.send_raw(envelope, raw_to_send).await {
+                    Ok(_) => {
+                        info!(mx = %host, "MX delivery OK");
+                        return true;
+                    }
+                    Err(e) => {
+                        warn!(mx = %host, error = %e, "MX send failed");
+                    }
+                },
+                Err(e) => {
+                    warn!(mx = %host, error = %e, "MX pool fail");
+                }
             }
         }
-        Ok(())
+        false
     }
+}
+
+/// Build a signed MIME message for MX delivery (shared across domains).
+async fn build_mx_message(
+    dkim_signer: &Option<Arc<dyn MessageSigner>>,
+    from_addr: &Address,
+    recipients: &[Address],
+    email_body: &MultiPart,
+    record: &EmailRecord,
+) -> AppResult<Vec<u8>> {
+    let subject = if record.subject.is_empty() {
+        "(no subject)"
+    } else {
+        record.subject.as_str()
+    };
+    let headers_val = record.headers_parsed();
+    let name_map = name_map_from_headers(&serde_json::Value::Object(headers_val.clone()));
+    let from_name: Option<String> =
+        headers_val
+            .get("from")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                if let Some(pos) = s.find('<') {
+                    let n = s[..pos].trim().to_string();
+                    if n.is_empty() { None } else { Some(n) }
+                } else {
+                    None
+                }
+            });
+
+    let mut builder = lettre::Message::builder()
+        .from(lettre::message::Mailbox::new(from_name, from_addr.clone()))
+        .subject(subject);
+    for addr in recipients {
+        let display = name_map
+            .get(&addr.to_string().to_lowercase())
+            .cloned();
+        builder = builder.to(lettre::message::Mailbox::new(display, addr.clone()));
+    }
+    if let Some(v) = headers_val.get("message_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        builder = builder.header(lettre::message::header::MessageId::from(v.to_string()));
+    }
+    if let Some(v) = headers_val.get("in_reply_to").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        builder = builder.header(lettre::message::header::InReplyTo::from(v.to_string()));
+    }
+    if let Some(v) = headers_val.get("references").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        builder = builder.header(lettre::message::header::References::from(v.to_string()));
+    }
+    let email = builder
+        .multipart(email_body.clone())
+        .map_err(|e| AppError::Smtp(format!("build MIME: {}", e)))?;
+    let raw = email.formatted();
+    let raw_to_send = match dkim_signer {
+        Some(signer) => signer.apply_sign(&raw, &record.id).await,
+        None => std::borrow::Cow::Borrowed(raw.as_slice()),
+    };
+    Ok(raw_to_send.into_owned())
 }
 
 fn name_map_from_headers(headers: &serde_json::Value) -> HashMap<String, String> {

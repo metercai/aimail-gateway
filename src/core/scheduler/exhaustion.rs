@@ -23,6 +23,8 @@ pub(crate) async fn insert_exhaustion_auto_reply(
     // more auto-replies when they themselves exhaust.
     if record.id.starts_with("ar-")
         || record.id.starts_with("wn-")
+        || record.id.starts_with("bn-")
+        || record.id.starts_with("sr-")
         || record.subject.contains("[Overlimit]")
         || record.subject.contains("[AmailGW]")
     {
@@ -74,7 +76,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
     if let Err(e) = email_factory
         .create_outbound(
             &auto_reply_id,
-            "",
+            &record.system_id,
             auto_reply_from,
             &recipients_json,
             &auto_reply_subject,
@@ -223,7 +225,7 @@ pub(crate) async fn insert_exhaustion_notification(
     match email_factory
         .create_inbound(
             &notification_id,
-            "",
+            &record.system_id,
             auto_reply_from,
             &recipients_json,
             &auto_reply_subject,

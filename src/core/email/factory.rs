@@ -138,18 +138,6 @@ impl EmailFactory {
         self.db.update_email_completed(id).await
     }
 
-    /// Transition an email to `sending` with incremental send_count and backoff.
-    pub async fn retry(
-        &self,
-        id: &str,
-        send_count: i32,
-        next_retry_at: &str,
-    ) -> AppResult<Option<EmailRecord>> {
-        self.db
-            .update_email_retry(id, send_count, next_retry_at)
-            .await
-    }
-
     /// Mark email as ready for next retry (after failed delivery attempt).
     pub async fn ready_retry(
         &self,
@@ -167,6 +155,12 @@ impl EmailFactory {
     /// Get a single email by ID.
     pub async fn get(&self, id: &str) -> AppResult<Option<EmailRecord>> {
         self.db.get_email(id).await
+    }
+
+    /// CAS claim: atomically transition status `ready` → `sending`.
+    /// Returns `Some(record)` if the claim succeeded, `None` if already consumed.
+    pub async fn claim_ready(&self, id: &str) -> AppResult<Option<EmailRecord>> {
+        self.db.claim_ready(id).await
     }
 
     /// Get emails ready for delivery.
@@ -215,6 +209,12 @@ impl EmailFactory {
         Ok(self.db.update_email_delivered(id).await?.is_some())
     }
 
+    /// Update only send_count without changing status.
+    /// Used by exhaustion paths to record the final attempt before marking completed.
+    pub async fn update_send_count(&self, id: &str, send_count: i32) -> AppResult<()> {
+        self.db.update_email_send_count(id, send_count).await
+    }
+
     /// Fetch delivered emails past their NDR window.
     pub async fn get_expired_delivered(
         &self,
@@ -222,11 +222,6 @@ impl EmailFactory {
         limit: i32,
     ) -> AppResult<Vec<EmailRecord>> {
         self.db.get_delivered_expired_before(cutoff, limit).await
-    }
-
-    /// Fetch emails ready for processing.
-    pub async fn fetch_ready(&self, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        self.db.fetch_ready_emails(limit).await
     }
 
     /// List all emails.
@@ -476,10 +471,27 @@ impl EmailFactory {
     )> {
         let parsed = mailparse::parse_mail(raw)
             .map_err(|e| AppError::Parse(format!("MIME parse failed: {}", e)))?;
+        Self::parse_mime_detailed_from_parsed(&parsed)
+    }
 
+    /// Same as parse_mime_detailed but reuses an already-parsed ParsedMail.
+    /// Callers that need access to raw headers after parsing can parse once and
+    /// pass the result here, avoiding a redundant full MIME parse.
+    pub fn parse_mime_detailed_from_parsed(
+        parsed: &mailparse::ParsedMail,
+    ) -> AppResult<(
+        String,
+        Vec<(String, String, Vec<u8>, Option<String>)>,
+        Vec<String>,
+        Vec<String>,
+        String,
+        String,
+        String,
+        String,
+    )> {
         let mut body = String::new();
         let mut attachments: Vec<MimeAttachment> = Vec::new();
-        EmailFactory::walk_mime_parts(&parsed, &mut body, &mut attachments);
+        EmailFactory::walk_mime_parts(parsed, &mut body, &mut attachments);
 
         // Fallback: non-MIME messages have no subparts — use main body directly
         if body.is_empty() {

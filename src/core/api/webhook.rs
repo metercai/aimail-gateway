@@ -194,10 +194,17 @@ pub async fn process_email_webhook(
             .get("signature")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        email_factory
+        if let Err(e) = email_factory
             .update_email_body_and_signature(&record.id, cleaned_body, sig)
             .await
-            .ok();
+        {
+            tracing::warn!(
+                operation = "save_cleaned_body_failed",
+                email_id = %record.id,
+                error = %e,
+                "Failed to persist cleaned body/signature — will re-process on retry"
+            );
+        }
     }
 
     // Enrich with contact info from whitelist

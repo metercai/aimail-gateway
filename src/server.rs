@@ -128,7 +128,7 @@ impl Server {
         let http_handle =
             amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
 
-        amail_base::core::server::spawn_cleanup_worker(
+        let cleanup_handle = amail_base::core::server::spawn_cleanup_worker(
             db_arc.clone(),
             config.webhook.pending_ttl_hours,
             cancel.clone(),
@@ -139,6 +139,7 @@ impl Server {
             http_handle,
             smtp_handle,
             retry_handle,
+            cleanup_handle,
         )
         .await
     }

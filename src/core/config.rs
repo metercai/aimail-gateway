@@ -293,7 +293,61 @@ pub fn load(path: &str) -> Result<Config, crate::core::errors::AppError> {
     // Record path for advanced features that need to re-read sections
     config.config_path = Some(path.to_string());
 
+    // Runtime validation — fail fast on invalid config
+    config.validate()?;
+
     Ok(config)
+}
+
+impl Config {
+    /// Validate critical config values at startup. Returns errors for zero/invalid parameters.
+    pub fn validate(&self) -> Result<(), crate::core::errors::AppError> {
+        let mut errors: Vec<String> = Vec::new();
+
+        if self.retry.max_attempts == 0 {
+            errors.push("retry.max_attempts must be > 0 (set to 0 → immediate exhaustion)".to_string());
+        }
+        if self.retry.initial_backoff_secs == 0 {
+            errors.push("retry.initial_backoff_secs must be > 0".to_string());
+        }
+        if self.retry.multiplier == 0 {
+            errors.push("retry.multiplier must be > 0".to_string());
+        }
+        if self.retry.batch_size <= 0 {
+            errors.push("retry.batch_size must be > 0".to_string());
+        }
+        if self.retry.poll_interval_secs == 0 {
+            errors.push("retry.poll_interval_secs must be > 0".to_string());
+        }
+        if self.webhook.timeout_secs == 0 {
+            errors.push("webhook.timeout_secs must be > 0".to_string());
+        }
+        if self.webhook.pending_ttl_hours == 0 {
+            errors.push("webhook.pending_ttl_hours must be > 0".to_string());
+        }
+        if self.storage.pool_size == 0 {
+            errors.push("storage.pool_size must be > 0".to_string());
+        }
+        if self.smtp.max_connections == 0 {
+            errors.push("smtp.max_connections must be > 0".to_string());
+        }
+        if self.smtp.channel_capacity == 0 {
+            errors.push("smtp.channel_capacity must be > 0".to_string());
+        }
+        if self.relay.delivery_window_secs == 0 {
+            errors.push("relay.delivery_window_secs must be > 0".to_string());
+        }
+
+        if !errors.is_empty() {
+            let msg = errors.join("\n  - ");
+            return Err(crate::core::errors::AppError::Config(format!(
+                "Invalid configuration:\n  - {}",
+                msg
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 /// Apply `AMAILGW_*` environment variable overrides to the config.

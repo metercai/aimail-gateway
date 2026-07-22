@@ -220,28 +220,43 @@ pub async fn send_email(
         }
     }
     let mut name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    // Batch name resolution: fetch whitelist entries once per sender domain
+    // Batch name resolution: group bare emails by domain, query whitelist per domain
     if !bare_emails.is_empty() {
-        let domain = domain_from_email(&bare_emails[0]);
-        let all_entries = state
-            .factories
-            .email
-            .env_factory
-            .list_whitelist_entries(domain)
-            .await
-            .unwrap_or_default();
+        let mut domain_entries: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
         for email in &bare_emails {
-            let name = all_entries
-                .iter()
-                .find(|e| e.value == *email)
-                .and_then(|e| e.description.as_ref())
-                .and_then(|desc| serde_json::from_str::<serde_json::Value>(desc).ok())
-                .and_then(|v| {
-                    v.get("name")
-                        .and_then(|n| n.as_str())
-                        .map(|s| s.to_string())
+            let domain = domain_from_email(email);
+            domain_entries.entry(domain.to_string()).or_default();
+        }
+        // Collect keys before mutating the map
+        let domains: Vec<String> = domain_entries.keys().cloned().collect();
+        for domain in &domains {
+            let entries = state
+                .factories
+                .email
+                .env_factory
+                .list_whitelist_entries(domain)
+                .await
+                .unwrap_or_default();
+            domain_entries.insert(domain.clone(), entries);
+        }
+        for email in &bare_emails {
+            let domain = domain_from_email(email);
+            let name = domain_entries
+                .get(domain)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|e| e.value == *email)
+                        .and_then(|e| e.description.as_ref())
+                        .and_then(|desc| serde_json::from_str::<serde_json::Value>(desc).ok())
+                        .and_then(|v| {
+                            v.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .filter(|s| !s.is_empty())
                 })
-                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| email.split('@').next().unwrap_or(email).to_string());
             name_map.insert(email.clone(), name);
         }
@@ -548,6 +563,18 @@ pub async fn send_email(
             "Pong intercepted at HTTP API — redirecting as inbound"
         );
 
+        // Build webhook endpoints for the pong recipient (agent's domain)
+        let pong_endpoints = state
+            .factories
+            .email
+            .build_endpoints_for_recipients(&[new_recipient.clone()])
+            .await;
+        let pong_endpoints_opt = if pong_endpoints == "{}" || pong_endpoints.is_empty() {
+            None
+        } else {
+            Some(pong_endpoints)
+        };
+
         state
             .factories
             .email
@@ -558,10 +585,10 @@ pub async fn send_email(
                 &new_recipients_json,
                 subject,
                 &markdown_body,
-                None, // endpoints
+                pong_endpoints_opt.as_deref(),
                 None, // attachments
                 headers_json.as_deref(),
-                0, // max_retries
+                state.config.retry.max_attempts as i32,
             )
             .await
             .map_err(|e| {
@@ -602,6 +629,18 @@ pub async fn send_email(
             cc: external_cc,
         }
         .to_json();
+
+        // Build per-recipient SMTP endpoints for delivery tracking
+        let mut eps = serde_json::Map::new();
+        for addr in &external {
+            let key = addr.to_lowercase();
+            eps.insert(
+                key,
+                serde_json::json!({"status": "pending", "protocol": "mx"}),
+            );
+        }
+        let endpoints_str = serde_json::to_string(&eps).unwrap_or_default();
+
         match state
             .factories
             .email
@@ -612,7 +651,7 @@ pub async fn send_email(
                 &recipients_json,
                 subject,
                 &markdown_body,
-                None, // no webhook endpoints for outbound
+                Some(&endpoints_str),
                 attachments_json.as_deref(),
                 headers_json.as_deref(), // headers
                 state.config.retry.max_attempts as i32,
@@ -784,6 +823,7 @@ pub async fn send_email(
         &api_key.system_id,
         sender,
         &filtered,
+        &state.trigger_tx,
     )
     .await;
 
@@ -794,6 +834,7 @@ pub async fn send_email(
         &api_key.system_id,
         sender,
         &unregistered,
+        &state.trigger_tx,
     )
     .await;
 
@@ -827,6 +868,7 @@ async fn send_filtered_notification(
     system_id: &str,
     sender: &str,
     filtered: &[String],
+    trigger_tx: &tokio::sync::mpsc::Sender<String>,
 ) {
     if filtered.is_empty() {
         return;
@@ -905,6 +947,11 @@ async fn send_filtered_notification(
         .await
     {
         warn!(operation = "notification_insert_failed", error = %e, "Failed to insert filtered-recipient email into database");
+    } else {
+        if let Err(e) = trigger_tx.try_send(email_id.clone()) {
+            warn!(operation="trigger_full_filtered_notif", error=%e,
+                  email_id=%email_id, "Trigger channel full for filtered notification");
+        }
     }
 }
 
@@ -916,6 +963,7 @@ async fn send_unregistered_notification(
     system_id: &str,
     sender: &str,
     unregistered: &[String],
+    trigger_tx: &tokio::sync::mpsc::Sender<String>,
 ) {
     if unregistered.is_empty() {
         return;
@@ -982,5 +1030,10 @@ async fn send_unregistered_notification(
         .await
     {
         warn!(operation = "unregistered_insert_failed", error = %e, "Failed to insert unregistered-address notification");
+    } else {
+        if let Err(e) = trigger_tx.try_send(email_id.clone()) {
+            warn!(operation="trigger_full_unregistered_notif", error=%e,
+                  email_id=%email_id, "Trigger channel full for unregistered notification");
+        }
     }
 }

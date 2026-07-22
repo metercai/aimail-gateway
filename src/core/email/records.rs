@@ -25,10 +25,6 @@ impl EmailRecord {
         self.status == "ready"
     }
 
-    pub fn is_sending(&self) -> bool {
-        self.status == "sending"
-    }
-
     pub fn is_completed(&self) -> bool {
         self.status == "completed"
     }

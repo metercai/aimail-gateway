@@ -218,8 +218,12 @@ pub fn board_sweeper_flow(config: &Config) {
         .unwrap_or(86400u64);
     if now - last_archive >= archive_interval {
         LAST_ARCHIVE.store(now, std::sync::atomic::Ordering::Relaxed);
-        let storage = config.storage.path.to_str().unwrap_or("").to_string();
-        let threshold = config.board.task_timeout_seconds;
+        let storage = config.storage.path.to_str().unwrap_or( "").to_string();
+        let threshold = config
+            .board
+            .archive_retention_days
+            .map(|days| (days.max(1)) * 86400)
+            .unwrap_or(config.board.task_timeout_seconds);
         tokio::task::spawn(async move {
             scan_completed_boards(&storage, threshold).await;
         });

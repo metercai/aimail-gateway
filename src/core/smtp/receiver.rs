@@ -36,7 +36,6 @@ fn temp_fail(msg: &str) -> Response {
 
 /// SMTP receiver that processes inbound emails directly within handler callbacks.
 ///
-/// Replaces the legacy `mpsc` relay worker with direct async processing.
 /// `ConnectionHandler` (impl `mailin::Handler`) is instantiated per connection
 /// and borrows shared `Config` and a scheduler `trigger_tx`.
 pub struct ConnectionHandler {
@@ -233,10 +232,12 @@ impl Handler for ConnectionHandler {
             // Authenticated session: resolve_sender validated the key,
             // and check_inbound (including SPF) is bypassed intentionally.
         } else {
-            // 2. Inbound security check — delegated to InboundSecurity trait
-            if let Err(e) = self.inbound_security.check_inbound(ip, from, domain) {
-                tracing::warn!(operation="inbound_rejected", ip=%ip_str, from=%from, reason=e, "Inbound check failed");
-                return perm_fail(e);
+            // Skip inbound security for null-sender (bounce/NDR, RFC 5321)
+            if !from.is_empty() {
+                if let Err(e) = self.inbound_security.check_inbound(ip, from, domain) {
+                    tracing::warn!(operation="inbound_rejected", ip=%ip_str, from=%from, reason=e, "Inbound check failed");
+                    return perm_fail(e);
+                }
             }
         }
 
@@ -336,9 +337,9 @@ impl Handler for ConnectionHandler {
                         domain = %self.domain.as_deref().unwrap_or(""),
                         sender = %sender,
                         recipient = %lookup_addr,
-                        "Sender not in recipient's from whitelist"
+                        "Sender not in recipient's from whitelist — deferred to data_end"
                     );
-                    return perm_fail("Sender not whitelisted for this recipient");
+                    // Defer rejection to data_end() for stranger-command detection
                 }
                 Err(_) => return temp_fail("Whitelist check failed"),
             }
@@ -388,29 +389,58 @@ impl Handler for ConnectionHandler {
             return temp_fail("No domain");
         }
 
+        // ── Deferred whitelist rejection ─────────────────────────
+        // Senders not in any recipient's "from" whitelist were deferred
+        // from rcpt().  Allow stranger commands ([WHOAMI] etc.) through;
+        // reject everything else before wasting time on full MIME parse.
+        if !self.sender_whitelisted {
+            let is_stranger_cmd = match mailparse::parse_headers(&self.message_data) {
+                Ok((headers, _)) => {
+                    let subject = headers
+                        .iter()
+                        .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
+                        .map(|h| h.get_value())
+                        .unwrap_or_default();
+                    ["[WHOAMI]"]
+                        .iter()
+                        .any(|cmd| subject.to_uppercase().starts_with(cmd))
+                }
+                Err(_) => false,
+            };
+            if !is_stranger_cmd {
+                return perm_fail("Sender not whitelisted");
+            }
+        }
+
         // ── Rate limit check ──────────────────────────────────────
-        // Per-system inbound rate limiting (same limiter as HTTP send).
-        match self.rate_limiter.check(&system_id) {
-            Ok(()) => {
-                tracing::debug!(
-                    operation = "smtp_rate_limit_check",
-                    system_id = %system_id,
-                    "SMTP rate limit check passed"
-                );
+        // Per-system inbound rate limiting.  When recipients span multiple
+        // systems (pipe-delimited system_id), check each individually.
+        let mut rate_limited_sid = None;
+        let mut rate_limited_wait = std::time::Duration::ZERO;
+        for sid in system_id.split('|') {
+            match self.rate_limiter.check(sid) {
+                Ok(()) => {}
+                Err(wait) => {
+                    if wait > rate_limited_wait {
+                        rate_limited_wait = wait;
+                        rate_limited_sid = Some(sid.to_string());
+                    }
+                }
             }
-            Err(wait) => {
-                self.metrics.inc_rate_limited();
-                tracing::warn!(
-                    operation = "smtp_rate_limited",
-                    system_id = %system_id,
-                    wait_secs = wait.as_secs_f64(),
-                    "SMTP rate limit exceeded"
-                );
-                return temp_fail(&format!(
-                    "Rate limit exceeded for system. Retry after {:.0}s",
-                    wait.as_secs_f64()
-                ));
-            }
+        }
+        if let Some(sid) = rate_limited_sid {
+            self.metrics.inc_rate_limited();
+            tracing::warn!(
+                operation = "smtp_rate_limited",
+                system_id = %sid,
+                wait_secs = rate_limited_wait.as_secs_f64(),
+                "SMTP rate limit exceeded"
+            );
+            return temp_fail(&format!(
+                "Rate limit exceeded for system {}. Retry after {:.0}s",
+                sid,
+                rate_limited_wait.as_secs_f64()
+            ));
         }
 
         let raw_data = std::mem::take(&mut self.message_data);
@@ -474,8 +504,15 @@ impl Handler for ConnectionHandler {
         // Only reaches here when sender is NOT empty (regular inbound email).
 
         // Parse MIME → (body, attachments, to_emails, cc_emails, in_reply_to, references, message_id, subject)
+        let parsed = match mailparse::parse_mail(&raw_data) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(operation="mime_parse_error", error = %e, "Failed to parse MIME message");
+                return temp_fail("MIME parse error");
+            }
+        };
         let (body, attachments, to_emails, cc_emails, in_reply_to, references, message_id, subject) =
-            match EmailFactory::parse_mime_detailed(&raw_data) {
+            match EmailFactory::parse_mime_detailed_from_parsed(&parsed) {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::error!(operation="mime_parse_error", error = %e, "Failed to parse MIME message");
@@ -641,17 +678,16 @@ impl Handler for ConnectionHandler {
 
         // Preserve raw MIME To/Cc/From header values so the preprocessor
         // can extract display names (e.g. "Alice <alice@c.com>").
-        if let Ok(parsed) = mailparse::parse_mail(&raw_data) {
-            for h in &parsed.headers {
-                let key = h.get_key();
-                if key.eq_ignore_ascii_case("to")
-                    || key.eq_ignore_ascii_case("cc")
-                    || key.eq_ignore_ascii_case("from")
-                {
-                    let val = h.get_value();
-                    if !val.is_empty() && !headers_map.contains_key(&key.to_lowercase()) {
-                        headers_map.insert(key.to_lowercase(), serde_json::Value::String(val));
-                    }
+        // Reuse `parsed` from the MIME parse above — no redundant re-parse.
+        for h in &parsed.headers {
+            let key = h.get_key();
+            if key.eq_ignore_ascii_case("to")
+                || key.eq_ignore_ascii_case("cc")
+                || key.eq_ignore_ascii_case("from")
+            {
+                let val = h.get_value();
+                if !val.is_empty() && !headers_map.contains_key(&key.to_lowercase()) {
+                    headers_map.insert(key.to_lowercase(), serde_json::Value::String(val));
                 }
             }
         }
@@ -690,10 +726,12 @@ impl Handler for ConnectionHandler {
         let headers_json = serde_json::Value::Object(headers_map).to_string();
 
         // ── Insert email record ────────────────────────────────────
+        // When recipients span multiple systems, attribute to the first one
+        let primary_system = system_id.split('|').next().unwrap_or(&system_id);
 
         let mail_id = match self.block_on(self.email_factory.create_inbound(
             &mail_uuid,
-            &system_id,
+            primary_system,
             &sender,
             &recipients_json,
             &subject,

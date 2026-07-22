@@ -416,30 +416,27 @@ impl Database {
         .await
     }
 
-    pub async fn update_email_retry(
-        &self,
-        id: &str,
-        send_count: i32,
-        next_retry_at: &str,
-    ) -> AppResult<Option<EmailRecord>> {
+    /// CAS (Compare-And-Swap) claim: atomically transition status `ready` → `sending`.
+    /// Returns `Some(record)` if the claim succeeded, `None` if already consumed by another path.
+    /// This prevents concurrent delivery from trigger + interval batch.
+    pub async fn claim_ready(&self, id: &str) -> AppResult<Option<EmailRecord>> {
         let id = id.to_string();
-        let next_retry_at = next_retry_at.to_string();
         self.call(move |conn| {
-            let current = conn.query_row(
+            // Atomic CAS: update only if current status is 'ready'
+            let rows = conn.execute(
+                "UPDATE emails SET status = 'sending', last_sent_at = (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?1 AND status = 'ready'",
+                params![id],
+            )?;
+            if rows == 0 {
+                return Ok(None);
+            }
+            // Read the updated record
+            let result = conn.query_row(
                 &format!("{} WHERE id = ?1", EMAIL_SELECT),
                 params![id],
                 email_row,
             ).optional()?;
-            let mut record = match current { Some(r) => r, None => return Ok(None) };
-            record.send_count = send_count;
-            record.next_retry_at = Some(next_retry_at.clone());
-            record.status = "sending".into();
-            record.last_sent_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            conn.execute(
-                "UPDATE emails SET status = 'sending', send_count = ?1, next_retry_at = ?2, last_sent_at = ?3 WHERE id = ?4",
-                params![send_count, next_retry_at, record.last_sent_at, record.id],
-            )?;
-            Ok(Some(record))
+            Ok(result)
         }).await
     }
 
@@ -457,22 +454,6 @@ impl Database {
             Ok(results)
         })
         .await
-    }
-
-    pub async fn get_sending_emails(&self, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        self.call(move |conn| {
-            // Use strftime with RFC 3339 format to match how next_retry_at is stored.
-            // datetime('now') produces "YYYY-MM-DD HH:MM:SS" (space-separated),
-            // but Rust code stores next_retry_at as RFC 3339 with T separator,
-            // making the comparison next_retry_at <= datetime('now') always false.
-            let mut stmt = conn.prepare(
-                &format!("{} WHERE status = 'sending' AND next_retry_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now') ORDER BY next_retry_at ASC LIMIT ?1", EMAIL_SELECT),
-            )?;
-            let rows = stmt.query_map(params![limit], email_row)?;
-            let mut results = Vec::new();
-            for row in rows { results.push(row?); }
-            Ok(results)
-        }).await
     }
 
     pub async fn list_emails_by_system(
@@ -573,12 +554,12 @@ impl Database {
     pub async fn get_pending_retry_emails(&self, limit: i32) -> AppResult<Vec<EmailRecord>> {
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                // Use strftime with RFC 3339 format to match how next_retry_at is stored.
-                // datetime('now') produces "YYYY-MM-DD HH:MM:SS" (space-separated),
-                // but next_retry_at is stored as "YYYY-MM-DDTHH:MM:SS.sssZ" (RFC 3339).
-                // The 'T' separator (0x54) > ' ' (0x20) in lexicographic order,
-                // making the comparison next_retry_at <= datetime('now') always false.
-                &format!("{} WHERE status = 'ready' AND send_count < max_attempts AND (next_retry_at IS NULL OR next_retry_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) ORDER BY next_retry_at ASC LIMIT ?1", EMAIL_SELECT),
+                // Compare next_retry_at at second-level granularity.
+                // next_retry_at is stored as RFC 3339 with milliseconds (e.g. "2026-07-23T10:00:00.123Z").
+                // strftime('%Y-%m-%dT%H:%M:%SZ', 'now') truncates to seconds, and 'Z' > '.'
+                // in ASCII, so "2026-07-23T10:00:00Z" > "2026-07-23T10:00:00.999Z" — misses retries.
+                // Fix: append '.999Z' to include all milliseconds within the current second.
+                &format!("{} WHERE status = 'ready' AND send_count < max_attempts AND (next_retry_at IS NULL OR next_retry_at <= strftime('%Y-%m-%dT%H:%M:%S.', 'now') || '999Z') ORDER BY next_retry_at ASC LIMIT ?1", EMAIL_SELECT),
             )?;
             let rows = stmt.query_map(params![limit], email_row)?;
             let mut results = Vec::new();
@@ -626,6 +607,24 @@ impl Database {
             )?;
             Ok(Some(record))
         }).await
+    }
+
+    /// Update only send_count without changing status.
+    /// Used by exhaustion paths to record the final attempt before marking completed.
+    pub async fn update_email_send_count(
+        &self,
+        id: &str,
+        send_count: i32,
+    ) -> AppResult<()> {
+        let id = id.to_string();
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE emails SET send_count = ?1 WHERE id = ?2",
+                params![send_count, id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Mark email as successfully completed.
@@ -850,26 +849,6 @@ impl Database {
 
 impl Database {
     // ── Scheduler / worker methods ───────────────────────────────────
-
-    /// Fetch emails ready for processing (ready OR sending with next_retry_at <= now).
-    pub async fn fetch_ready_emails(&self, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        let ready = self.get_ready_emails(limit).await?;
-        let sending = self.get_sending_emails(limit as i32).await?;
-        let mut combined: Vec<EmailRecord> = ready.into_iter().chain(sending).collect();
-        combined.sort_by_key(|r| r.created_at.clone());
-        combined.truncate(limit as usize);
-        Ok(combined)
-    }
-
-    pub async fn update_email_attempt(
-        &self,
-        id: &str,
-        status: &str,
-        _error_message: Option<&str>,
-    ) -> AppResult<()> {
-        let _ = self.update_email_status(id, status).await?;
-        Ok(())
-    }
 
     pub async fn delete_email(&self, id: &str) -> AppResult<()> {
         let id = id.to_string();

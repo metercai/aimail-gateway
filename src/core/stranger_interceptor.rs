@@ -14,13 +14,15 @@ use tracing;
 pub struct StrangerInterceptor {
     email_factory: Arc<EmailFactory>,
     system_id: String,
+    max_attempts: i32,
 }
 
 impl StrangerInterceptor {
-    pub fn new(email_factory: Arc<EmailFactory>, system_id: &str) -> Self {
+    pub fn new(email_factory: Arc<EmailFactory>, system_id: &str, max_attempts: i32) -> Self {
         Self {
             email_factory,
             system_id: system_id.to_string(),
+            max_attempts,
         }
     }
 
@@ -50,19 +52,25 @@ impl StrangerInterceptor {
 
     async fn send_auto_reply(&self, from: &str, to: &str, subject: &str, body: &str) {
         let email_id = format!("sr-{}", uuid::Uuid::new_v4());
+        // Build proper recipients JSON
+        let recipients_json = crate::core::email::storage::Recipients {
+            to: vec![to.to_string()],
+            cc: vec![],
+        }
+        .to_json();
         if let Err(e) = self
             .email_factory
             .create_outbound(
                 &email_id,
                 &self.system_id,
                 from,
-                to,
+                &recipients_json,
                 subject,
                 body,
                 None,
                 None,
                 None,
-                5, // auto-reply retry attempts (TODO: use config.retry.max_attempts)
+                self.max_attempts,
             )
             .await
         {

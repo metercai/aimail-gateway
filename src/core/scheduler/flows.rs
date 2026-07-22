@@ -78,7 +78,7 @@ pub(crate) async fn handle_overlimit(
         insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
     }
 
-    // Increment exhaustion counter based on delivery type
+    // Record exhaustion metrics
     match delivery_type {
         "webhook" => metrics.inc_webhook_exhausted(),
         _ => metrics.inc_relay_failed(),
@@ -138,6 +138,10 @@ pub(crate) async fn periodic_inspection(
             email_id = %record.id,
             "Retry delivery failed and attempts exhausted — promoting to overlimit"
         );
+        // Record the final attempt count before marking completed
+        let _ = email_factory
+            .update_send_count(&record.id, new_send_count)
+            .await;
         // Inbound → external sender → auto-reply record
         if record.direction == "inbound" {
             insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
@@ -145,7 +149,7 @@ pub(crate) async fn periodic_inspection(
             insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
         }
 
-        // Increment exhaustion counter
+        // Record exhaustion metrics
         match delivery_type {
             "webhook" => metrics.inc_webhook_exhausted(),
             _ => metrics.inc_relay_failed(),
@@ -243,6 +247,10 @@ pub(crate) async fn immediate_forward(
             email_id = %record.id,
             "Immediate forward failed and max_attempts=1 — marking completed"
         );
+        // Record the final attempt count before marking completed
+        let _ = email_factory
+            .update_send_count(&record.id, new_send_count)
+            .await;
         // Inbound → external sender → auto-reply record
         if record.direction == "inbound" {
             insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
@@ -250,7 +258,7 @@ pub(crate) async fn immediate_forward(
             insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
         }
 
-        // Increment exhaustion counter
+        // Record exhaustion metrics
         match delivery_type {
             "webhook" => metrics.inc_webhook_exhausted(),
             _ => metrics.inc_relay_failed(),
@@ -309,7 +317,7 @@ pub(crate) async fn process_expired_attachments(
     batch_size: i32,
 ) {
     // Calculate expiry cutoff
-    let lifetime = chrono::Duration::hours(720 as i64);
+    let lifetime = chrono::Duration::hours(config.storage.attachment_lifetime_hours as i64);
     let expiry_cutoff = chrono::Utc::now()
         .checked_sub_signed(lifetime)
         .unwrap_or_else(chrono::Utc::now)

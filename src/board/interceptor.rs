@@ -396,14 +396,20 @@ impl InboundInterceptor for A2aInterceptor {
                         })
                         .unwrap_or_default();
 
+                    let cn = description.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}'));
+                    let (proj_l, members_l) = if cn {
+                        ("项目", "团队成员")
+                    } else {
+                        ("Project", "Team Members")
+                    };
                     let notify_body = format!(
-                    "项目: {} ({})\nBoard Email: {}\nBoard ID: {}\nGateway: {}\n\n团队成员:\n{}",
+                    "{proj_l}: {} ({})\\nBoard Email: {}\\nBoard ID: {}\\nGateway: {}\\n\\n{members_l}:\\n{}",
                     short_id,
                     description,
                     board_email,
                     board_id,
                     self.gateway_url,
-                    members_list.join("\n"),
+                    members_list.join("\\n"),
                 );
                     let notify_subject = format!(
                         "[A2A] notice: Board {} created — {}",

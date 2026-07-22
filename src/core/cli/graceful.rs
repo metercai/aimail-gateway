@@ -12,6 +12,7 @@ pub async fn wait_for_services(
     mut http_handle: JoinHandle<AppResult<()>>,
     mut smtp_handle: JoinHandle<AppResult<()>>,
     mut retry_handle: JoinHandle<AppResult<()>>,
+    mut cleanup_handle: JoinHandle<()>,
 ) -> AppResult<()> {
     info!(
         operation = "services_started",
@@ -61,6 +62,19 @@ pub async fn wait_for_services(
         }
         _ = &mut timeout => {
             warn!(operation = "http_shutdown_timeout", timeout_secs = GRACEFUL_TIMEOUT_SECS, "HTTP server shutdown timed out");
+        }
+    }
+
+    // Cleanup Worker
+    tokio::select! {
+        result = &mut cleanup_handle => {
+            match result {
+                Ok(()) => info!(operation = "cleanup_worker_shutdown", "Cleanup worker shut down cleanly"),
+                Err(e) => warn!(operation = "cleanup_task_panic", error = %e, "Cleanup task panicked"),
+            }
+        }
+        _ = &mut timeout => {
+            warn!(operation = "cleanup_shutdown_timeout", timeout_secs = GRACEFUL_TIMEOUT_SECS, "Cleanup worker shutdown timed out");
         }
     }
 

@@ -312,12 +312,14 @@ pub fn create_dns_resolver(
 /// Register the StrangerInterceptor for universal commands ([WHOAMI] etc.).
 pub fn register_stranger_interceptor(http_state: &HttpState) {
     let email_factory = http_state.factories.email.clone();
+    let max_attempts = http_state.config.retry.max_attempts as i32;
     email_factory
         .env_factory
         .register_interceptor(std::sync::Arc::new(
             crate::core::stranger_interceptor::StrangerInterceptor::new(
                 email_factory.clone(),
                 "admin",
+                max_attempts,
             ),
         )
             as std::sync::Arc<dyn crate::core::strategy::InboundInterceptor>);

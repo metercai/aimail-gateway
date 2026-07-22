@@ -109,6 +109,8 @@ impl WhitelistCache {
 
         {
             let mut cache = self.inner.write().unwrap();
+            // Amortized eviction: purge all expired entries while holding the write lock
+            cache.retain(|_, (_, created)| created.elapsed() < CACHE_TTL);
             cache.insert(value.to_string(), (regex.clone(), Instant::now()));
         }
 

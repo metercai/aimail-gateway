@@ -13,9 +13,9 @@ pub fn calculate_backoff(
     let backoff = initial_backoff
         .saturating_mul(multiplier.saturating_pow(exp))
         .min(max_backoff);
-    // Add ±50% jitter to spread retry times
+    // Add ±50% jitter: range [0.5x, 1.5x] to spread retry times and prevent thundering herd.
     use rand::Rng;
-    let jitter = 0.5 + rand::thread_rng().gen::<f64>() * 0.5; // 0.5 .. 1.0
+    let jitter = 0.5 + rand::thread_rng().gen::<f64>(); // 0.5 .. 1.5
     (backoff as f64 * jitter) as u64
 }
 

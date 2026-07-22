@@ -115,9 +115,12 @@ impl SmtpRelay {
         let external_recipients = self.filter_external_recipients(&recipients).await?;
 
         if external_recipients.is_empty() {
-            return Err(AppError::Smtp(
-                "all recipients filtered by loopback prevention".into(),
-            ));
+            info!(
+                operation = "loopback_all",
+                email_id = %record.id,
+                "All recipients internal — no external delivery needed"
+            );
+            return Ok(());
         }
 
         match &self.transport {
@@ -139,6 +142,7 @@ impl SmtpRelay {
                         &external_recipients,
                         &email_body,
                         record,
+                        &self.email_factory.as_ref(),
                     )
                     .await
             }

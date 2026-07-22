@@ -94,27 +94,24 @@ pub async fn run_retry_worker_with_trigger(
             }
             Some(mail_uuid) = trigger_rx.recv() => {
                 debug!(operation="scheduler_trigger_wake", %mail_uuid, "Scheduler woken by SMTP receiver trigger");
-                // Register in inflight set so interval batch skips this email
-                inflight.lock().await.insert(mail_uuid.clone());
-                match email_factory.get(&mail_uuid).await {
-                    Ok(Some(record)) => {
-                        // Guard: skip if already processed by interval sweep
-                        if record.status != "ready" {
-                            inflight.lock().await.remove(&mail_uuid);
-                            // Don't call immediate_forward, fall through to de-register
-                        } else {
-                            immediate_forward(
-                                &email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &record, &metrics,
-                            ).await;
-                        }
-                    }
+                // CAS claim: atomically transition ready→sending. If another path
+                // already consumed it (interval batch), this returns None and we skip.
+                let record = match email_factory.claim_ready(&mail_uuid).await {
+                    Ok(Some(r)) => r,
                     Ok(None) => {
-                        warn!(operation="trigger_email_not_found", %mail_uuid, "Trigger: email not found (already processed?)");
+                        debug!(%mail_uuid, "Trigger: email already consumed (CAS failed), skipping");
+                        continue;
                     }
                     Err(e) => {
-                        error!(operation="trigger_lookup_failed", %mail_uuid, %e, "Trigger: failed to look up email");
+                        error!(operation="trigger_claim_failed", %mail_uuid, %e, "Trigger: CAS claim failed");
+                        continue;
                     }
-                }
+                };
+                // Register in inflight set so interval batch skips this email
+                inflight.lock().await.insert(mail_uuid.clone());
+                immediate_forward(
+                    &email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &record, &metrics,
+                ).await;
                 // De-register — the email is now completed/retried by immediate_forward
                 inflight.lock().await.remove(&mail_uuid);
                 debug!(%mail_uuid, "Trigger: removed from inflight set");

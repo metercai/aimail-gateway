@@ -94,6 +94,8 @@ pub async fn resolve_mx(
     Ok(records)
 }
 
+const MX_SEND_TIMEOUT_SECS: u64 = 60;
+
 /// Build a lettre transport to a raw MX host (port 25, opportunistic STARTTLS).
 fn build_mx_transport(
     mx_host: &str,
@@ -108,6 +110,7 @@ fn build_mx_transport(
         .map_err(|e| AppError::Config(format!("TLS config: {e}")))?;
     let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
         .port(port)
+        .timeout(Some(std::time::Duration::from_secs(MX_SEND_TIMEOUT_SECS)))
         .tls(Tls::Opportunistic(tls_params));
 
     if let Some(name) = hostname {

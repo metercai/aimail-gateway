@@ -780,7 +780,7 @@ mod tests {
         t1.completed_at = Some("2026-07-01T00:00:00Z".to_string());
         create_task(&conn, &t1).unwrap();
         let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
-        assert!(issues.is_empty(), "全部 done 时应无问题");
+        assert!(issues.is_empty(), "pipeline should be clean when all tasks done");
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
         let t1 = make_task(&board_id, "T1", "alice@t.io"); // status=Ready
         create_task(&conn, &t1).unwrap();
         let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
-        assert!(!issues.is_empty(), "有未完成 task 时应报告问题");
+        assert!(!issues.is_empty(), "pipeline should report issues when tasks are pending");
     }
 
     #[test]

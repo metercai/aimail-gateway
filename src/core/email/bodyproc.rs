@@ -442,10 +442,10 @@ pub fn process_email_body(body: &str, _is_html: bool) -> ProcessedEmail {
     // Step 1: Decompose into layers (on raw text, handles HTML in per-layer processing)
     let layers = decompose_layers(body);
 
-    // Step 3: Assemble
+    // Step 2: Assemble
     let assembled = assemble_layers(&layers);
 
-    // Step 4: Extract current (outermost) signature
+    // Step 3: Extract current (outermost) signature
     let current_sig = layers.first().and_then(|l| l.signature.clone());
 
     ProcessedEmail {
