@@ -8,13 +8,14 @@
 #   # SSH key path (optional, default ~/.ssh/id_rsa)
 #   export AMAIL_DEPLOY_KEY="$HOME/.ssh/id_deploy"
 #
-#   bash amail-deploy.sh upload      # Upload binary
-#   bash amail-deploy.sh start       # Start
-#   bash amail-deploy.sh stop        # Stop
-#   bash amail-deploy.sh restart     # Restart
-#   bash amail-deploy.sh status      # Status
-#   bash amail-deploy.sh logs        # View logs
-#   bash amail-deploy.sh health      # Health check
+#   bash amail-bin.sh build        # Build binary
+#   bash amail-bin.sh upload       # Upload binary
+#   bash amail-bin.sh start        # Start
+#   bash amail-bin.sh stop         # Stop
+#   bash amail-bin.sh restart      # Restart
+#   bash amail-bin.sh status       # Status
+#   bash amail-bin.sh logs         # View logs
+#   bash amail-bin.sh health       # Health check
 
 set -eo pipefail
 
@@ -46,6 +47,14 @@ REMOTE_DIR="/usr/local/bin"
 CONFIG="/etc/amail/config.toml"
 WORKDIR="/var/amail"
 SERVICE_NAME="amail-gateway"
+
+build() {
+    echo "Building amail-gateway (release)..."
+    cd "$SCRIPT_DIR"
+    cargo build --release
+    [ -f "$GATEWAY_BIN" ] || { echo "ERROR: build failed"; exit 1; }
+    echo "OK ($(ls -lh "$GATEWAY_BIN" | awk '{print $5}'))"
+}
 
 upload() {
     echo "Uploading amail-gateway..."
@@ -116,6 +125,7 @@ systemctl daemon-reload && echo 'systemd unit installed'"
 }
 
 case "$1" in
+    build)          build ;;
     upload)         upload ;;
     start)          start ;;
     stop)           stop ;;
@@ -124,5 +134,5 @@ case "$1" in
     logs)           logs ;;
     health)         health ;;
     setup-systemd)  setup_systemd ;;
-    *) echo "Usage: $0 {upload|start|stop|restart|status|logs|health|setup-systemd}" ;;
+    *) echo "Usage: $0 {build|upload|start|stop|restart|status|logs|health|setup-systemd}" ;;
 esac
