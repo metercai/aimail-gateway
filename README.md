@@ -114,17 +114,17 @@ bash deploy-docker.sh run
 
 ### Key Settings
 
-| Section | Field | Description |
-|---------|-------|-------------|
-| `[smtp]` | `bind` | Inbound SMTP listen address, default `0.0.0.0:25` |
-| `[smtp]` | `hostname` | EHLO hostname, should match PTR record (e.g. `amail.token.tm`) |
-| `[http]` | `bind` | HTTP API listen address, default `0.0.0.0:38080` |
-| `[relay]` | `smtp_server` | External relay address (e.g. `smtp://smtp.example.com:587`) |
-| `[relay]` | `username / password` | Relay authentication credentials |
-| `[storage]` | `path` | Data directory (database, attachments), default `./data` |
-| `[storage]` | `attachment_max_size` | Max attachment size |
-| `[webhook]` | `timeout_secs` | Webhook push timeout (seconds) |
-| `[retry]` | `max_attempts` | Max delivery retry attempts |
+| Field | Section | Description |
+|------|---------|-------------|
+| `bind` | `[smtp]` | Inbound SMTP listen address, default `0.0.0.0:25` |
+| `hostname` | `[smtp]` | EHLO hostname, should match PTR record (e.g. `amail.token.tm`) |
+| `bind` | `[http]` | HTTP API listen address, default `0.0.0.0:8080` |
+| `smtp_server` | `[relay]` | External relay address (e.g. `smtp://smtp.example.com:587`) |
+| `username / password` | `[relay]` | Relay authentication credentials |
+| `path` | `[storage]` | Data directory (database, attachments), default `./data` |
+| `attachment_max_size` | `[storage]` | Max attachment size |
+| `timeout_secs` | `[webhook]` | Webhook push timeout (seconds) |
+| `max_attempts` | `[retry]` | Max delivery retry attempts |
 
 ### Example config.toml
 

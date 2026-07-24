@@ -113,17 +113,17 @@ bash deploy-docker.sh run
 
 ### 重点配置项
 
-| 配置段 | 关键字段 | 说明 |
-|--------|---------|------|
-| `[smtp]` | `bind` | 入站 SMTP 监听地址，默认 `0.0.0.0:25` |
-| `[smtp]` | `hostname` | EHLO 主机名，应与 PTR 记录一致（如 `amail.token.tm`） |
-| `[http]` | `bind` | HTTP API 监听地址，默认 `0.0.0.0:38080` |
-| `[relay]` | `smtp_server` | 外部邮件中继地址（如 `smtp://smtp.example.com:587`） |
-| `[relay]` | `username / password` | 中继认证凭据 |
-| `[storage]` | `path` | 数据目录（数据库、附件），默认 `./data` |
-| `[storage]` | `attachment_max_size` | 附件大小上限 |
-| `[webhook]` | `timeout_secs` | Webhook 推送超时（秒） |
-| `[retry]` | `max_attempts` | 投递失败最大重试次数 |
+| 关键字段 | 配置段 | 说明 |
+|---------|--------|------|
+| `bind` | `[smtp]` | 入站 SMTP 监听地址，默认 `0.0.0.0:25` |
+| `hostname` | `[smtp]` | EHLO 主机名，应与 PTR 记录一致（如 `amail.token.tm`） |
+| `bind` | `[http]` | HTTP API 监听地址，默认 `0.0.0.0:8080` |
+| `smtp_server` | `[relay]` | 外部邮件中继地址（如 `smtp://smtp.example.com:587`） |
+| `username / password` | `[relay]` | 中继认证凭据 |
+| `path` | `[storage]` | 数据目录（数据库、附件），默认 `./data` |
+| `attachment_max_size` | `[storage]` | 附件大小上限 |
+| `timeout_secs` | `[webhook]` | Webhook 推送超时（秒） |
+| `max_attempts` | `[retry]` | 投递失败最大重试次数 |
 
 ### config.toml 示例
 
