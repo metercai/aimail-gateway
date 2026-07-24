@@ -128,38 +128,60 @@ bash deploy-docker.sh run
 ### config.toml 示例
 
 ```toml
+[http]
+bind = "0.0.0.0:8080"
+# hostname = "mail.yourdomain.com"
+
 [smtp]
 bind = "0.0.0.0:25"
-hostname = "amail.yourdomain.com"       # 与 PTR 记录一致
-max_message_size = 26214400             # 25 MiB
-max_connections = 100
-
-[http]
-bind = "0.0.0.0:38080"
+# hostname = "mail.yourdomain.com"
+# max_message_size = 10485760
+# max_connections = 100
 
 [relay]
-smtp_server = "smtp://smtp.example.com:587"
-username = "relay@example.com"
-password = "your-password"
-auto_reply_subject_prefix = "Re: "
-delivery_window_secs = 7200             # 退信关联窗口（2h）
+# smtp_server = "smtp://smtp.example.com:587"
+# username = "relay@example.com"
+# password = "your-password"
+# dns_server = "127.0.0.1:53"
+# auto_reply_from = "noreply@yourdomain.com"
+# auto_reply_subject_prefix = "[Auto-Reply] "
+# delivery_window_secs = 7200
+# mx_dns_override = { "example.com" = "127.0.0.1:25" }
+
+[webhook]
+# timeout_secs = 10
+# pending_ttl_hours = 72
+
+[retry]
+# max_attempts = 3
+# initial_backoff_secs = 5
+# multiplier = 2
+# max_backoff_secs = 300
+# poll_interval_secs = 5
+# batch_size = 50
 
 [storage]
 path = "./data"
-pool_size = 25
-attachment_max_size = 26214400
-attachment_lifetime_hours = 72
-attachment_allowed_types = ["pdf", "png", "jpg", "docx", "xlsx"]
+# pool_size = 25
+# encryption = false
+# attachment_max_size = 20971520
+# attachment_lifetime_hours = 720
+# attachment_max_attachments = 5
+# attachment_allowed_types = []
 
-[webhook]
-timeout_secs = 30
-pending_ttl_hours = 72
+[logging]
+# level = "info"
+# file = "/var/log/amail-gateway.log"
 
-[retry]
-max_attempts = 3
-initial_backoff_secs = 60
-max_backoff_secs = 3600
-poll_interval_secs = 5
+[admin]
+# email = "admin@yourdomain.com"
+
+[board]
+# heartbeat_stale_seconds = 14400
+# task_timeout_seconds = 259200
+# sweeper_interval_seconds = 900
+# max_active_boards = 5
+# archive_retention_days = 90
 ```
 
 ---
