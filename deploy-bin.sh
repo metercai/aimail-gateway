@@ -50,9 +50,9 @@ SERVICE_NAME="amail-gateway"
 upload() {
     echo "Uploading amail-gateway..."
     [ -f "$GATEWAY_BIN" ] || { echo "ERROR: binary not found at $GATEWAY_BIN"; exit 1; }
-    $SCP "$GATEWAY_BIN" "${USER}@${HOST}:${REMOTE_DIR}/amail-advanced"
-    $SSH "chmod +x ${REMOTE_DIR}/amail-advanced"
-    echo "OK ($(ls -lh "$ADVANCED_BIN" | awk '{print $5}'))"
+    $SCP "$GATEWAY_BIN" "${USER}@${HOST}:${REMOTE_DIR}/amail-gateway"
+    $SSH "chmod +x ${REMOTE_DIR}/amail-gateway"
+    echo "OK ($(ls -lh "$GATEWAY_BIN" | awk '{print $5}'))"
 }
 
 start() {
@@ -91,13 +91,13 @@ logs() {
 }
 
 health() {
-    $SSH "curl -sf http://127.0.0.1:38080/health && echo 'OK' || echo 'FAILED'"
+    $SSH "curl -sf http://127.0.0.1:8080/health && echo 'OK' || echo 'FAILED'"
 }
 
 setup_systemd() {
     $SSH "cat > /etc/systemd/system/${SERVICE_NAME}.service << 'SYSTEMD'
 [Unit]
-Description=amail-gateway (advanced edition)
+Description=amail-gateway
 After=network.target
 
 [Service]
