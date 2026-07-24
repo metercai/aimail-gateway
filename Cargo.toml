@@ -15,10 +15,6 @@ path = "src/main.rs"
 name = "amail_base"
 path = "src/lib.rs"
 
-[features]
-default = []
-a2a = []        # A2A project collaboration support (kanban.db)
-
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }
