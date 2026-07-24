@@ -91,29 +91,24 @@ cp .env.example .env
 
 ```bash
 # Build
-cargo build --release -p amail-gateway
+cargo build --release
 
 # Upload and install systemd service
-bash deploy.sh upload
-bash deploy.sh setup-systemd
-bash deploy.sh start
-bash deploy.sh health
+bash deploy-bin.sh build
+bash deploy-bin.sh setup-systemd
+bash deploy-bin.sh start
+bash deploy-bin.sh health
 ```
 
 ### Option B: Docker Deployment
 
 ```bash
-# Build and push image to VPS
-docker build -t amail-gateway .
-docker save amail-gateway | ssh root@$AMAIL_DEPLOY_HOST "docker load"
+# Build image with commit hash
+bash deploy-docker.sh build
 
-# Run on VPS
-ssh root@$AMAIL_DEPLOY_HOST "docker run -d \\
-  --name amail-gateway \\
-  -p 8080:8080 -p 25:25 \\
-  -v /etc/amail/config.toml:/etc/amail/config.toml \\
-  -v /data/amail:/data \\
-  amail-gateway"
+# Push to remote server and run
+bash deploy-docker.sh push
+bash deploy-docker.sh run
 ```
 
 ---

@@ -90,29 +90,24 @@ cp .env.example .env
 
 ```bash
 # 编译
-cargo build --release -p amail-gateway
+cargo build --release
 
 # 上传并安装 systemd 服务
-bash deploy.sh upload
-bash deploy.sh setup-systemd
-bash deploy.sh start
-bash deploy.sh health
+bash deploy-bin.sh build
+bash deploy-bin.sh setup-systemd
+bash deploy-bin.sh start
+bash deploy-bin.sh health
 ```
 
 ### 方式二：Docker 镜像部署
 
 ```bash
-# 构建并推送镜像到 VPS
-docker build -t amail-gateway .
-docker save amail-gateway | ssh root@$AMAIL_DEPLOY_HOST "docker load"
+# 构建带 commit hash 的镜像
+bash deploy-docker.sh build
 
-# 在 VPS 上运行
-ssh root@$AMAIL_DEPLOY_HOST "docker run -d \\
-  --name amail-gateway \\
-  -p 8080:8080 -p 25:25 \\
-  -v /etc/amail/config.toml:/etc/amail/config.toml \\
-  -v /data/amail:/data \\
-  amail-gateway"
+# 推送到远端服务器并启动
+bash deploy-docker.sh push
+bash deploy-docker.sh run
 ```
 
 ---
