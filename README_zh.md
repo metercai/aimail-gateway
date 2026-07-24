@@ -189,4 +189,3 @@ path = "./data"
 ## 5. 相关项目
 
 - [agentmail](https://github.com/metercai/agentmail) — Agent 集成工具链（一键部署，含patch/skill/toolset）
-- [amail-bridge](https://github.com/metercai/amail-bridge) — 内网穿透桥接（可选）

@@ -190,4 +190,3 @@ path = "./data"
 ## 5. Related Projects
 
 - [agentmail](https://github.com/metercai/agentmail) — Agent integration toolchain (one-click deploy with patch/skill/toolset)
-- [amail-bridge](https://github.com/metercai/amail-bridge) — Internal network bridge (optional)
