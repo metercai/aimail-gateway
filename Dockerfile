@@ -1,4 +1,5 @@
 # ── Build stage ─────────────────────────────────────────────────────────
+ARG GIT_COMMIT=unknown
 FROM rust:slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -6,9 +7,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-
-# Build the binary
 COPY . .
+ARG GIT_COMMIT
+ENV GIT_VERSION=$GIT_COMMIT
 RUN cargo build --release
 
 # ── Runtime stage (Chainguard — minimal glibc, no shell, CVE-scanned) ──

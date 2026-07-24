@@ -1,6 +1,16 @@
 use std::process::Command;
 
 fn main() {
+    // Allow override via GIT_VERSION env var (used for Docker builds).
+    // When present, skip git commands entirely — no .git needed in build context.
+    if let Ok(v) = std::env::var("GIT_VERSION") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            println!("cargo:rustc-env=GIT_VERSION={}", v);
+            return;
+        }
+    }
+
     let hash = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
