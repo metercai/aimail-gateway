@@ -90,10 +90,7 @@ cp .env.example .env
 ### Option A: Binary Deployment
 
 ```bash
-# Build
-cargo build --release
-
-# Upload and install systemd service
+# Build, upload and install systemd service
 bash deploy-bin.sh build
 bash deploy-bin.sh setup-systemd
 bash deploy-bin.sh start

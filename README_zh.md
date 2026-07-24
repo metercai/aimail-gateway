@@ -89,10 +89,7 @@ cp .env.example .env
 ### 方式一：编译二进制部署
 
 ```bash
-# 编译
-cargo build --release
-
-# 上传并安装 systemd 服务
+# 编译、上传并安装 systemd 服务
 bash deploy-bin.sh build
 bash deploy-bin.sh setup-systemd
 bash deploy-bin.sh start
