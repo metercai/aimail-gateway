@@ -10,3 +10,4 @@ deploy/
 .env
 config.toml
 a2a_board/
+data/
