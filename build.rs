@@ -7,6 +7,7 @@ fn main() {
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
 
     let dirty = Command::new("git")
