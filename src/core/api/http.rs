@@ -331,9 +331,12 @@ async fn register_address(
 
     // Validate local-part characters (RFC 5321 atext minus '.',
     // which is reserved as persona/system-id separator).
-    // Mode is determined by system_id prefix, not by dot count:
-    //   shared-* → profile.system_name@domain (1 dot after persona strip)
-    //   other    → profile@domain (0 dots after persona strip)
+    // Persona prefix is NOT present during registration — it is
+    // added dynamically by the inbound SMTP receiver.
+    //
+    // Mode is determined by system_id prefix:
+    //   shared-* → profile.system_name@domain (exactly 1 dot)
+    //   other    → profile@domain (no dots)
     let local = req.email.rsplit('@').nth(1).unwrap_or("");
     if local.is_empty() || local.len() > 64 {
         return Err((
@@ -345,17 +348,10 @@ async fn register_address(
         ));
     }
 
-    // Strip optional persona prefix (everything before the first dot).
-    let base = match local.split_once('.') {
-        Some((_, rest)) if !rest.is_empty() => rest,
-        _ => local,
-    };
+    let dot_count = local.bytes().filter(|&b| b == b'.').count();
 
-    let is_shared = tid.starts_with("shared-");
-
-    if is_shared {
-        // ── Shared domain: profile.system_name → exactly 1 dot ──
-        let dot_count = base.bytes().filter(|&b| b == b'.').count();
+    if tid.starts_with("shared-") {
+        // ── Shared domain: profile.system_name@domain ──
         if dot_count != 1 {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -365,17 +361,12 @@ async fn register_address(
                 }),
             ));
         }
-        let (profile, sys_id) = base.split_once('.').unwrap();
-        if profile.is_empty() || profile.len() > 64
-            || sys_id.is_empty() || sys_id.len() > 64
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_email".to_string(),
-                    detail: Some("shared-domain segments must be 1-64 characters each".to_string()),
-                }),
-            ));
+        let (profile, sys_id) = local.split_once('.').unwrap();
+        if profile.is_empty() || profile.len() > 64 {
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                error: "invalid_email".into(),
+                detail: Some("profile segment must be 1-64 characters".into()),
+            })));
         }
         if let Some(bad) = profile.bytes().find(|&b| !is_atext_no_dot(b)) {
             return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
@@ -383,24 +374,35 @@ async fn register_address(
                 detail: Some(format!("illegal char in profile: '{}' (0x{:02X})", bad as char, bad)),
             })));
         }
-        if let Some(bad) = sys_id.bytes().find(|&b| !is_atext_no_dot(b)) {
+        // Validate system_id naming rules (same as activate_system.py SYSNAME_RE):
+        // lowercase start, 3-8 chars, [a-z0-9_-] only, not "a2a" or ".a2a"
+        if !sys_id.bytes().next().map_or(false, |b| b.is_ascii_lowercase())
+            || sys_id.len() < 3 || sys_id.len() > 8
+            || sys_id.bytes().any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+        {
             return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
                 error: "invalid_email".into(),
-                detail: Some(format!("illegal char in system-id: '{}' (0x{:02X})", bad as char, bad)),
+                detail: Some("system-id must be 3-8 chars, lowercase letter start, [a-z0-9_-] only".into()),
+            })));
+        }
+        if sys_id == "a2a" || sys_id.contains(".a2a") {
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                error: "invalid_email".into(),
+                detail: Some("'a2a' is a reserved system-id".into()),
             })));
         }
     } else {
-        // ── Non-shared: no system-id suffix ──
-        if base.bytes().any(|b| b == b'.') {
+        // ── Non-shared: no dots, validate entire local-part ──
+        if dot_count != 0 {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "invalid_email".to_string(),
-                    detail: Some("non-shared address must not contain dot after persona prefix".to_string()),
+                    detail: Some("non-shared address must not contain dots".to_string()),
                 }),
             ));
         }
-        if let Some(bad) = base.bytes().find(|&b| !is_atext_no_dot(b)) {
+        if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
