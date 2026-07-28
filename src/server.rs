@@ -105,6 +105,7 @@ impl Server {
             trigger_tx: trigger_tx.clone(),
             extensions: extensions.clone(),
             dns_resolver: Some(dns_resolver.clone()),
+            shared_domain: None,
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──
