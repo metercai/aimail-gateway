@@ -331,6 +331,9 @@ async fn register_address(
 
     // Validate local-part characters (RFC 5321 atext minus '.',
     // which is reserved as persona/system-id separator).
+    // Mode is determined by system_id prefix, not by dot count:
+    //   shared-* → profile.system_name@domain (1 dot after persona strip)
+    //   other    → profile@domain (0 dots after persona strip)
     let local = req.email.rsplit('@').nth(1).unwrap_or("");
     if local.is_empty() || local.len() > 64 {
         return Err((
@@ -341,14 +344,71 @@ async fn register_address(
             }),
         ));
     }
-    if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid_email".to_string(),
-                detail: Some(format!("illegal character '{}' in local-part (0x{:02X})", bad as char, bad)),
-            }),
-        ));
+
+    // Strip optional persona prefix (everything before the first dot).
+    let base = match local.split_once('.') {
+        Some((_, rest)) if !rest.is_empty() => rest,
+        _ => local,
+    };
+
+    let is_shared = tid.starts_with("shared-");
+
+    if is_shared {
+        // ── Shared domain: profile.system_name → exactly 1 dot ──
+        let dot_count = base.bytes().filter(|&b| b == b'.').count();
+        if dot_count != 1 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some("shared-domain address must use profile.system_id@domain format".to_string()),
+                }),
+            ));
+        }
+        let (profile, sys_id) = base.split_once('.').unwrap();
+        if profile.is_empty() || profile.len() > 64
+            || sys_id.is_empty() || sys_id.len() > 64
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some("shared-domain segments must be 1-64 characters each".to_string()),
+                }),
+            ));
+        }
+        if let Some(bad) = profile.bytes().find(|&b| !is_atext_no_dot(b)) {
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                error: "invalid_email".into(),
+                detail: Some(format!("illegal char in profile: '{}' (0x{:02X})", bad as char, bad)),
+            })));
+        }
+        if let Some(bad) = sys_id.bytes().find(|&b| !is_atext_no_dot(b)) {
+            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
+                error: "invalid_email".into(),
+                detail: Some(format!("illegal char in system-id: '{}' (0x{:02X})", bad as char, bad)),
+            })));
+        }
+    } else {
+        // ── Non-shared: no system-id suffix ──
+        if base.bytes().any(|b| b == b'.') {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some("non-shared address must not contain dot after persona prefix".to_string()),
+                }),
+            ));
+        }
+        if let Some(bad) = base.bytes().find(|&b| !is_atext_no_dot(b)) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some(format!("illegal character '{}' in local-part (0x{:02X})", bad as char, bad)),
+                }),
+            ));
+        }
     }
 
     // agent_admin scope: must match their domain
