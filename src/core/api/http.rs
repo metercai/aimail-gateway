@@ -329,6 +329,28 @@ async fn register_address(
         ));
     }
 
+    // Validate local-part characters (RFC 5321 atext minus '.',
+    // which is reserved as persona/system-id separator).
+    let local = req.email.rsplit('@').nth(1).unwrap_or("");
+    if local.is_empty() || local.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_email".to_string(),
+                detail: Some("local-part must be 1-64 characters".to_string()),
+            }),
+        ));
+    }
+    if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_email".to_string(),
+                detail: Some(format!("illegal character '{}' in local-part (0x{:02X})", bad as char, bad)),
+            }),
+        ));
+    }
+
     // agent_admin scope: must match their domain
     if is_agent_admin_scope(&api_key) {
         if let Err(e) = require_domain_match(&api_key, bare_domain) {
@@ -2515,6 +2537,19 @@ fn preprocess_pending_filter(raw: &[String]) -> Vec<String> {
         }
     }
     result
+}
+
+// ── Email address validation ──────────────────────────────────────────
+
+/// RFC 5321 `atext` characters excluding '.' (dot).
+/// Dot is reserved as persona/system-id separator in amail addresses.
+fn is_atext_no_dot(b: u8) -> bool {
+    matches!(b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+        | b'!' | b'#' | b'$' | b'%' | b'&' | b'\''
+        | b'*' | b'+' | b'-' | b'/' | b'=' | b'?'
+        | b'^' | b'_' | b'`' | b'{' | b'|' | b'}' | b'~'
+    )
 }
 
 #[cfg(test)]
