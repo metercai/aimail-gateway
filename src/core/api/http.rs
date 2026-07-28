@@ -485,6 +485,25 @@ async fn register_address(
         ));
     }
 
+    // The bare domain must belong to the requesting system.
+    if domain_record.system_id != tid {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "forbidden".to_string(),
+                detail: Some("Domain does not belong to this system".to_string()),
+            }),
+        ));
+    }
+
+    // ── Address quota check ──
+    state.extensions.quota_checker.check_address_quota(&tid).await.map_err(|e| {
+        (StatusCode::FORBIDDEN, Json(ErrorResponse {
+            error: "quota_exceeded".to_string(),
+            detail: Some(e.to_string()),
+        }))
+    })?;
+
     // Create system_domains + domain_addr_meta for the agent email
     match state
         .factories
