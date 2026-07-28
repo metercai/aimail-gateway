@@ -56,7 +56,7 @@ impl QuotaChecker for BaseQuotaChecker {
     async fn check_domain_quota(&self, _system_id: &str) -> Result<(), AppError> {
         Ok(())
     }
-    async fn check_key_quota(&self, _system_id: &str) -> Result<(), AppError> {
+    async fn check_address_quota(&self, _system_id: &str) -> Result<(), AppError> {
         Ok(())
     }
 }

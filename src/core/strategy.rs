@@ -68,7 +68,7 @@ pub trait QuotaChecker: Send + Sync {
         &self,
         system_id: &str,
     ) -> Result<(), crate::core::errors::AppError>;
-    async fn check_key_quota(&self, system_id: &str) -> Result<(), crate::core::errors::AppError>;
+    async fn check_address_quota(&self, system_id: &str) -> Result<(), crate::core::errors::AppError>;
     async fn get_max_attachments(&self, _system_id: &str) -> Option<usize> {
         None
     }

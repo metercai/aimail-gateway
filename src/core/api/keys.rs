@@ -58,7 +58,7 @@ pub async fn create_api_key(
         state
             .extensions
             .quota_checker
-            .check_key_quota(&req.system_id)
+            .check_address_quota(&req.system_id)
             .await
             .map_err(|e| {
                 (
