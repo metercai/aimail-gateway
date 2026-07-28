@@ -362,10 +362,10 @@ async fn register_address(
             ));
         }
         let (profile, sys_id) = local.split_once('.').unwrap();
-        if profile.is_empty() || profile.len() > 64 {
+        if profile.is_empty() {
             return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
                 error: "invalid_email".into(),
-                detail: Some("profile segment must be 1-64 characters".into()),
+                detail: Some("profile segment must not be empty".into()),
             })));
         }
         if let Some(bad) = profile.bytes().find(|&b| !is_atext_no_dot(b)) {
