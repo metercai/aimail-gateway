@@ -329,8 +329,8 @@ async fn register_address(
         ));
     }
 
-    // Validate local-part: each dot-separated segment must contain
-    // only RFC 5321 atext chars (dot is the persona/profile/system-id separator).
+    // Validate local-part characters (RFC 5321 atext minus '.',
+    // which is reserved as persona/system-id separator).
     let local = req.email.rsplit('@').nth(1).unwrap_or("");
     if local.is_empty() || local.len() > 64 {
         return Err((
@@ -341,28 +341,14 @@ async fn register_address(
             }),
         ));
     }
-    for seg in local.split('.') {
-        if seg.is_empty() || seg.len() > 64 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_email".to_string(),
-                    detail: Some("dot-separated segment must be 1-64 characters".to_string()),
-                }),
-            ));
-        }
-        if let Some(bad) = seg.bytes().find(|&b| !is_atext_no_dot(b)) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_email".to_string(),
-                    detail: Some(format!(
-                        "illegal character '{}' in local-part segment (0x{:02X})",
-                        bad as char, bad
-                    )),
-                }),
-            ));
-        }
+    if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_email".to_string(),
+                detail: Some(format!("illegal character '{}' in local-part (0x{:02X})", bad as char, bad)),
+            }),
+        ));
     }
 
     // agent_admin scope: must match their domain
