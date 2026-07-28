@@ -21,9 +21,6 @@ pub struct HttpState {
     pub trigger_tx: mpsc::Sender<String>,
     pub extensions: Arc<ExtensionProviders>,
     pub dns_resolver: Option<Arc<TokioAsyncResolver>>,
-    /// When set, agent addresses under this domain must use
-    /// `profile.system_id@domain` format (shared domain mode).
-    pub shared_domain: Option<String>,
 }
 
 // ── Request/Response types ──
