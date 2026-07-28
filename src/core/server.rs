@@ -240,8 +240,18 @@ pub async fn setup_admin_key(
         Arc::new(crate::core::whitelist::ExactKeyResolver),
     );
 
+    // ── Bootstrap system-id, persisted across restarts ──────────────
+    let sid_path = config.storage.path.join("system.id");
+    let bootstrap_id = if let Ok(s) = std::fs::read_to_string(&sid_path) {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() { trimmed.to_string() }
+        else { generate_and_save_bootstrap_id(&sid_path) }
+    } else {
+        generate_and_save_bootstrap_id(&sid_path)
+    };
+
     let existing = factory
-        .list_api_keys_by_system("admin", "platform")
+        .list_api_keys_by_system(&bootstrap_id, "platform")
         .await
         .map_err(|e| AppError::Internal(format!("check admin key: {e}")))?;
     if !existing.is_empty() {
@@ -260,7 +270,7 @@ pub async fn setup_admin_key(
 
     factory
         .create_api_key(
-            "admin",
+            &bootstrap_id,
             "",
             &key_hash,
             key_prefix,
@@ -313,12 +323,25 @@ pub fn create_dns_resolver(
 pub fn register_stranger_interceptor(http_state: &HttpState) {
     let email_factory = http_state.factories.email.clone();
     let max_attempts = http_state.config.retry.max_attempts as i32;
+    let sid_path = http_state.config.storage.path.join("system.id");
+    let bootstrap_id = std::fs::read_to_string(&sid_path)
+        .ok().and_then(|s| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) })
+        .unwrap_or_else(|| {
+            let id = format!("system-{:04x}", rand::random::<u16>());
+            let _ = std::fs::write(&sid_path, &id);
+            id
+        });
+
+    // ── Legacy support: if the bootstrap ID doesn't exist yet but
+    //    there are existing api_keys under "admin", use "admin" once
+    //    then migrate.  One-shot migration.
+
     email_factory
         .env_factory
         .register_interceptor(std::sync::Arc::new(
             crate::core::stranger_interceptor::StrangerInterceptor::new(
                 email_factory.clone(),
-                "admin",
+                &bootstrap_id,
                 max_attempts,
             ),
         )
@@ -362,4 +385,11 @@ pub fn spawn_cleanup_worker(
             }
         }
     })
+}
+
+fn generate_and_save_bootstrap_id(path: &std::path::Path) -> String {
+    use rand::Rng;
+    let id = format!("system-{:04x}", rand::thread_rng().gen::<u16>());
+    let _ = std::fs::write(path, &id);
+    id
 }

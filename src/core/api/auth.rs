@@ -129,7 +129,7 @@ fn check_domain_access(
     role_label: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // Admin system bypass
-    if key.system_id == "admin" {
+    if key.system_id.starts_with("system-") || key.system_id == "admin" {
         return Ok(());
     }
     // System-level key (empty email) — unrestricted

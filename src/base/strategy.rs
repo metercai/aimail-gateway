@@ -72,7 +72,7 @@ impl SystemStore for BaseSystemStore {
         _id: &str,
     ) -> AppResult<Option<crate::core::storage::SystemRecord>> {
         Ok(Some(crate::core::storage::SystemRecord {
-            id: "admin".into(),
+            id: _id.into(),
             admin_email: "Admin".into(),
             limits_config: None,
             is_active: true,

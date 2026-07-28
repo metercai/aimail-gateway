@@ -218,7 +218,7 @@ pub async fn create_api_key(
     // ── System scope check ──
     // System admin (admin system) can create keys for any system.
     // All other scopes are limited to keys within their own system.
-    if api_key.system_id != "admin" && api_key.system_id != req.system_id {
+    if !api_key.system_id.starts_with("system-") && api_key.system_id != "admin" && api_key.system_id != req.system_id {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
