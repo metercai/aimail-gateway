@@ -329,13 +329,8 @@ async fn register_address(
         ));
     }
 
-    // Validate local-part of the email address.
-    // Two modes, distinguished by the structure of the local-part:
-    //   Non-shared:  profile@domain        → 0 dots → validate entire local-part
-    //   Shared:      profile.system_id@domain → 1 dot after stripping persona →
-    //                validate each side of the dot independently.
-    //
-    // Persona prefix (optional first-dot segment) is stripped before validation.
+    // Validate local-part: each dot-separated segment must contain
+    // only RFC 5321 atext chars (dot is the persona/profile/system-id separator).
     let local = req.email.rsplit('@').nth(1).unwrap_or("");
     if local.is_empty() || local.len() > 64 {
         return Err((
@@ -346,60 +341,28 @@ async fn register_address(
             }),
         ));
     }
-    // Strip optional persona prefix (first dot-segment).
-    let base = match local.split_once('.') {
-        Some((_, rest)) if !rest.is_empty() => rest,
-        _ => local,
-    };
-    let dot_count = base.bytes().filter(|&b| b == b'.').count();
-    if dot_count == 0 {
-        // Non-shared: validate entire base local-part
-        if let Some(bad) = base.bytes().find(|&b| !is_atext_no_dot(b)) {
+    for seg in local.split('.') {
+        if seg.is_empty() || seg.len() > 64 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some("dot-separated segment must be 1-64 characters".to_string()),
+                }),
+            ));
+        }
+        if let Some(bad) = seg.bytes().find(|&b| !is_atext_no_dot(b)) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "invalid_email".to_string(),
                     detail: Some(format!(
-                        "illegal character '{}' in local-part (0x{:02X})",
+                        "illegal character '{}' in local-part segment (0x{:02X})",
                         bad as char, bad
                     )),
                 }),
             ));
         }
-    } else if dot_count == 1 {
-        // Shared domain: validate each side of the system-id dot
-        let (profile, sys_id) = base.split_once('.').unwrap();
-        if profile.is_empty() || profile.len() > 64
-            || sys_id.is_empty() || sys_id.len() > 64
-        {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_email".to_string(),
-                    detail: Some("shared-domain segments must be 1-64 characters each".to_string()),
-                }),
-            ));
-        }
-        if let Some(bad) = profile.bytes().find(|&b| !is_atext_no_dot(b)) {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some(format!("illegal char in profile: '{}' (0x{:02X})", bad as char, bad)),
-            })));
-        }
-        if let Some(bad) = sys_id.bytes().find(|&b| !is_atext_no_dot(b)) {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some(format!("illegal char in system-id: '{}' (0x{:02X})", bad as char, bad)),
-            })));
-        }
-    } else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid_email".to_string(),
-                detail: Some("local-part may contain at most one structural dot (after persona prefix)".to_string()),
-            }),
-        ));
     }
 
     // agent_admin scope: must match their domain
