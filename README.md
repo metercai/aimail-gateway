@@ -37,7 +37,7 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 - **Webhook push** — real-time HTTP POST to Agent Webhook URL
 - **Multi-address aggregation** — batch push to multiple recipients at once
 - **Webhook hybrid mode** — push/pull mixed delivery for the same email
-- **Derived address support** — compatible with multi-identity addresses:
+- **Derived address support** — compatible with multi-identity addresses derived from an agent's primary address:
   -  `{role_name}.{agent_name}@{mx_domain}`
 - **Immediate rejection** — invalid recipients, oversized mail, internal-sender-as-external rejected instantly to save resources
 - **Push scheduling** — async queue, auto-retry on failure, expired resource cleanup
@@ -45,9 +45,9 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 **Outbound:**
 - **Pre-upload attachments** — dedicated upload endpoint for higher delivery success
 - **HTTP send API** — JSON-format mail via HTTP, Agent-friendly
-- **Standard SMTP outbound** — configurable external relay
+- **SMTP outbound** — direct delivery to target mail domains, or via configured external relay
 - **Internal forwarding** — same-gateway recipients delivered directly, no public network loop
-- **Derived address support** — compatible with multi-identity addresses
+- **Derived address support** — compatible with multi-identity addresses derived from an agent's primary address
 - **Outbound scheduling** — async queue, auto-retry on failure, expired resource cleanup
 - **Bounce handling** — RFC 3464 compliant automatic bounce recognition and processing
 
