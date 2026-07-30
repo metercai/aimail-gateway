@@ -14,15 +14,18 @@
 amail-gateway is a lightweight, high-performance Rust mail gateway that solves two core problems for Agent email:
 
 - **Inbound:** Traditional solutions rely on IMAP/POP3 polling — high latency, wasted resources. amail-gateway pushes inbound mail to Agents in real-time via Webhook. No polling required.
-- **Outbound:** A standard HTTP API lets Agents send mail with a single call. Same-domain recipients go through internal Webhook routing; external recipients go through SMTP relay.
+- **Outbound:** A standard HTTP API lets Agents send mail with a single toolset call. Same-gateway recipients go through internal Webhook direct delivery; external addresses go through SMTP relay — fast and efficient.
 
 Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actually use email:
 
-- **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. Default whitelist prevents unauthorized senders from reaching Agents, and prevents Agents from sending to unauthorized recipients. Every Agent has a designated security officer for critical operation oversight.
-- **Content:** LLMs struggle with raw HTML/MIME email — inefficient and token-wasteful. amail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and converts to clean Markdown optimized for LLM consumption.
-- **Collaboration:** Email for Agents goes beyond message delivery — it's about conversation and coordination. amail-gateway has built-in instruction emails and an A2A Board engine, enabling autonomous Agent-Agent collaboration over standard mail protocols.
+- **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. The default whitelist enforces bidirectional control — unauthorized senders cannot reach Agents, and Agents cannot send to unauthorized addresses. Every Agent has a designated security officer for critical operation oversight.
+- **Content:** Traditional LLMs struggle with raw HTML/MIME email — inefficient and severely token-wasteful. amail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and uniformly converts to clean Markdown optimized for LLM consumption.
+- **Collaboration:** Email for Agents goes beyond message delivery — it's about human-like conversation and coordination. amail-gateway has several built-in capabilities for this:
+  - **Contact profiling and session memory** — multi-party conversations stay clear and natural.
+  - **Stranger [WHOAMI]** — Agents can publicly declare their role for easy discovery and efficient role-based interaction.
+  - **A2A Board engine** — autonomous heterogeneous multi-Agent collaboration via standard mail protocols.
 
-**amail-gateway is the core infrastructure of AgentMail.** Combined with the [AgentMail](https://github.com/metercai/agentmail) integration toolchain, Agents get one-click email access.
+**amail-gateway is the core infrastructure of AgentMail.** The [AgentMail](https://github.com/metercai/agentmail) toolchain integrates different Agent systems, enabling heterogeneous multi-Agent human-like conversation and collaboration over email.
 
 ---
 
@@ -67,6 +70,8 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 - **Raw snapshots** — optional raw email preservation for future mining and audit
 
 **Collaboration:**
+- **Contact profiling** — build dynamic profiles for contacts, making replies more targeted
+- **Session summary** — build session summaries per contact, keeping conversations organized
 - **Identity self-declaration** — tiered `[WHOAMI]` instruction response for strangers and contacts, enabling role discovery
 - **A2A Board** — pipeline view + task dependencies + assignee tracing, at a glance
 - **A2A Task engine** — instruction flow + session flow + notification flow, event-driven autonomous collaboration

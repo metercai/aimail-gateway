@@ -11,18 +11,21 @@
 
 ## 1. 什么是 amail-gateway
 
-amail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决了 Agent 收发邮件的两个核心问题：
+amail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决了 Agent 收发邮件的核心问题：
 
 - **收信：** 传统方案依赖 IMAP/POP3 轮询，延迟高、资源浪费。amail-gateway 通过 Webhook 实时推送入站邮件，无需轮询。
-- **发信：** 提供标准 HTTP API，Agent 调用 toolset 即可发信。同域收件人走内部 Webhook 直转，外部地址走 SMTP 转发。
+- **发信：** 提供标准 HTTP API，通过调用 toolset 即可发信。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发，高效快捷。
 
-此外，amail-gateway 针对 AI Agent 的邮件使用实际场景，做了专门的优化：
+此外，amail-gateway 针对 Agent 在实际邮件场景的特点，做了专门的优化：
 
-- **安全：** Agent 不应暴露在开放的邮件网络中承受垃圾邮件和恶意攻击。amail-gateway 默认白名单机制，非授权发件人无法触达 Agent，同时 Agent 也无法给非授权收件人发送内容。每个 Agent 配置安全员，对关键操作进行把关，对完全兜底。
-- **内容：** LLM 处理原始 HTML/MIME 邮件效率低、浪费Token。amail-gateway 具有内容处理链，自动提取关键信息，剥离样式噪声，转换为 LLM 适用的 Markdown 干净文本。
-- **协作：** Agent 收发邮件的目的不仅仅是信息传递，更重要的是与外界的会话与协作。amail-gateway 内置了指令邮件和 A2A 看板引擎，可以用邮件协议实现 Agent 之间的自主协作。
+- **安全：** Agent 不应暴露在开放的邮件网络中承受垃圾邮件和恶意攻击。amail-gateway 默认白名单机制，即只能与已授权联系人互发邮件，非授权不能发，非授不能收，双向管控杜绝安全隐患。同时，为每个 Agent 配置安全员，对关键操作进行把关，对完全兜底。
+- **内容：** 传统LLM 处理原始 HTML/MIME 邮件效率低下、浪费Token严重。amail-gateway 具有内容处理链，自动提取关键信息，剥离样式噪声，统一转换为 LLM 适用的 Markdown 干净文本。
+- **协作：** Agent 收发邮件的目的不仅仅是信息传递，更重要的是与外界进行类人的会话与协作。amail-gateway 为此内置了多项能力：
+  - **联系人画像和会话记忆**，让多方会话清晰自然，对答如流。
+  - **陌生人 WHOAMI **，向公众展示自身定位，便于角色的发现和高效率的角色会话。
+  - **A2A 看板引擎**，基于邮件协议实现异构多 Agent 之间的自主协作。
 
-**amail-gateway 是 AgentMail 的核心基础设施**，在 [AgentMail](https://github.com/metercai/agentmail) 提供的集成工具链配合下，可以实现 Agent 的一键邮件接入。
+**amail-gateway 是 AgentMail 的核心基础设施**，由 [AgentMail](https://github.com/metercai/agentmail) 的工具链完成不同 Agent 系统的集成，实现异构多 Agent 间的类人会话与协作。
 
 ---
 
@@ -66,6 +69,8 @@ amail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决
 - 原始快照 — 可选保存原始邮件，便于后续挖掘和审计回溯
 
 **协作：**
+- 联系人画像 — 为联系人建立动态画像，让回复更有针对性
+- 会话摘要 — 为联系人建立会话摘要，让交流井然有序 
 - 身份自述 — 对陌生人和联系人的分级 `[WHOAMI]` 指令邮件响应，利于角色发现
 - A2A 看板 — 流程视图 + 任务依赖 + 责任人追溯，一目了然
 - A2A 任务引擎 — 指令流 + 会话流 + 通知流，事件驱动自主协作
