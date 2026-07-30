@@ -11,7 +11,7 @@
 
 ## 1. What is amail-gateway
 
-amail-gateway is a lightweight, high-performance Rust mail gateway that solves two core problems for Agent email:
+amail-gateway is a lightweight, high-performance Rust mail gateway that solves the core problems of Agent email sending and receiving:
 
 - **Inbound:** Traditional solutions rely on IMAP/POP3 polling — high latency, wasted resources. amail-gateway pushes inbound mail to Agents in real-time via Webhook. No polling required.
 - **Outbound:** A standard HTTP API lets Agents send mail with a single toolset call. Same-gateway recipients go through internal Webhook direct delivery; external addresses go through SMTP relay — fast and efficient.
