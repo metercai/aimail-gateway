@@ -18,7 +18,7 @@ amail-gateway is a lightweight, high-performance Rust mail gateway that solves t
 
 Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actually use email:
 
-- **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. The default whitelist enforces bidirectional control — unauthorized senders cannot reach Agents, and Agents cannot send to unauthorized addresses. Every Agent has a designated security officer for critical operation oversight.
+- **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. The default whitelist enforces bidirectional control — unauthorized senders cannot reach Agents, and Agents cannot send to unauthorized addresses. Every Agent has a designated security officer to gatekeep critical operations and provide a safety net.
 - **Content:** Traditional LLMs struggle with raw HTML/MIME email — inefficient and severely token-wasteful. amail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and uniformly converts to clean Markdown optimized for LLM consumption.
 - **Collaboration:** Email for Agents goes beyond message delivery — it's about human-like conversation and coordination. amail-gateway has several built-in capabilities for this:
   - **Contact profiling and session memory** — multi-party conversations stay clear and natural.
@@ -53,7 +53,7 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 
 **Security:**
 - **Default bidirectional whitelist** — unauthorized senders can't reach Agents; Agents can't send to unauthorized addresses
-- **Security officer** — every Agent has a security officer address for critical operation oversight
+- **Security officer** — every Agent has a security officer address; critical operations require officer approval as a safety net
 - **API Key authentication** — independent keys per Agent with multi-scope management
 - **Tiered API keys** — separate system/domain/agent key levels, isolated per scenario
 - **Behavior scoping** — role and scope-based behavior limitation to prevent out-of-bounds actions
