@@ -7,7 +7,7 @@ use std::fs;
 
 use amail_base::core::cli::daemon;
 use amail_base::core::cli::{cmd_status, cmd_stop, init_tracing, Cli, Commands};
-use amail_base::core::errors::AppResult;
+use amail_base::core::errors::{AppError, AppResult};
 
 pub use amail_base::core::config::Config;
 pub use amail_base::core::email::factory::{AttachmentFactory, EmailFactory};
@@ -19,6 +19,12 @@ pub use server::Server;
 async fn main() -> AppResult<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
+
+    // ── Test config mode: validate & exit ──────────────────────────
+    if cli.test_config {
+        return cmd_test_config(&cli);
+    }
+
     match cli.command.as_ref().unwrap_or(&Commands::Start) {
         Commands::Start => cmd_start(&cli).await,
         Commands::Stop => cmd_stop(&cli.pid_file),
@@ -108,4 +114,28 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     let _ = fs::remove_file(&cli.pid_file);
 
     result
+}
+
+// ── Test config ────────────────────────────────────────────────────────
+
+fn cmd_test_config(cli: &Cli) -> AppResult<()> {
+    let config_path = cli.config.to_string_lossy();
+    eprintln!("Testing configuration: {}", config_path);
+
+    let raw = std::fs::read_to_string(config_path.as_ref())
+        .map_err(|e| AppError::Config(format!("cannot read {}: {}", config_path, e)))?;
+
+    let config: Config = toml::from_str(&raw)
+        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
+
+    config.validate()?;
+
+    eprintln!(
+        "Config OK — hostname={}, smtp={}, http={}, storage={}",
+        config.smtp.hostname.as_deref().unwrap_or("(unset)"),
+        config.smtp.bind,
+        config.http.bind,
+        config.storage.path.display(),
+    );
+    Ok(())
 }

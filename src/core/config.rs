@@ -338,6 +338,15 @@ impl Config {
             errors.push("relay.delivery_window_secs must be > 0".to_string());
         }
 
+        // ── Required fields ──────────────────────────────────────
+        if self.smtp.hostname.is_none() {
+            errors.push(
+                "smtp.hostname is required — set the EHLO/HELO hostname for mail delivery \
+                 (e.g. smtp.hostname = \"mail.example.com\")"
+                    .to_string(),
+            );
+        }
+
         if !errors.is_empty() {
             let msg = errors.join("\n  - ");
             return Err(crate::core::errors::AppError::Config(format!(

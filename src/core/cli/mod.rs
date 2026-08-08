@@ -22,7 +22,7 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    #[arg(short = 'c', long, default_value = "config.toml")]
+    #[arg(short = 'c', long, default_value = "config.toml", global = true)]
     pub config: PathBuf,
 
     #[arg(long)]
@@ -39,6 +39,10 @@ pub struct Cli {
 
     #[arg(short = 'd', long)]
     pub daemon: bool,
+
+    /// Test configuration file for errors and exit (no server start).
+    #[arg(short = 't', long, global = true)]
+    pub test_config: bool,
 }
 
 #[derive(Subcommand)]
