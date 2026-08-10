@@ -446,12 +446,23 @@ async fn register_address(
         ));
     }
 
-    // Verify bare domain already exists under this system
+    // Verify the domain anchor exists under this system.
+    // Lookup key: non-shared → bare domain (e.g. "company.com");
+    // shared → system anchor "system_name@bare_domain" (e.g.
+    // "vfy@amail.token.tm"), derived from the address's system_name
+    // segment. Both modes resolve through the same table lookup and
+    // the same system_id equality check below — only the key differs.
+    let lookup_key = if tid.starts_with("shared-") {
+        let sys_name = local.rsplit('.').next().unwrap_or("");
+        format!("{}@{}", sys_name, bare_domain)
+    } else {
+        bare_domain.to_string()
+    };
     let domain_record = state
         .factories
         .email
         .env_factory
-        .lookup_domain_addr(bare_domain)
+        .lookup_domain_addr(&lookup_key)
         .await
         .map_err(|e| {
             (
@@ -463,16 +474,24 @@ async fn register_address(
             )
         })?
         .ok_or_else(|| {
-            (
-                StatusCode::PRECONDITION_FAILED,
-                Json(ErrorResponse {
-                    error: "Bare domain not found".to_string(),
-                    detail: Some(format!(
+            let (err, detail) = if tid.starts_with("shared-") {
+                (
+                    "System anchor not found".to_string(),
+                    Some(format!(
+                        "System anchor '{}' not found — the shared-domain system must be activated to create it",
+                        lookup_key
+                    )),
+                )
+            } else {
+                (
+                    "Bare domain not found".to_string(),
+                    Some(format!(
                         "Register domain '{}' first via POST /api/v1/admin/systems/{}/domains",
                         bare_domain, tid
                     )),
-                }),
-            )
+                )
+            };
+            (StatusCode::PRECONDITION_FAILED, Json(ErrorResponse { error: err, detail }))
         })?;
 
     if !domain_record.is_active {
@@ -485,7 +504,8 @@ async fn register_address(
         ));
     }
 
-    // The bare domain must belong to the requesting system.
+    // The anchor must belong to the requesting system (same equality
+    // check for both modes — the shared anchor is owned by its system).
     if domain_record.system_id != tid {
         return Err((
             StatusCode::FORBIDDEN,

@@ -274,16 +274,24 @@ impl Handler for ConnectionHandler {
                 .lookup_domain_addr(&full_lower),
         ) {
             Ok(Some(rec)) => {
-                // Exact match — full address is the domain record
-                // Always detect persona regardless of which path resolved the address
-                let (_base, p) = strip_persona(to);
+                // Exact match — full address is the domain record.
+                // Shared-domain system anchor (system_name@domain, 0-dot
+                // local) is a system-level mailbox, not a deliverable
+                // agent address — reject it at RCPT time.
+                let local_part = full_lower.split('@').next().unwrap_or("");
+                if rec.system_id.starts_with("shared-") && !local_part.contains('.') {
+                    return perm_fail("Recipient does not exist");
+                }
+                // Registered addresses carry no persona of their own —
+                // persona prefixes only appear on unregistered dynamic
+                // forms resolved via the fallback path below.
                 self.system_id = match self.system_id.take() {
                     None => Some(rec.system_id.clone()),
                     Some(prev) if prev == rec.system_id => Some(prev),
                     Some(prev) => Some(format!("{}|{}", prev, rec.system_id)),
                 };
                 self.domain = Some(rec.domain.clone());
-                (full_lower, p)
+                (full_lower, String::new())
             }
             Ok(None) => {
                 // Exact match failed — try stripping persona prefix
@@ -296,6 +304,14 @@ impl Handler for ConnectionHandler {
                             .lookup_domain_addr(&base_lower),
                     ) {
                         Ok(Some(rec)) => {
+                            // Same system-anchor guard on the fallback path:
+                            // an unregistered shared-domain agent address
+                            // (1-dot) strips down to the 0-dot anchor and
+                            // must be rejected, not delivered to the system.
+                            let local_part = base_lower.split('@').next().unwrap_or("");
+                            if rec.system_id.starts_with("shared-") && !local_part.contains('.') {
+                                return perm_fail("Recipient does not exist");
+                            }
                             self.system_id = match self.system_id.take() {
                                 None => Some(rec.system_id.clone()),
                                 Some(prev) if prev == rec.system_id => Some(prev),

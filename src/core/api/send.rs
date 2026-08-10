@@ -104,9 +104,22 @@ pub async fn send_email(
 
     // ── 2. Validate sender matches API key (persona-aware) ──
     let sender_raw = req.sender.as_deref().unwrap_or(&api_key.email_address);
-    // Strip persona prefix for comparison — sender may be "support.alice@agent.com"
-    // but api_key.email_address is "alice@agent.com"
-    let (sender_base, sender_persona) = strip_persona(sender_raw);
+    // Persona stripping is mode-dependent. Non-shared: "support.alice@agent.com"
+    // → base "alice@agent.com" (persona prefix). Shared-domain addresses use
+    // profile.system_name@domain — the single dot is the profile/system
+    // separator, not a persona prefix — so 0/1-dot addresses are kept whole
+    // and only 2-dot forms (persona.profile.system_name@domain) are stripped.
+    let is_shared_sender = api_key.system_id.starts_with("shared-");
+    let (sender_base, sender_persona) = if is_shared_sender {
+        let slocal = sender_raw.split('@').next().unwrap_or("");
+        if slocal.matches('.').count() >= 2 {
+            strip_persona(sender_raw)
+        } else {
+            (sender_raw.to_lowercase(), String::new())
+        }
+    } else {
+        strip_persona(sender_raw)
+    };
     if sender_base != api_key.email_address {
         return Err((
             StatusCode::FORBIDDEN,
@@ -178,7 +191,19 @@ pub async fn send_email(
         .map(|s| parse_one(s))
         .filter(|(_, e)| !e.is_empty())
         .map(|(name, email)| {
-            let (base, persona) = strip_persona(&email);
+            // Mode-dependent persona stripping (same rule as sender above):
+            // shared-domain 0/1-dot addresses are kept whole; only 2-dot
+            // forms strip the persona prefix.
+            let (base, persona) = if is_shared_sender {
+                let elocal = email.split('@').next().unwrap_or("");
+                if elocal.matches('.').count() >= 2 {
+                    strip_persona(&email)
+                } else {
+                    (email, String::new())
+                }
+            } else {
+                strip_persona(&email)
+            };
             if !persona.is_empty() {
                 persona_map.entry(base.clone()).or_insert(persona);
             }
@@ -193,7 +218,16 @@ pub async fn send_email(
         for addr in cc_list {
             let (name, raw_email) = parse_one(addr);
             if !raw_email.is_empty() {
-                let (base, persona) = strip_persona(&raw_email);
+                let (base, persona) = if is_shared_sender {
+                    let elocal = raw_email.split('@').next().unwrap_or("");
+                    if elocal.matches('.').count() >= 2 {
+                        strip_persona(&raw_email)
+                    } else {
+                        (raw_email, String::new())
+                    }
+                } else {
+                    strip_persona(&raw_email)
+                };
                 if !persona.is_empty() {
                     persona_map.entry(base.clone()).or_insert(persona);
                 }
@@ -403,7 +437,40 @@ pub async fn send_email(
         ));
     }
 
-    // ── 3a. P0: Empty whitelist → 403 ──
+    // ── 3a. Shared-domain system anchor guard ──
+    // A 0-dot address that resolves to a shared-domain system anchor
+    // (system_name@domain) is a system-level mailbox, not a deliverable
+    // agent — reject it explicitly instead of silently dropping it.
+    if is_shared_sender {
+        for recipient in &recipients {
+            let rlocal = recipient.split('@').next().unwrap_or("");
+            if rlocal.contains('.') {
+                continue;
+            }
+            if let Ok(Some(rec)) = state
+                .factories
+                .email
+                .env_factory
+                .lookup_domain_addr(recipient)
+                .await
+            {
+                if rec.system_id.starts_with("shared-") {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "invalid_recipient".to_string(),
+                            detail: Some(format!(
+                                "'{}' is a system-level address and cannot be a recipient",
+                                recipient
+                            )),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── 3b. P0: Empty whitelist → 403 ──
     let whitelist_count = match state
         .factories
         .email
@@ -462,9 +529,15 @@ pub async fn send_email(
 
     for recipient in &valid_recipients {
         let env = &state.factories.email.env_factory;
-        // Type 1: exact match on full address
+        // Type 1: exact match on full address. Shared-domain addresses are
+        // delivered internally regardless of which system owns the record —
+        // a same-domain cross-system recipient routes via its own webhook.
         match env.lookup_domain_addr(recipient).await {
-            Ok(Some(ref inner)) if inner.is_active && inner.system_id == api_key.system_id => {
+            Ok(Some(ref inner))
+                if inner.is_active
+                    && (inner.system_id == api_key.system_id
+                        || inner.system_id.starts_with("shared-")) =>
+            {
                 internal.push((
                     recipient.clone(),
                     inner.domain.clone(),
