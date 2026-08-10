@@ -206,7 +206,7 @@ pub async fn create_api_key(
                     Json(ErrorResponse {
                         error: "Invalid scope for address-level key".to_string(),
                         detail: Some(format!(
-                            "Scope '{}' is reserved for system-level keys (empty email_address). Address-level keys may only use 'send'/'agent' or 'whitelist'.",
+                            "Scope '{}' is reserved for system-level keys (empty email_address). Address-level keys may only use 'agent' or 'whitelist'.",
                             s
                         )),
                     }),
