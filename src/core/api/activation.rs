@@ -271,11 +271,39 @@ pub async fn activate_address_handler(
 
     let email_domain = email.rsplit('@').next().unwrap_or("");
     if !email_domain.is_empty() {
+        // Domain-anchor lookup mirrors register_address: non-shared keys
+        // resolve on the bare domain; shared-domain systems resolve on
+        // their system anchor (system_name@email_domain) — same table,
+        // same lookup, only the key differs.
+        let code_hash = crate::core::api::auth::sha256_hex(code);
+        let sys_id = state
+            .factories
+            .email
+            .env_factory
+            .db
+            .lookup_activation_code(&code_hash)
+            .await
+            .ok()
+            .flatten()
+            .map(|(sid, _)| sid)
+            .unwrap_or_default();
+        let lookup_key = if sys_id.starts_with("shared-") {
+            let sys_name = email
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .rsplit('.')
+                .next()
+                .unwrap_or("");
+            format!("{}@{}", sys_name, email_domain)
+        } else {
+            email_domain.to_string()
+        };
         let has_domain = state
             .factories
             .email
             .env_factory
-            .lookup_domain_addr(email_domain)
+            .lookup_domain_addr(&lookup_key)
             .await
             .map(|r| r.is_some())
             .unwrap_or(false);
