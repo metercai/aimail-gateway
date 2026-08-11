@@ -2,7 +2,8 @@
 
 use axum::{
     extract::{Extension, State},
-    response::Json,
+    http::header,
+    response::{IntoResponse, Json, Response},
 };
 
 use crate::core::api::types::HttpState;
@@ -13,7 +14,7 @@ use crate::core::storage::ApiKeyRecord;
 pub async fn whoami(
     Extension(key): Extension<ApiKeyRecord>,
     State(state): State<HttpState>,
-) -> Json<serde_json::Value> {
+) -> Response {
     let scope_name = key
         .scopes
         .first()
@@ -40,7 +41,7 @@ pub async fn whoami(
         (String::new(), String::new(), String::new())
     };
 
-    Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         "scope": scope_name,
         "system_id": key.system_id,
         "email": key.email_address,
@@ -49,5 +50,14 @@ pub async fn whoami(
         "manager_address": manager_address,
         "agent_signature": agent_signature,
         "agent_persona": agent_persona,
-    }))
+    }));
+    let mut resp = body.into_response();
+    // Authentication responses must never be cached — a cached 200 would
+    // let the SPA bypass session validation after the key is revoked or
+    // the database is rebuilt.
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    resp
 }
