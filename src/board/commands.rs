@@ -10,7 +10,6 @@ use crate::core::errors::AppResult;
 use chrono::Utc;
 use rusqlite::Connection;
 use serde_json::json;
-use std::collections::HashMap;
 
 /// Execute a single A2A command.
 pub fn execute_command(
@@ -340,44 +339,13 @@ fn handle_unblock(
     Ok(ok_response(Some(task)))
 }
 
-pub fn do_heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()> {
-    let mut task = db::get_task(conn, task_id)?;
-    if task.assignee != actor {
-        return Err(crate::core::errors::AppError::Forbidden(
-            "only assignee can heartbeat".to_string(),
-        ));
-    }
-    if task.status == TaskStatus::Ready {
-        task.status = TaskStatus::Running;
-        db::update_task(conn, &task)?;
-    } else if task.status != TaskStatus::Running {
-        return Err(crate::core::errors::AppError::BadRequest(format!(
-            "heartbeat invalid for task status: {}",
-            task.status
-        )));
-    }
-    db::touch_task(conn, task_id)?;
-    db::insert_event(
-        conn,
-        &TaskEvent {
-            id: 0,
-            task_id: task_id.to_string(),
-            event_type: "heartbeat".to_string(),
-            actor: actor.to_string(),
-            payload: None,
-            created_at: now(),
-        },
-    )?;
-    Ok(())
-}
-
 fn handle_heartbeat(
     conn: &Connection,
     cmd: &A2aCommand,
     sender: &str,
 ) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    do_heartbeat(conn, &task_id, sender)?;
+    crate::board::awareness::heartbeat(conn, &task_id, sender)?;
     Ok(ok_response(None))
 }
 
@@ -599,20 +567,7 @@ fn handle_output(
 
 fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
-    let task = db::get_task(conn, &task_id)?;
-
-    // Collect parent summaries
-    let parent_summaries: Vec<serde_json::Value> = task
-        .parent_ids
-        .iter()
-        .filter_map(|pid| {
-            db::list_tasks(conn, &task.board_id, None, None)
-                .ok()?
-                .into_iter()
-                .find(|t| t.short_id == *pid)
-                .map(|p| json!({"short_id": p.short_id, "title": p.title, "summary": p.summary}))
-        })
-        .collect();
+    let (task, parent_summaries) = crate::board::awareness::get_task(conn, &task_id)?;
 
     let mut resp = ok_response(Some(task));
     if !parent_summaries.is_empty() {
@@ -636,7 +591,7 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
         .params
         .as_ref()
         .and_then(|p| p.get("assignee").and_then(|v| v.as_str()));
-    let tasks = db::list_tasks(conn, board_id, status, assignee)?;
+    let tasks = crate::board::awareness::list_tasks(conn, board_id, status, assignee)?;
     let task_list: Vec<serde_json::Value> = tasks
         .iter()
         .map(|t| {
@@ -650,26 +605,13 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     Ok(data_response(json!({"tasks": task_list})))
 }
 
-pub fn do_roles(conn: &Connection) -> AppResult<HashMap<String, Vec<String>>> {
-    let mut stmt = conn.prepare("SELECT role, verb FROM role_permissions ORDER BY role, verb")?;
-    let rows: Vec<(String, String)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .filter_map(|r| r.ok())
-        .collect();
-    let mut map = HashMap::new();
-    for (role, verb) in rows {
-        map.entry(role).or_insert_with(Vec::new).push(verb);
-    }
-    Ok(map)
-}
-
 fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
     let _board_id = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let roles = do_roles(conn)?;
+    let roles = crate::board::awareness::list_roles(conn)?;
     let role_names: Vec<String> = roles.keys().cloned().collect();
     tracing::info!("[a2a_board] roles: {:?}", role_names);
     Ok(data_response(json!({"roles": roles})))
@@ -683,39 +625,10 @@ fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<Command
         .ok_or_else(|| {
             crate::core::errors::AppError::BadRequest("board_id required".to_string())
         })?;
-    let board = db::get_board(conn, board_id)?;
-    let tasks = db::list_tasks(conn, board_id, None, None)?;
+    let status = crate::board::awareness::board_status(conn, board_id)?;
 
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for t in &tasks {
-        groups
-            .entry(t.status.to_string())
-            .or_default()
-            .push(t.short_id.clone());
-    }
-    let keys = [
-        "Ready",
-        "Running",
-        "Reviewing",
-        "Done",
-        "Blocked",
-        "Cancelled",
-    ];
-    let mut pipeline = serde_json::Map::new();
-    for k in &keys {
-        let list = groups.remove(*k).unwrap_or_default();
-        pipeline.insert(k.to_string(), json!({"count": list.len(), "tasks": list}));
-    }
-
-    tracing::info!(
-        "[a2a_board] board_status: board={} status={:?}",
-        board.short_id,
-        board.status
-    );
-    Ok(data_response(json!({
-        "board": {"id": board.id, "short_id": board.short_id, "status": board.status.to_string()},
-        "pipeline": pipeline
-    })))
+    tracing::info!("[a2a_board] board_status: board={}", board_id);
+    Ok(data_response(status))
 }
 
 fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
@@ -724,7 +637,7 @@ fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandRespo
         .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let members = db::list_members(conn, board_id)?;
+    let members = crate::board::awareness::list_members(conn, board_id, None)?;
     let member_list: Vec<serde_json::Value> = members
         .iter()
         .map(|m| {

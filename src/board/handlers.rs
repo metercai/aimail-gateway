@@ -1,4 +1,9 @@
-//! Board handlers — Bearer token auth for member-specific access
+//! Board HTTP API handlers — entry point only.
+//! Auth (Bearer member token) lives here; all business logic delegates
+//! to the shared awareness layer (same implementation as the
+//! email-command path in `commands.rs`).
+
+use crate::board::awareness;
 use crate::board::db;
 use crate::core::api::types::HttpState;
 use axum::extract::{Path, Query, State};
@@ -41,7 +46,7 @@ pub async fn handle_list_tasks(
     let status_filter = query.get("status").map(|s| s.as_str());
     let assignee_filter = query.get("assignee").map(|a| a.as_str());
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::list_tasks(&conn, &board_id, status_filter, assignee_filter) {
+        Ok(conn) => match awareness::list_tasks(&conn, &board_id, status_filter, assignee_filter) {
             Ok(tasks) => Ok(Json(json!({"status": "ok", "tasks": tasks}))),
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -70,15 +75,8 @@ pub async fn handle_list_members(
     }
     let email = query.get("email").map(|v| v.as_str());
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::list_members(&conn, &board_id) {
-            Ok(members) => {
-                let filtered: Vec<_> = if let Some(e) = email {
-                    members.into_iter().filter(|m| m.email == e).collect()
-                } else {
-                    members
-                };
-                Ok(Json(json!({"status": "ok", "members": filtered})))
-            }
+        Ok(conn) => match awareness::list_members(&conn, &board_id, email) {
+            Ok(members) => Ok(Json(json!({"status": "ok", "members": members}))),
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{:?}", e)})),
@@ -104,7 +102,7 @@ pub async fn handle_list_roles(
         ));
     }
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::get_role_permissions(&conn, &board_id) {
+        Ok(conn) => match awareness::list_roles(&conn) {
             Ok(roles) => Ok(Json(json!({"status": "ok", "roles": roles}))),
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -131,8 +129,14 @@ pub async fn handle_get_task(
         ));
     }
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::get_task(&conn, &task_id) {
-            Ok(task) => Ok(Json(json!({"status": "ok", "task": task}))),
+        Ok(conn) => match awareness::get_task(&conn, &task_id) {
+            Ok((task, parent_summaries)) => {
+                let mut body = json!({"status": "ok", "task": task});
+                if !parent_summaries.is_empty() {
+                    body["parent_summaries"] = json!(parent_summaries);
+                }
+                Ok(Json(body))
+            }
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{:?}", e)})),
@@ -151,19 +155,23 @@ pub async fn handle_post_heartbeat(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
-        ));
-    }
+    // Bearer token identifies the member → member email is the heartbeat actor.
+    let actor = match verify_board_token(&headers, &s, &board_id) {
+        Some(email) => email,
+        None => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error":"invalid token"})),
+            ))
+        }
+    };
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::update_task_updated_at(&conn, &task_id) {
+        Ok(conn) => match awareness::heartbeat(&conn, &task_id, &actor) {
             Ok(_) => Ok(Json(
                 json!({"status": "ok", "message": "heartbeat recorded"}),
             )),
             Err(e) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::FORBIDDEN,
                 Json(json!({"error": format!("{:?}", e)})),
             )),
         },
@@ -187,8 +195,12 @@ pub async fn handle_board_status(
         ));
     }
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match db::get_board(&conn, &board_id) {
-            Ok(board) => Ok(Json(json!({"status": "ok", "board": board}))),
+        Ok(conn) => match awareness::board_status(&conn, &board_id) {
+            Ok(status) => Ok(Json(json!({
+                "status": "ok",
+                "board": status["board"],
+                "pipeline": status["pipeline"],
+            }))),
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("{:?}", e)})),
