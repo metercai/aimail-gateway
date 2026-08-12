@@ -13,7 +13,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use tracing::info;
+use tracing::{info, warn};
+use crate::core::errors::AppError;
 
 use crate::core::api::activation::activate_address_handler;
 use crate::core::api::auth::{
@@ -185,6 +186,13 @@ async fn rotate_own_key(
             Json(ErrorResponse {
                 error: "API key not found".to_string(),
                 detail: None,
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+                detail: Some(e.to_string()),
             }),
         )),
         Err(e) => Err((
@@ -557,6 +565,23 @@ async fn register_address(
                 domain = %bare_domain,
                 "Agent address registered"
             );
+            // Auto-create bidirectional whitelist: agent <-> manager
+            if let Some(manager) = req.manager_address.as_deref() {
+                if let Err(e) = state
+                    .factories
+                    .email
+                    .env_factory
+                    .create_whitelist_entry(
+                        &req.email,
+                        "all",
+                        manager,
+                        Some("Agent <-> Manager (auto-created)"),
+                    )
+                    .await
+                {
+                    warn!(operation = "auto_whitelist_failed", email = %req.email, error = %e);
+                }
+            }
             let resp: SystemDomainResponse = record.into();
 
             if query.generate_code {
@@ -606,6 +631,40 @@ async fn register_address(
                     })),
                 ))
             }
+        }
+        Err(e) if matches!(&e, AppError::Conflict(_)) => {
+            // Address already registered — idempotent sync of manager meta
+            // and bidirectional whitelist (register retries are safe)
+            if let Some(manager) = req.manager_address.as_deref() {
+                let _ = state
+                    .factories
+                    .email
+                    .env_factory
+                    .db
+                    .upsert_domain_addr_meta(&req.email, &tid, Some(manager), None, None)
+                    .await;
+                if let Err(e2) = state
+                    .factories
+                    .email
+                    .env_factory
+                    .create_whitelist_entry(
+                        &req.email,
+                        "all",
+                        manager,
+                        Some("Agent <-> Manager (auto-created)"),
+                    )
+                    .await
+                {
+                    warn!(operation = "auto_whitelist_failed", email = %req.email, error = %e2);
+                }
+            }
+            Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "already_exists".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            ))
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
