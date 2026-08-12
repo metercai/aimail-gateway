@@ -238,10 +238,15 @@ pub(crate) async fn cascade_delete_attachment(
 /// Cascade-delete email and all associated data after completion: revoke permissions,
 /// delete attachment files, MIME copies, metadata, and the email record itself.
 /// Shared attachments: only the mail_id reference is removed (file stays for other emails).
-pub(crate) async fn cleanup_completed_email(
+/// Delete an email together with its attachments (files, MIME copies,
+/// references) using the shared cascade logic. Also deletes the email
+/// record itself.
+///
+/// Public so the advanced edition's product-release path reuses the base
+/// deletion semantics instead of re-implementing them.
+pub async fn cleanup_completed_email(
     attachment_factory: &AttachmentFactory,
     email_factory: &EmailFactory,
-    _config: &Config,
     record: &EmailRecord,
 ) {
     // Parse attachment IDs from the record's JSON field

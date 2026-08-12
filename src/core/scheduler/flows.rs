@@ -43,7 +43,7 @@ async fn finalize_after_delivery(
         if let Err(e) = email_factory.complete(&record.id).await {
             error!(email_id = %record.id, %e, "Failed to mark completed");
         } else {
-            cleanup_completed_email(attachment_factory, email_factory, config, record).await;
+            cleanup_completed_email(attachment_factory, email_factory, record).await;
         }
     }
 }
@@ -87,7 +87,7 @@ pub(crate) async fn handle_overlimit(
     match email_factory.complete(&record.id).await {
         Ok(Some(_)) => {
             info!(email_id = %record.id, "Overlimit email marked completed");
-            cleanup_completed_email(attachment_factory, email_factory, config, record).await;
+            cleanup_completed_email(attachment_factory, email_factory, record).await;
         }
         Ok(None) => warn!(email_id = %record.id, "Overlimit email not found (already processed?)"),
         Err(e) => error!(email_id = %record.id, %e, "Failed to mark overlimit email as completed"),
@@ -158,7 +158,7 @@ pub(crate) async fn periodic_inspection(
         if let Err(e) = email_factory.complete(&record.id).await {
             error!(email_id = %record.id, %e, "Failed to mark exhausted retry email as completed");
         } else {
-            cleanup_completed_email(attachment_factory, email_factory, config, record).await;
+            cleanup_completed_email(attachment_factory, email_factory, record).await;
         }
         return;
     }
@@ -267,7 +267,7 @@ pub(crate) async fn immediate_forward(
         if let Err(e) = email_factory.complete(&record.id).await {
             error!(email_id = %record.id, %e, "Failed to mark completed");
         } else {
-            cleanup_completed_email(attachment_factory, email_factory, config, record).await;
+            cleanup_completed_email(attachment_factory, email_factory, record).await;
         }
         return;
     }
@@ -440,7 +440,6 @@ pub(crate) async fn process_expired_attachments(
                         cleanup_completed_email(
                             attachment_factory,
                             email_factory,
-                            config,
                             &email_record,
                         )
                         .await;

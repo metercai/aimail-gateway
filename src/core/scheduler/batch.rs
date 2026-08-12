@@ -121,7 +121,7 @@ pub(crate) async fn process_batch(
                     if let Err(e) = email_factory.complete(&record.id).await {
                         error!(operation="finalize_expired_failed", email_id = %record.id, %e, "Failed to finalize expired delivered email");
                     } else {
-                        cleanup_completed_email(attachment_factory, email_factory, config, record)
+                        cleanup_completed_email(attachment_factory, email_factory, record)
                             .await;
                     }
                 }
