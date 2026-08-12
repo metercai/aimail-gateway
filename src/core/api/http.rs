@@ -195,13 +195,6 @@ async fn rotate_own_key(
                 detail: Some(e.to_string()),
             }),
         )),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-                detail: Some(e.to_string()),
-            }),
-        )),
     }
 }
 
