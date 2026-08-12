@@ -622,44 +622,54 @@ impl InboundInterceptor for A2aInterceptor {
 
             if let Some(bid) = board_in_to {
                 let subject_lower = subject.to_lowercase();
-                // [Confirm] plan v{N}  or  [Confirm] criteria v{N}
-                if let Some(rest) = subject_lower.strip_prefix("[confirm] ") {
-                    let rest = rest.trim();
-                    if let Some((_board, params)) = rest.split_once(' ') {
-                        let params = params.trim();
-                        if let Some((type_, ver)) = params.split_once(' ') {
-                            let ver = ver.trim_start_matches('v');
-                            if let Ok(bconn) = db::open_board_db(&self.storage_path, &bid) {
-                                if type_ == "plan" {
-                                    let now = chrono::Utc::now().to_rfc3339();
-                                    let body = payload["body"].as_str().unwrap_or("");
-                                    bconn.execute(
-                                        "UPDATE boards SET plan_version = ?1, plan_text = ?2, plan_confirmed_at = ?3 WHERE id = ?4",
-                                        rusqlite::params![ver, body, now, bid],
-                                    ).ok();
-                                    tracing::info!(
-                                        "[a2a_board] plan approved: board={} version={}",
-                                        bid,
-                                        ver
-                                    );
-                                } else if type_ == "criteria" {
-                                    let now = chrono::Utc::now().to_rfc3339();
-                                    let body = payload["body"].as_str().unwrap_or("");
-                                    bconn.execute(
-                                        "UPDATE boards SET criteria_version = ?1, criteria_text = ?2, criteria_confirmed_at = ?3 WHERE id = ?4",
-                                        rusqlite::params![ver, body, now, bid],
-                                    ).ok();
-                                    tracing::info!(
-                                        "[a2a_board] criteria approved: board={} version={}",
-                                        bid,
-                                        ver
-                                    );
-                                } else if type_ == "output" {
+                // [Confirm] plan v{N} / [Confirm] criteria v{N} / [Confirm] output {board}
+                // (documented 2-segment form) and [Confirm] {board} {type} v{N} (3-segment)
+                if let Some((kind, after, _board_token)) = parse_confirm(&subject_lower) {
+                    if let Ok(bconn) = db::open_board_db(&self.storage_path, &bid) {
+                        // Owner-only approval (documented: [Confirm] is an owner command)
+                        let is_owner = db::get_member(&bconn, &bid, &sender)
+                            .ok()
+                            .flatten()
+                            .map(|m| m.role == "owner")
+                            .unwrap_or(false);
+                        if !is_owner {
+                            tracing::warn!(
+                                "[a2a_board] [Confirm] rejected: sender {} is not an owner",
+                                sender
+                            );
+                        } else {
+                            match kind {
+                                ConfirmType::Plan | ConfirmType::Criteria => {
+                                    if let Some(ver_raw) = after {
+                                        let ver = ver_raw.trim_start_matches('v');
+                                        if ver.is_empty() {
+                                            tracing::warn!(
+                                                "[a2a_board] [Confirm] {} missing version",
+                                                if kind == ConfirmType::Plan { "plan" } else { "criteria" }
+                                            );
+                                        } else {
+                                            let now = chrono::Utc::now().to_rfc3339();
+                                            let body = payload["body"].as_str().unwrap_or("");
+                                            let (sql, what) = if kind == ConfirmType::Plan {
+                                                ("UPDATE boards SET plan_version = ?1, plan_text = ?2, plan_confirmed_at = ?3 WHERE id = ?4", "plan")
+                                            } else {
+                                                ("UPDATE boards SET criteria_version = ?1, criteria_text = ?2, criteria_confirmed_at = ?3 WHERE id = ?4", "criteria")
+                                            };
+                                            bconn.execute(sql, rusqlite::params![ver, body, now, bid]).ok();
+                                            tracing::info!(
+                                                "[a2a_board] {} approved: board={} version={}",
+                                                what, bid, ver
+                                            );
+                                        }
+                                    }
+                                }
+                                ConfirmType::Output => {
                                     let now = chrono::Utc::now().to_rfc3339();
                                     bconn.execute(
                                         "UPDATE boards SET status = ?1, completed_at = ?2 WHERE id = ?3",
                                         rusqlite::params!["completed", now, bid],
-                                    ).ok();
+                                    )
+                                    .ok();
                                     tracing::info!(
                                         "[a2a_board] output confirmed: board={} status=completed",
                                         bid
@@ -791,4 +801,88 @@ pub fn register(
     email_factory
         .env_factory
         .register_interceptor(a2a as std::sync::Arc<dyn InboundInterceptor>);
+}
+
+/// Kind of a `[Confirm]` approval email (documented in A2A-BOARD-GUIDE).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmType {
+    Plan,
+    Criteria,
+    Output,
+}
+
+/// Parse a `[Confirm]` subject into (kind, after, board_token).
+///
+/// Accepts the documented forms:
+///   - `[confirm] plan v2` / `[confirm] criteria v1` (board from TO address)
+///   - `[confirm] output web-redesign`
+/// and the legacy 3-segment form `[confirm] {board} {type} v{N}`.
+///
+/// Returns `None` when no confirm type token is present.
+fn parse_confirm(subject: &str) -> Option<(ConfirmType, Option<String>, Option<String>)> {
+    let rest = subject.trim().strip_prefix("confirm")?.trim();
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let type_idx = tokens
+        .iter()
+        .position(|t| matches!(*t, "plan" | "criteria" | "output"))?;
+    let kind = match tokens[type_idx] {
+        "plan" => ConfirmType::Plan,
+        "criteria" => ConfirmType::Criteria,
+        _ => ConfirmType::Output,
+    };
+    // 3-segment form: a board token precedes the type word.
+    let board = if type_idx == 1 {
+        Some(tokens[0].to_string())
+    } else {
+        None
+    };
+    let after = tokens.get(type_idx + 1).map(|s| s.to_string());
+    Some((kind, after, board))
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use super::*;
+
+    #[test]
+    fn parses_documented_plan_form() {
+        let (kind, after, board) = parse_confirm("confirm plan v2").unwrap();
+        assert_eq!(kind, ConfirmType::Plan);
+        assert_eq!(after.as_deref(), Some("v2"));
+        assert_eq!(board, None);
+    }
+
+    #[test]
+    fn parses_documented_criteria_form() {
+        let (kind, after, board) = parse_confirm("confirm criteria v1").unwrap();
+        assert_eq!(kind, ConfirmType::Criteria);
+        assert_eq!(after.as_deref(), Some("v1"));
+        assert_eq!(board, None);
+    }
+
+    #[test]
+    fn parses_documented_output_form() {
+        let (kind, after, board) = parse_confirm("confirm output web-redesign").unwrap();
+        assert_eq!(kind, ConfirmType::Output);
+        assert_eq!(after.as_deref(), Some("web-redesign"));
+        assert_eq!(board, None);
+    }
+
+    #[test]
+    fn parses_legacy_three_segment_form() {
+        let (kind, after, board) = parse_confirm("confirm web-redesign plan v2").unwrap();
+        assert_eq!(kind, ConfirmType::Plan);
+        assert_eq!(after.as_deref(), Some("v2"));
+        assert_eq!(board.as_deref(), Some("web-redesign"));
+    }
+
+    #[test]
+    fn rejects_subject_without_confirm_type() {
+        assert!(parse_confirm("confirm hello world").is_none());
+        assert!(parse_confirm("plan v2").is_none());
+        assert!(parse_confirm("").is_none());
+    }
 }

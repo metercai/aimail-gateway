@@ -748,12 +748,16 @@ fn handle_init(
     let short_id = &notifier.board_short_id;
     let ts = now();
 
+    // refresh keeps the existing description when none is provided
+    // (INSERT OR REPLACE would otherwise overwrite it with NULL).
+    let existing_description = db::get_board(conn, board_id).ok().and_then(|b| b.description);
     let description = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("description"))
         .and_then(|v| v.as_str())
-        .map(String::from);
+        .map(String::from)
+        .or(existing_description);
     let board = Board {
         id: board_id.clone(),
         short_id: short_id.clone(),
