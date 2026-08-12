@@ -374,7 +374,7 @@ mod tests {
             id: "a3f8c21b9d4e73b2f0c1".to_string(),
             short_id: "pgmig001".to_string(),
             board_email: "pgmig001.a2a@test.io".to_string(),
-            description: None,
+            goal: None,
             status: BoardStatus::Active,
             output_task_id: None,
             plan_version: None,
@@ -383,7 +383,6 @@ mod tests {
             criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
-            gateway_url: "".to_string(),
             created_at: "2026-07-01T00:00:00Z".to_string(),
             completed_at: None,
         }

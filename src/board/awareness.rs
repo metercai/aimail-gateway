@@ -49,7 +49,7 @@ pub fn board_status(conn: &Connection, board_id: &str) -> AppResult<Value> {
             "id": board.id,
             "short_id": board.short_id,
             "status": board.status.to_string(),
-            "description": board.description,
+            "goal": board.goal,
             "plan_version": board.plan_version,
             "plan_confirmed_at": board.plan_confirmed_at,
             "output_task_id": board.output_task_id,
@@ -163,7 +163,7 @@ mod tests {
             id: board_id.to_string(),
             short_id: "awt".to_string(),
             board_email: "awt.a2a@test.io".to_string(),
-            description: Some("awareness test board".to_string()),
+            goal: Some("awareness test board".to_string()),
             status: BoardStatus::Active,
             output_task_id: None,
             plan_version: Some("v3".to_string()),
@@ -172,7 +172,6 @@ mod tests {
             criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
-            gateway_url: "".to_string(),
             created_at: now(),
             completed_at: None,
         };
@@ -238,7 +237,7 @@ mod tests {
         let v = board_status(&conn, &board_id).unwrap();
         // board section: goal / status present
         assert_eq!(v["board"]["short_id"], "awt");
-        assert_eq!(v["board"]["description"], "awareness test board");
+        assert_eq!(v["board"]["goal"], "awareness test board");
         assert_eq!(v["board"]["status"], "active");
         // pipeline: running 2 (with assignees), blocked 1
         assert_eq!(v["pipeline"]["running"]["count"], 2);

@@ -231,7 +231,6 @@ impl InboundInterceptor for A2aInterceptor {
                 let orch_domain = orch_email.split('@').nth(1).unwrap_or("");
                 let board_id = crate::board::models::derive_board_id(&short_id, orch_domain);
                 let board_email = format!("{}.a2a@{}", short_id, orch_domain);
-                let gateway_url = self.gateway_url.clone();
 
                 // Resolve orchestrator system for quota attribution
                 let orch_system = self
@@ -259,7 +258,7 @@ impl InboundInterceptor for A2aInterceptor {
                         id: board_id.clone(),
                         short_id: short_id.clone(),
                         board_email: board_email.clone(),
-                        description: if description.is_empty() {
+                        goal: if description.is_empty() {
                             None
                         } else {
                             Some(description.clone())
@@ -272,7 +271,6 @@ impl InboundInterceptor for A2aInterceptor {
                         criteria_version: None,
                         criteria_text: None,
                         criteria_confirmed_at: None,
-                        gateway_url: gateway_url.clone(),
                         created_at: chrono::Utc::now().to_rfc3339(),
                         completed_at: None,
                     };
@@ -524,7 +522,7 @@ impl InboundInterceptor for A2aInterceptor {
                         id: board_id.clone(),
                         short_id: short_id.clone(),
                         board_email: format!("{}.a2a@{}", short_id, board_domain),
-                        description: None,
+                        goal: None,
                         status: BoardStatus::Active,
                         output_task_id: None,
                         plan_version: None,
@@ -533,7 +531,6 @@ impl InboundInterceptor for A2aInterceptor {
                         criteria_version: None,
                         criteria_text: None,
                         criteria_confirmed_at: None,
-                        gateway_url: self.gateway_url.clone(),
                         created_at: ts,
                         completed_at: None,
                     };

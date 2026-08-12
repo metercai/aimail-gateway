@@ -7,7 +7,7 @@ pub struct Board {
     pub id: String,
     pub short_id: String,
     pub board_email: String,
-    pub description: Option<String>,
+    pub goal: Option<String>,
     pub status: BoardStatus,
     pub output_task_id: Option<String>,
     pub plan_version: Option<String>,
@@ -16,7 +16,6 @@ pub struct Board {
     pub criteria_version: Option<String>,
     pub criteria_text: Option<String>,
     pub criteria_confirmed_at: Option<String>,
-    pub gateway_url: String,
     pub created_at: String,
     pub completed_at: Option<String>,
 }

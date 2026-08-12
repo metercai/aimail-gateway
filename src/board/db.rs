@@ -26,7 +26,7 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
             id TEXT PRIMARY KEY,
             short_id TEXT UNIQUE NOT NULL,
             board_email TEXT NOT NULL,
-            description TEXT,
+            goal TEXT,
             status TEXT DEFAULT 'active',
             output_task_id TEXT,
             plan_version TEXT,
@@ -35,7 +35,6 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
             criteria_version TEXT,
             criteria_text TEXT,
             criteria_confirmed_at TEXT,
-            gateway_url TEXT,
             created_at TEXT,
             completed_at TEXT
         );
@@ -91,15 +90,14 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
 
 pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
     conn.execute(
-        "INSERT OR REPLACE INTO boards (id, short_id, board_email, description, status, gateway_url, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR REPLACE INTO boards (id, short_id, board_email, goal, status, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             board.id,
             board.short_id,
             board.board_email,
-            board.description,
+            board.goal,
             board.status.to_string(),
-            board.gateway_url,
             board.created_at,
         ],
     )?;
@@ -117,8 +115,8 @@ pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
 
 pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
     conn.query_row(
-        "SELECT id, short_id, board_email, description, status, output_task_id, plan_version,
-                plan_text, plan_confirmed_at, criteria_version, criteria_text, criteria_confirmed_at, gateway_url, created_at, completed_at
+        "SELECT id, short_id, board_email, goal, status, output_task_id, plan_version,
+                plan_text, plan_confirmed_at, criteria_version, criteria_text, criteria_confirmed_at, created_at, completed_at
          FROM boards WHERE id = ?1",
         params![board_id],
         |row| {
@@ -126,7 +124,7 @@ pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
                 id: row.get(0)?,
                 short_id: row.get(1)?,
                 board_email: row.get(2)?,
-                description: row.get(3)?,
+                goal: row.get(3)?,
                 status: match row.get::<_, String>(4)?.as_str() {
                     "archived" => BoardStatus::Archived,
                     "awaiting_owner" => BoardStatus::AwaitingOwner,
@@ -140,9 +138,8 @@ pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
                 criteria_version: row.get(9)?,
                 criteria_text: row.get(10)?,
                 criteria_confirmed_at: row.get(11)?,
-                gateway_url: row.get(12)?,
-                created_at: row.get(13)?,
-                completed_at: row.get(14)?,
+                created_at: row.get(12)?,
+                completed_at: row.get(13)?,
             })
         },
     )
@@ -153,7 +150,7 @@ pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
     conn.execute(
         "UPDATE boards SET status=?1, output_task_id=?2, plan_version=?3, plan_text=?4,
          plan_confirmed_at=?5, criteria_version=?6, criteria_text=?7,
-         criteria_confirmed_at=?8, completed_at=?9, description=?10
+         criteria_confirmed_at=?8, completed_at=?9, goal=?10
          WHERE id=?11",
         params![
             board.status.to_string(),
@@ -165,7 +162,7 @@ pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
             board.criteria_text,
             board.criteria_confirmed_at,
             board.completed_at,
-            board.description,
+            board.goal,
             board.id,
         ],
     )?;
@@ -587,7 +584,7 @@ mod tests {
             id: board_id.to_string(),
             short_id: "pgmig001".to_string(),
             board_email: "pgmig001.a2a@test.io".to_string(),
-            description: None,
+            goal: None,
             status: BoardStatus::Active,
             output_task_id: None,
             plan_version: None,
@@ -596,7 +593,6 @@ mod tests {
             criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
-            gateway_url: "http://localhost:8080".to_string(),
             created_at: "2026-07-01T00:00:00Z".to_string(),
             completed_at: None,
         };

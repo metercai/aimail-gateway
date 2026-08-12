@@ -748,21 +748,21 @@ fn handle_init(
     let short_id = &notifier.board_short_id;
     let ts = now();
 
-    // refresh keeps the existing description when none is provided
+    // refresh keeps the existing goal when none is provided
     // (INSERT OR REPLACE would otherwise overwrite it with NULL).
-    let existing_description = db::get_board(conn, board_id).ok().and_then(|b| b.description);
+    let existing_goal = db::get_board(conn, board_id).ok().and_then(|b| b.goal);
     let description = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("description"))
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or(existing_description);
+        .or(existing_goal);
     let board = Board {
         id: board_id.clone(),
         short_id: short_id.clone(),
         board_email: notifier.board_email.clone(),
-        description,
+        goal: description,
         status: BoardStatus::Active,
         output_task_id: None,
         plan_version: None,
@@ -771,7 +771,6 @@ fn handle_init(
         criteria_version: None,
         criteria_text: None,
         criteria_confirmed_at: None,
-        gateway_url: notifier.board_id.clone(),
         created_at: ts.clone(),
         completed_at: None,
     };
@@ -1048,7 +1047,7 @@ mod tests {
             id: board_id.to_string(),
             short_id: "test".to_string(),
             board_email: "test.a2a@test.io".to_string(),
-            description: Some("test board".to_string()),
+            goal: Some("test board".to_string()),
             status: BoardStatus::Active,
             output_task_id: None,
             plan_version: None,
@@ -1057,7 +1056,6 @@ mod tests {
             criteria_version: None,
             criteria_text: None,
             criteria_confirmed_at: None,
-            gateway_url: "".to_string(),
             created_at: now(),
             completed_at: None,
         };
