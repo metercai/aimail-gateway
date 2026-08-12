@@ -648,6 +648,64 @@ impl Handler for ConnectionHandler {
             .cloned()
             .collect();
 
+        // ── Suspended-system bypass ─────────────────────────────────
+        // A suspended (expired) system still accepts SMTP with 250 so the
+        // sender sees success, but the message is dropped: no delivery,
+        // no webhook, no processing. The sender gets an auto-reply that
+        // the address has expired.
+        if let Some(sid) = self.system_id.as_deref() {
+            let suspended = self
+                .block_on(self.email_factory.env_factory.db.system_is_active(sid))
+                .ok()
+                .flatten()
+                .map(|active| !active)
+                .unwrap_or(false);
+            if suspended {
+                let notice_id = format!("exp-{}", Uuid::new_v4());
+                let from = self
+                    .config
+                    .relay
+                    .auto_reply_from
+                    .clone()
+                    .or_else(|| self.config.admin.email.clone())
+                    .unwrap_or_else(|| "noreply@localhost".to_string());
+                let recipients_json = serde_json::json!({ "to": [sender], "cc": [] }).to_string();
+                let body = format!(
+                    "The address you wrote to ({}) has expired and its system is suspended.\n\
+                     The message was not delivered to any recipient.\n\n\
+                     If you are the administrator, renew the product to restore service.",
+                    recipients.join(", "),
+                );
+                match self
+                    .block_on(self.email_factory.create_outbound(
+                        &notice_id,
+                        sid,
+                        &from,
+                        &recipients_json,
+                        "Address expired - not delivered",
+                        &body,
+                        None,
+                        None,
+                        None,
+                        self.config.retry.max_attempts as i32,
+                    ))
+                {
+                    Ok(_rec) => {
+                        tracing::info!(
+                            operation = "smtp_expired_bypass",
+                            email_id = %notice_id,
+                            recipients = ?recipients,
+                            "Accepted and bypassed mail for suspended system; expiry notice queued"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(operation = "smtp_expired_bypass", error = %e, "Expiry notice queue failed");
+                    }
+                }
+                return ok();
+            }
+        }
+
         let mail_uuid = Uuid::new_v4().to_string();
 
         // ── Build JSON payloads for insert_email ───────────────────
