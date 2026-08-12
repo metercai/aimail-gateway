@@ -1077,51 +1077,6 @@ pub fn api_key_row(r: &rusqlite::Row) -> rusqlite::Result<ApiKeyRecord> {
 }
 
 impl Database {
-    /// Whether a system exists and is active (suspended-system bypass).
-    pub async fn system_is_active(&self, system_id: &str) -> AppResult<Option<bool>> {
-        let sid = system_id.to_string();
-        self.call(move |conn| {
-            let v: Option<i64> = conn
-                .query_row("SELECT is_active FROM systems WHERE id = ?1", rusqlite::params![sid], |r| r.get(0))
-                .optional()?;
-            Ok(v.map(|x| x != 0))
-        }).await
-    }
-
-    /// Re-activate all API keys of a system (renewal after suspension).
-    pub async fn reactivate_keys_for_system(&self, system_id: &str) -> AppResult<i64> {
-        let sid = system_id.to_string();
-        self.call(move |conn| {
-            let n = conn.execute("UPDATE api_keys SET is_active = 1 WHERE system_id = ?1", rusqlite::params![sid])?;
-            Ok(n as i64)
-        }).await
-    }
-
-    /// Deactivate all API keys of a system (product-expiry suspend).
-    pub async fn deactivate_keys_for_system(&self, system_id: &str) -> AppResult<i64> {
-        let sid = system_id.to_string();
-        self.call(move |conn| {
-            let n = conn.execute("UPDATE api_keys SET is_active = 0 WHERE system_id = ?1 AND is_active = 1", rusqlite::params![sid])?;
-            Ok(n as i64)
-        }).await
-    }
-
-    /// Delete all system-scoped runtime data: api_keys, system_domains,
-    /// domain_addr_meta and whitelists of a system (product-expiry release).
-    pub async fn delete_domain_data_for_system(&self, system_id: &str) -> AppResult<()> {
-        let sid = system_id.to_string();
-        self.call(move |conn| {
-            conn.execute_batch(&format!(
-                "DELETE FROM api_keys WHERE system_id = '{}';
-                 DELETE FROM system_domains WHERE system_id = '{}';
-                 DELETE FROM domain_addr_meta WHERE system_id = '{}';
-                 DELETE FROM whitelists WHERE system_id = '{}';",
-                sid, sid, sid, sid
-            ))?;
-            Ok(())
-        }).await
-    }
-
     pub async fn insert_api_key(
         &self,
         system_id: &str,
