@@ -393,7 +393,11 @@ async fn register_address(
         }
     } else {
         // ── Non-shared: no dots, validate entire local-part ──
-        if dot_count != 0 {
+        // Board addresses ({short}.a2a@{domain}) are a reserved system
+        // convention — allow the ".a2a" suffix while rejecting arbitrary
+        // dotted local-parts.
+        let is_board_addr = local.ends_with(".a2a");
+        if dot_count != 0 && !is_board_addr {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -402,7 +406,13 @@ async fn register_address(
                 }),
             ));
         }
-        if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
+        if let Some(bad) = local.bytes().find(|&b| {
+            if is_board_addr && b == b'.' {
+                false
+            } else {
+                !is_atext_no_dot(b)
+            }
+        }) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
