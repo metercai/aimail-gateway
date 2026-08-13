@@ -785,6 +785,25 @@ fn handle_init(
         .ok_or_else(|| {
             crate::core::errors::AppError::BadRequest("members array required".to_string())
         })?;
+    // Hardcoded: only human (owner) can refresh board — check BEFORE
+    // any member mutation so a non-owner can never alter the member set.
+    let sender_member = db::get_member(conn, board_id, sender)?;
+    match sender_member {
+        Some(m) if m.role == "owner" => {}
+        _ => {
+            return Err(crate::core::errors::AppError::Forbidden(
+                "only human can refresh board".to_string(),
+            ))
+        }
+    }
+
+    // Existing members keep their tokens; only new members get fresh
+    // tokens (so existing credentials stay valid across refreshes).
+    let existing_tokens: std::collections::HashMap<String, String> = db::list_members(conn, &board_id)?
+        .into_iter()
+        .filter_map(|m| m.board_token.clone().map(|t| (m.email, t)))
+        .collect();
+    let mut new_members: Vec<(String, String)> = Vec::new(); // (email, token)
     for m in members_arr {
         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("worker");
@@ -793,6 +812,13 @@ fn handle_init(
             .and_then(|v| v.as_str())
             .unwrap_or(email);
         if !email.is_empty() {
+            let token = existing_tokens
+                .get(email)
+                .cloned()
+                .unwrap_or_else(db::generate_board_token);
+            if !existing_tokens.contains_key(email) {
+                new_members.push((email.to_string(), token.clone()));
+            }
             db::add_member(
                 conn,
                 &Member {
@@ -800,7 +826,7 @@ fn handle_init(
                     role: role.to_string(),
                     display_name: display_name.to_string(),
                     board_id: board_id.clone(),
-                    board_token: Some(db::generate_board_token()),
+                    board_token: Some(token),
                     joined_at: Some(ts.clone()),
                     domains: None,
                     capability_snapshot: None,
@@ -824,17 +850,6 @@ fn handle_init(
             );
         }
         tracing::info!(operation = "board_group_whitelist_refresh", board_email = %notifier.board_email, members = emails.len());
-    }
-
-    // Hardcoded: only human can refresh board
-    let sender_member = db::get_member(conn, board_id, sender)?;
-    match sender_member {
-        Some(m) if m.role == "owner" => {}
-        _ => {
-            return Err(crate::core::errors::AppError::Forbidden(
-                "only human can refresh board".to_string(),
-            ))
-        }
     }
 
     // Seed role_permissions: defaults first, then user overrides
@@ -865,7 +880,28 @@ fn handle_init(
         );
     }
 
-    notifier.notify_all(board_id, &format!("Board {} initialized", short_id));
+    // Notifications: new members get an invite (with their token and the
+    // FULL member set in X-Board-Members); everyone gets a member-list
+    // change notice (also full set incl. the new members) so recipient
+    // gateways replace their group whitelist consistently.
+    if let Ok(all_members) = db::list_members(conn, &board_id) {
+        let full_csv: String = all_members
+            .iter()
+            .map(|m| m.email.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        for (email, token) in &new_members {
+            notifier.notify_invite(
+                email,
+                token,
+                &board_id,
+                &notifier.board_email,
+                &short_id,
+                &full_csv,
+            );
+        }
+        notifier.notify_all(board_id, &format!("member list updated ({} members)", all_members.len()));
+    }
     Ok(ok_response(None))
 }
 
