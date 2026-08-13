@@ -128,8 +128,19 @@ impl Notifier {
     }
 
     fn create_email_to_all(&self, members: &[Member], subject: &str, body: &str) {
+        // Every board notification carries the current member set in
+        // X-Board-Members. Recipient gateways replace their local board
+        // group whitelist with it, so member additions AND removals
+        // propagate automatically across gateways (removed members drop
+        // out of the whitelist).
+        let member_csv: String = members
+            .iter()
+            .map(|m| m.email.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let header = format!("X-Board-Members: {};{}", self.board_email, member_csv);
         for m in members {
-            self.create_email(&m.email, subject, body, None);
+            self.create_email(&m.email, subject, body, Some(header.clone()));
         }
     }
 
