@@ -28,6 +28,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         || record.subject.contains("[Overlimit]")
         || record.subject.contains("[AmailGW]")
         || record.subject.starts_with("__amail_pong__:")
+        || record.id.starts_with("exp-")
     {
         info!(email_id = %record.id, "Suppressing recursive auto-reply — system-generated record");
         return;
