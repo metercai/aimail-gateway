@@ -288,6 +288,16 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_whitelists_lookup ON whitelists(system_id, domain_addr, direction, is_active);
 
+        -- Board group whitelist: board_email -> member addresses, built
+        -- from member invite/change notifications (X-Board-Members header).
+        -- check_whitelisted consults this to auto-allow board members.
+        CREATE TABLE IF NOT EXISTS board_whitelists (
+            board_email TEXT NOT NULL,
+            member_addr TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (board_email, member_addr)
+        );
+
         CREATE TABLE IF NOT EXISTS api_keys (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             system_id     TEXT NOT NULL,
@@ -1005,6 +1015,40 @@ impl Database {
     /// Fetches all active wildcard patterns from the whitelist table and matches
     /// `value` against them using the in-memory `WhitelistCache`. When no active
     /// entries exist for the scope, the answer is **deny** (returns `false`).
+    /// Whether `member_addr` is a member of the board `board_email`
+    /// (board group whitelist, populated by invite notifications).
+    pub async fn is_board_member(&self, board_email: &str, member_addr: &str) -> AppResult<bool> {
+        let be = board_email.to_string();
+        let ma = member_addr.to_string();
+        self.call(move |conn| {
+            let n: i64 = conn.query_row(
+                "SELECT count(*) FROM board_whitelists WHERE board_email = ?1 AND member_addr = ?2",
+                rusqlite::params![be, ma],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
+    /// Replace the member list of a board (full sync from notification).
+    pub async fn replace_board_members(&self, board_email: &str, members: &[String]) -> AppResult<usize> {
+        let be = board_email.to_string();
+        let members: Vec<String> = members.to_vec();
+        self.call(move |conn| {
+            conn.execute("DELETE FROM board_whitelists WHERE board_email = ?1", [&be])?;
+            let mut n = 0;
+            for m in &members {
+                n += conn.execute(
+                    "INSERT OR IGNORE INTO board_whitelists (board_email, member_addr) VALUES (?1, ?2)",
+                    rusqlite::params![be, m],
+                )?;
+            }
+            Ok(n)
+        })
+        .await
+    }
+
     pub async fn is_whitelisted(
         &self,
         system_id: &str,

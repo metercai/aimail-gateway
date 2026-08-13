@@ -376,6 +376,16 @@ impl EnvFactory {
                 return Ok(true);
             }
         }
+        // Board group whitelist: when either side of the exchange is a
+        // board address, board members auto-pass (no per-member whitelist
+        // storm). The list is built from member invite/change notifications
+        // (X-Board-Members header) — see board interceptor.
+        if domain_addr.contains(".a2a@") && self.db.is_board_member(domain_addr, value).await? {
+            return Ok(true);
+        }
+        if value.contains(".a2a@") && self.db.is_board_member(value, domain_addr).await? {
+            return Ok(true);
+        }
         Ok(false)
     }
 

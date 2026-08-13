@@ -648,6 +648,60 @@ impl Handler for ConnectionHandler {
             .cloned()
             .collect();
 
+        // ── Board group-whitelist learning (all delivery modes) ──────────
+        // Notifications from a board address carry
+        //   X-Board-Members: {board_email};{member_csv}
+        // Recipient gateways verify From == header board address, then update
+        // the local board-keyed group whitelist so members auto-pass SMTP /
+        // HTTP whitelist checks (no per-member whitelist storm). Learnt here,
+        // at receive time, so both push (webhook) and pull (pending) modes
+        // build the list.
+        if sender.contains(".a2a@") && subject.starts_with("[A2A]") {
+            let raw_text = String::from_utf8_lossy(&raw_data);
+            let header_val = raw_text.lines().find_map(|l| {
+                l.trim()
+                    .strip_prefix("X-Board-Members:")
+                    .map(|v| v.trim().to_string())
+            });
+            if let Some(hval) = header_val {
+                let parts: Vec<&str> = hval.splitn(2, ';').collect();
+                if parts.len() == 2 && parts[0].trim().eq_ignore_ascii_case(&sender) {
+                    let members: Vec<String> = parts[1]
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !members.is_empty() {
+                        match self
+                            .block_on(
+                                self.email_factory
+                                    .env_factory
+                                    .db
+                                    .replace_board_members(parts[0].trim(), &members),
+                            ) {
+
+                            Ok(_) => tracing::info!(
+                                operation = "board_group_whitelist",
+                                board_email = parts[0].trim(),
+                                members = members.len(),
+                                "board group whitelist learnt from inbound notification"
+                            ),
+                            Err(e) => tracing::warn!(
+                                operation = "board_group_whitelist",
+                                error = %e,
+                                "failed to learn board group whitelist"
+                            ),
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        operation = "board_group_whitelist",
+                        "member notification rejected: From != header board address"
+                    );
+                }
+            }
+        }
+
         let mail_uuid = Uuid::new_v4().to_string();
 
         // ── Build JSON payloads for insert_email ───────────────────

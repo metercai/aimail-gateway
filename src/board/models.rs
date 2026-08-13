@@ -168,9 +168,9 @@ pub struct CreateMember {
 
 // ── Helper: derive board_id from short_id + domain ────────────────────
 
-pub fn derive_board_id(short_id: &str, gateway_domain: &str) -> String {
+pub fn derive_board_id(board_email: &str) -> String {
     use sha2::{Digest, Sha256};
-    let input = format!("{}:{}", short_id.to_lowercase(), gateway_domain);
+    let input = board_email.to_lowercase();
     let hash = Sha256::digest(input.as_bytes());
     hex::encode(&hash[..10])
 }
@@ -239,10 +239,19 @@ mod sanitize_tests {
     }
 }
 
+/// Parse a board address into (short_id, board_id, domain).
+///
+/// Two layouts:
+///   non-shared:  {short_id}.a2a@{domain}
+///   shared:      {short_id}.{system_name}.a2a@{shared_domain}
+/// The board_id is a hash of the FULL address, so the shared-domain
+/// layout (which embeds the system name) yields a distinct board per
+/// system even for the same short_id — no cross-system collision.
 pub fn parse_board_email(to_addr: &str) -> Option<(String, String, String)> {
     let (local, domain) = to_addr.split_once('@')?;
-    let short_id = local.strip_suffix(".a2a")?;
-    let board_id = derive_board_id(short_id, domain);
+    let body = local.strip_suffix(".a2a")?;
+    let short_id = body.split('.').next()?;
+    let board_id = derive_board_id(to_addr);
     Some((short_id.to_string(), board_id, domain.to_string()))
 }
 
@@ -252,30 +261,47 @@ mod tests {
 
     #[test]
     fn test_derive_board_id_deterministic() {
-        let id1 = derive_board_id("pgmig001", "mail.hermes.io");
-        let id2 = derive_board_id("pgmig001", "mail.hermes.io");
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("pgmig001.a2a@mail.hermes.io");
         assert_eq!(id1, id2, "same input should produce same board_id");
         assert_eq!(id1.len(), 20, "board_id should be 20 hex chars");
     }
 
     #[test]
     fn test_derive_board_id_different_domain() {
-        let id1 = derive_board_id("pgmig001", "mail.hermes.io");
-        let id2 = derive_board_id("pgmig001", "mail.other.io");
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("pgmig001.a2a@mail.other.io");
         assert_ne!(id1, id2, "different domains should produce different board_id");
     }
 
     #[test]
     fn test_derive_board_id_different_short_id() {
-        let id1 = derive_board_id("pgmig001", "mail.hermes.io");
-        let id2 = derive_board_id("costv2", "mail.hermes.io");
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("costv2.a2a@mail.hermes.io");
         assert_ne!(id1, id2, "different short_ids should produce different board_id");
     }
 
     #[test]
     fn test_derive_board_id_length() {
-        let id = derive_board_id("test1234", "domain.com");
+        let id = derive_board_id("test1234.a2a@domain.com");
         assert_eq!(id.len(), 20, "board_id should be 10 bytes = 20 hex chars");
+    }
+
+    #[test]
+    fn test_derive_board_id_shared_domain_embeds_system_name() {
+        // Shared-domain layout: {short}.{system_name}.a2a@{shared_domain}
+        let a = derive_board_id("proj.xianlin.a2a@amail.token.tm");
+        let b = derive_board_id("proj.wguo.a2a@amail.token.tm");
+        assert_ne!(a, b, "same short_id on different shared systems must not collide");
+    }
+
+    #[test]
+    fn test_parse_board_email_shared_layout() {
+        let (short, bid, domain) =
+            parse_board_email("proj.xianlin.a2a@amail.token.tm").unwrap();
+        assert_eq!(short, "proj");
+        assert_eq!(domain, "amail.token.tm");
+        assert_eq!(bid, derive_board_id("proj.xianlin.a2a@amail.token.tm"));
     }
 
     #[test]

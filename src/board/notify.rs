@@ -63,7 +63,7 @@ impl Notifier {
         )
     }
 
-    fn create_email(&self, to: &str, subject: &str, body: &str) {
+    fn create_email(&self, to: &str, subject: &str, body: &str, headers: Option<String>) {
         let factory = match &self.email_factory {
             Some(f) => f.clone(),
             None => {
@@ -87,7 +87,16 @@ impl Notifier {
             let result = if is_internal {
                 factory
                     .create_inbound(
-                        &email_id, &sid, &sender, &to, &subject, &body, None, None, None, 3,
+                        &email_id,
+                        &sid,
+                        &sender,
+                        &to,
+                        &subject,
+                        &body,
+                        None,
+                        None,
+                        headers.as_deref(),
+                        3,
                     )
                     .await
             } else {
@@ -120,7 +129,7 @@ impl Notifier {
 
     fn create_email_to_all(&self, members: &[Member], subject: &str, body: &str) {
         for m in members {
-            self.create_email(&m.email, subject, body);
+            self.create_email(&m.email, subject, body, None);
         }
     }
 
@@ -149,7 +158,7 @@ impl Notifier {
                 task.short_id,
             ),
         );
-        self.create_email(&task.assignee, &subject, &body);
+        self.create_email(&task.assignee, &subject, &body, None);
     }
 
     // ── C2: pending review ──
@@ -169,7 +178,7 @@ impl Notifier {
             ),
         );
         if let Some(reviewer) = &task.reviewer {
-            self.create_email(reviewer, &subject, &body);
+            self.create_email(reviewer, &subject, &body, None);
         }
     }
 
@@ -179,7 +188,7 @@ impl Notifier {
         let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
         let context = format!("{}: {}", t(task, "审阅人", "Reviewer"), task.reviewer.as_deref().unwrap_or(t(task, "(无)", "(none)")));
         let body = self.format_body(cn, t(task, "审阅通过", "Approved"), task, &context, t(task, "已完成，无后续操作", "Completed, no further action"));
-        self.create_email(&task.assignee, &subject, &body);
+        self.create_email(&task.assignee, &subject, &body, None);
     }
 
     // ── C4: review rejected ──
@@ -200,7 +209,7 @@ impl Notifier {
             &context,
             &format!("{} [A2A] complete {}", t(task, "修改后重新", "Revise and re-submit"), task.short_id),
         );
-        self.create_email(&task.assignee, &subject, &body);
+        self.create_email(&task.assignee, &subject, &body, None);
     }
 
     // ── C5: blocked ──
@@ -220,7 +229,7 @@ impl Notifier {
         ) {
             for m in &members {
                 if m.role == "orchestrator" || m.email == blocker {
-                    self.create_email(&m.email, &subject, &body);
+                    self.create_email(&m.email, &subject, &body, None);
                 }
             }
         }
@@ -237,7 +246,7 @@ impl Notifier {
             &format!("{}: {}", t(task, "解除人", "Unblocked by"), unblocker),
             t(task, "继续执行", "Resume execution"),
         );
-        self.create_email(&task.assignee, &subject, &body);
+        self.create_email(&task.assignee, &subject, &body, None);
     }
 
     // ── C7: cancelled ──
@@ -251,7 +260,7 @@ impl Notifier {
             t(task, "已终止", "Terminated"),
             t(task, "停止工作等待新分配", "Stop work, await re-assignment"),
         );
-        self.create_email(&task.assignee, &subject, &body);
+        self.create_email(&task.assignee, &subject, &body, None);
     }
 
     // ── C8: project output ──
@@ -272,7 +281,7 @@ impl Notifier {
         ) {
             for m in &members {
                 if m.role == "owner" {
-                    self.create_email(&m.email, &subject, &body);
+                    self.create_email(&m.email, &subject, &body, None);
                 }
             }
         }
@@ -295,7 +304,7 @@ impl Notifier {
             &task.assignee
         };
         if !recipient.is_empty() {
-            self.create_email(recipient, &subject, &body);
+            self.create_email(recipient, &subject, &body, None);
         }
     }
 
@@ -318,6 +327,7 @@ impl Notifier {
         board_id: &str,
         board_email: &str,
         short_id: &str,
+        members_csv: &str,
     ) {
         let body = format!(
             "── A2A Board ──\n\n{}\n  {}: {}\n  Board Email: {}\n\n── {} ──\nAPI: {}\nBoard ID: {}\nToken: {}",
@@ -331,7 +341,9 @@ impl Notifier {
             board_token,
         );
         let subject = format!("[A2A] invite: {}", short_id);
-        self.create_email(member_email, &subject, &body);
+        // Group-whitelist header: board address + member list (new members).
+        let header = format!("X-Board-Members: {};{}", board_email, members_csv);
+        self.create_email(member_email, &subject, &body, Some(header));
     }
 
     // ── arbitration request ──
@@ -358,9 +370,9 @@ impl Notifier {
             arb_req, from, requester, task_info, dispute_l, dispute
         );
         if !admin_email.is_empty() {
-            self.create_email(admin_email, &subject, &body);
+            self.create_email(admin_email, &subject, &body, None);
         }
-        self.create_email(requester, &subject, submitted);
+        self.create_email(requester, &subject, submitted, None);
     }
 }
 

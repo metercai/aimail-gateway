@@ -229,8 +229,6 @@ impl InboundInterceptor for A2aInterceptor {
 
                 // Compute board identifiers from orchestrator's domain
                 let orch_domain = orch_email.split('@').nth(1).unwrap_or("");
-                let board_id = crate::board::models::derive_board_id(&short_id, orch_domain);
-                let board_email = format!("{}.a2a@{}", short_id, orch_domain);
 
                 // Resolve orchestrator system for quota attribution
                 let orch_system = self
@@ -242,6 +240,22 @@ impl InboundInterceptor for A2aInterceptor {
                     .flatten()
                     .map(|r| r.system_id)
                     .unwrap_or_default();
+
+                // Shared-domain systems embed the system name in the board
+                // address: {short}.{system_name}.a2a@{shared_domain} — the
+                // full-address hash keeps boards of different systems apart.
+                let is_shared = orch_system.starts_with("shared-");
+                let board_email = if is_shared {
+                    let sys_name = orch_email
+                        .split('@')
+                        .next()
+                        .and_then(|l| l.rsplit('.').next())
+                        .unwrap_or("");
+                    format!("{}.{}.a2a@{}", short_id, sys_name, orch_domain)
+                } else {
+                    format!("{}.a2a@{}", short_id, orch_domain)
+                };
+                let board_id = crate::board::models::derive_board_id(&board_email);
 
                 // Open/create board DB and create board
                 let conn = match db::open_board_db(&self.storage_path, &board_id) {
@@ -310,26 +324,21 @@ impl InboundInterceptor for A2aInterceptor {
                         }
                     }
                 }
-                // Auto-whitelist: board members can send to board address
-                if let Some(members_arr) = members {
-                    for m in members_arr {
-                        let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
-                        if !email.is_empty() {
-                            let _ = self
-                                .email_factory
-                                .env_factory
-                                .create_whitelist_entry_full(
-                                    &board_email,
-                                    "from",
-                                    email,
-                                    "board",
-                                    None,
-                                    Some("board member auto-whitelist"),
-                                )
-                                .await;
-                        }
-                    }
-                }
+                // Board group whitelist: one entry per board replaces N
+                // per-member personal whitelist rows. Members auto-pass
+                // SMTP/HTTP whitelist checks; cross-gateway members are
+                // learnt from invite notifications (X-Board-Members header,
+                // receiver.rs) — no manual per-member whitelisting needed.
+                let all_members: Vec<String> = member_invites
+                    .iter()
+                    .map(|(email, _)| email.clone())
+                    .collect();
+                let _ = self
+                    .email_factory
+                    .env_factory
+                    .db
+                    .replace_board_members(&board_email, &all_members)
+                    .await;
 
                 // Validate: sender must be an owner member
                 let sender_is_owner = db::get_member(&conn, &board_id, &sender)
@@ -453,8 +462,16 @@ impl InboundInterceptor for A2aInterceptor {
                     attachments_json: None,
                     tasks: RefCell::new(Vec::new()),
                 };
+                // Group-whitelist header: full list of newly invited members.
+                let new_members_csv = member_invites
+                    .iter()
+                    .map(|(email, _)| email.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",");
                 for (email, token) in &member_invites {
-                    invite_notifier.notify_invite(email, token, &board_id, &board_email, &short_id);
+                    invite_notifier.notify_invite(
+                        email, token, &board_id, &board_email, &short_id, &new_members_csv,
+                    );
                 }
 
                 // Inject board context for downstream (B flow)
