@@ -809,6 +809,23 @@ fn handle_init(
         }
     }
 
+    // Keep the host gateway's board group whitelist in sync with the
+    // current member set (members changed via this refresh command).
+    if let Ok(all_members) = db::list_members(conn, &board_id) {
+        let emails: Vec<String> = all_members.iter().map(|m| m.email.clone()).collect();
+        let _ = conn.execute(
+            "DELETE FROM board_whitelists WHERE board_email = ?1",
+            rusqlite::params![notifier.board_email],
+        );
+        for e in &emails {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO board_whitelists (board_email, member_addr) VALUES (?1, ?2)",
+                rusqlite::params![notifier.board_email, e],
+            );
+        }
+        tracing::info!(operation = "board_group_whitelist_refresh", board_email = %notifier.board_email, members = emails.len());
+    }
+
     // Hardcoded: only human can refresh board
     let sender_member = db::get_member(conn, board_id, sender)?;
     match sender_member {
