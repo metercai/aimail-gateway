@@ -101,8 +101,22 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
 // ── Board CRUD ────────────────────────────────────────────────────────
 
 pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
+    // Collision check: the board id is derived from (short_id, domain) —
+    // creating the same board again must refuse, never silently replace
+    // (INSERT OR REPLACE would overwrite an existing board's data).
+    let exists: i64 = conn.query_row(
+        "SELECT count(*) FROM boards WHERE id = ?1",
+        [&board.id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Err(crate::core::errors::AppError::Validation(format!(
+            "board '{}' already exists (short id '{}')",
+            board.id, board.short_id
+        )));
+    }
     conn.execute(
-        "INSERT OR REPLACE INTO boards (id, short_id, board_email, goal, status, created_at)
+        "INSERT INTO boards (id, short_id, board_email, goal, status, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             board.id,

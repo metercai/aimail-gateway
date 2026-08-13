@@ -530,7 +530,22 @@ impl InboundInterceptor for A2aInterceptor {
 
             // Get or create board record
             let board = match db::get_board(&conn, &board_id) {
-                Ok(b) => b,
+                Ok(b) => {
+                    // Dynamic binding check: the stored board_email must
+                    // match the address this command was sent to. If the
+                    // board DB was tampered with or drifted, refuse the
+                    // command instead of acting on a mismatched board.
+                    if !b.board_email.eq_ignore_ascii_case(&to_addr) {
+                        tracing::warn!(
+                            operation = "board_binding_mismatch",
+                            board_id = %board_id,
+                            stored = %b.board_email,
+                            expected = %to_addr,
+                        );
+                        return crate::core::strategy::InterceptorDecision::PassThrough;
+                    }
+                    b
+                }
                 Err(_) => {
                     // Auto-create board record if not exists (for init command)
                     let ts = chrono::Utc::now().to_rfc3339();

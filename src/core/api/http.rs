@@ -393,12 +393,20 @@ async fn register_address(
             })));
         }
     } else {
-        // ── Non-shared: no dots, validate entire local-part ──
-        // Board addresses ({short}.a2a@{domain}) are a reserved system
-        // convention — allow the ".a2a" suffix while rejecting arbitrary
-        // dotted local-parts.
-        let is_board_addr = local.ends_with(".a2a");
-        if dot_count != 0 && !is_board_addr {
+        // ── Non-shared: no dots. ".a2a@" is reserved exclusively for
+        // board addresses ({short}.a2a@{domain}) — registering any
+        // address carrying that marker is rejected (same rationale as
+        // the reserved 'a2a' system-id on shared domains).
+        if local.ends_with(".a2a") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".to_string(),
+                    detail: Some("'.a2a@' is reserved for board addresses".to_string()),
+                }),
+            ));
+        }
+        if dot_count != 0 {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
@@ -407,13 +415,7 @@ async fn register_address(
                 }),
             ));
         }
-        if let Some(bad) = local.bytes().find(|&b| {
-            if is_board_addr && b == b'.' {
-                false
-            } else {
-                !is_atext_no_dot(b)
-            }
-        }) {
+        if let Some(bad) = local.bytes().find(|&b| !is_atext_no_dot(b)) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
