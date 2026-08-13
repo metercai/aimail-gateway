@@ -11,9 +11,21 @@ use std::path::PathBuf;
 
 /// Open or create a board database by board_id.
 pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection> {
-    let dir = PathBuf::from(storage_path).join("a2a_board").join(board_id);
+    // Single-file layout: a2a_board/{board_id}.db — the db filename IS the
+    // board-address hash, binding the board address to its data file 1:1
+    // (no intermediate directory). Legacy directory layout is migrated
+    // in place on first open.
+    let dir = PathBuf::from(storage_path).join("a2a_board");
     std::fs::create_dir_all(&dir)?;
-    let db_path = dir.join("board.db");
+    let db_path = dir.join(format!("{board_id}.db"));
+    let legacy = dir.join(board_id).join("board.db");
+    if !db_path.exists() && legacy.exists() {
+        if let Some(parent) = legacy.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&legacy, &db_path);
+        let _ = std::fs::remove_dir_all(dir.join(board_id));
+    }
     let conn = Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     init_schema(&conn)?;
@@ -316,11 +328,15 @@ pub fn verify_member_token(
     conn: &Connection,
     board_id: &str,
     token: &str,
+    member_email: &str,
 ) -> AppResult<Option<String>> {
-    let mut stmt =
-        conn.prepare("SELECT email FROM board_members WHERE board_id = ?1 AND board_token = ?2")?;
+    // Dual-credential auth: token AND member email must both match the
+    // same board_members row — a token alone proves nothing.
+    let mut stmt = conn.prepare(
+        "SELECT email FROM board_members WHERE board_id = ?1 AND board_token = ?2 AND email = ?3",
+    )?;
     let result = stmt
-        .query_row(params![board_id, token], |row| row.get(0))
+        .query_row(params![board_id, token, member_email], |row| row.get(0))
         .optional()?;
     Ok(result)
 }

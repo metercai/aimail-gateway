@@ -22,10 +22,18 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Verify the token matches a board member. Returns the member email on success.
-fn verify_board_token(headers: &HeaderMap, storage_path: &str, board_id: &str) -> Option<String> {
+fn verify_board_token(
+    headers: &HeaderMap,
+    storage_path: &str,
+    board_id: &str,
+    member_email: &str,
+) -> Option<String> {
     let token = extract_token(headers)?;
+    if member_email.is_empty() {
+        return None;
+    }
     let conn = db::open_board_db(storage_path, board_id).ok()?;
-    db::verify_member_token(&conn, board_id, token)
+    db::verify_member_token(&conn, board_id, token, member_email)
         .ok()
         .flatten()
 }
@@ -37,7 +45,7 @@ pub async fn handle_list_tasks(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
+    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"invalid token"})),
@@ -67,7 +75,7 @@ pub async fn handle_list_members(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
+    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"invalid token"})),
@@ -92,10 +100,11 @@ pub async fn handle_list_members(
 pub async fn handle_list_roles(
     Path(board_id): Path<String>,
     State(state): State<HttpState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
+    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"invalid token"})),
@@ -119,10 +128,11 @@ pub async fn handle_list_roles(
 pub async fn handle_get_task(
     Path((board_id, task_id)): Path<(String, String)>,
     State(state): State<HttpState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
+    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"invalid token"})),
@@ -152,11 +162,12 @@ pub async fn handle_get_task(
 pub async fn handle_post_heartbeat(
     Path((board_id, task_id)): Path<(String, String)>,
     State(state): State<HttpState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
     // Bearer token identifies the member → member email is the heartbeat actor.
-    let actor = match verify_board_token(&headers, &s, &board_id) {
+    let actor = match verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")) {
         Some(email) => email,
         None => {
             return Err((
@@ -185,10 +196,11 @@ pub async fn handle_post_heartbeat(
 pub async fn handle_board_status(
     Path(board_id): Path<String>,
     State(state): State<HttpState>,
+    Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id).is_none() {
+    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(json!({"error":"invalid token"})),
