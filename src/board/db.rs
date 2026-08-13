@@ -695,6 +695,36 @@ mod tests {
     }
 
     #[test]
+    fn test_create_board_rejects_duplicate() {
+        // A2: same derived board_id must not silently overwrite the board.
+        let (conn, board_id) = setup_db();
+        let dup = Board {
+            id: board_id.clone(),
+            short_id: "pgmig001".to_string(),
+            board_email: "pgmig001.a2a@test.io".to_string(),
+            goal: Some("duplicate".to_string()),
+            status: BoardStatus::Active,
+            output_task_id: None,
+            plan_version: None,
+            plan_text: None,
+            plan_confirmed_at: None,
+            criteria_version: None,
+            criteria_text: None,
+            criteria_confirmed_at: None,
+            created_at: "2026-07-02T00:00:00Z".to_string(),
+            completed_at: None,
+        };
+        assert!(
+            create_board(&conn, &dup).is_err(),
+            "duplicate create_board must be rejected"
+        );
+        // Original board untouched
+        let board = get_board(&conn, &board_id).unwrap();
+        assert_eq!(board.short_id, "pgmig001");
+        assert_eq!(board.created_at, "2026-07-01T00:00:00Z", "original board must survive");
+    }
+
+    #[test]
     fn test_add_and_get_member() {
         let (conn, board_id) = setup_db();
         let member = make_member(&board_id, "alice@test.io", "orchestrator");

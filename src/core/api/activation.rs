@@ -10,6 +10,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Activation codes expire after this many days (single consumer, not configurable).
+const ACTIVATION_CODE_TTL_DAYS: i64 = 7;
+
 use crate::core::api::auth::require_scope_any;
 use crate::core::api::types::{ErrorResponse, HttpState};
 use crate::core::storage::ApiKeyRecord;
@@ -26,7 +29,7 @@ pub async fn generate_activation_codes(
 ) -> crate::core::errors::AppResult<Vec<String>> {
     let email = email_address.unwrap_or("");
     let expires = {
-        let future = chrono::Utc::now() + chrono::Duration::days(7);
+        let future = chrono::Utc::now() + chrono::Duration::days(ACTIVATION_CODE_TTL_DAYS);
         Some(future.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
     };
     let mut codes = Vec::with_capacity(count as usize);
