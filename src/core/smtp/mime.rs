@@ -39,6 +39,34 @@ impl Header for ContentTransferEncodingRaw {
     }
 }
 
+/// Generic outbound passthrough header (X-Agentmail-Agent,
+/// X-Board-Members, X-AMRelay-AutoReply). Built from a header name +
+/// value pair; used by mx_deliverer and relay sender so custom headers
+/// stored in the record survive onto external SMTP mail.
+#[derive(Clone)]
+pub(crate) struct PassthroughHeader {
+    pub(crate) name: String,
+    pub(crate) value: String,
+}
+
+impl Header for PassthroughHeader {
+    fn name() -> HeaderName {
+        // Never used directly — instances carry their own name via display().
+        HeaderName::new_from_ascii_str("X-Agentmail-Agent")
+    }
+    fn parse(s: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(Self {
+            name: "X-Agentmail-Agent".into(),
+            value: s.into(),
+        })
+    }
+    fn display(&self) -> HeaderValue {
+        let name = HeaderName::new_from_ascii(self.name.clone())
+            .unwrap_or_else(|_| HeaderName::new_from_ascii("X-Agentmail-Agent".to_string()).expect("valid"));
+        HeaderValue::new(name, self.value.clone())
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 /// Build a `multipart/mixed` MIME envelope wrapping the text body and

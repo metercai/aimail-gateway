@@ -13,6 +13,19 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mx::{resolve_mx, MxTransportPool};
 use crate::core::strategy::MessageSigner;
 
+/// Custom headers that must be forwarded verbatim onto outbound SMTP mail.
+/// These are consumed by the receiving side from the raw message:
+///   - X-Agentmail-Agent: agent platform/version identity (agent-side tools)
+///   - X-Board-Members:   board member set for cross-gateway whitelist sync
+///   - X-AMRelay-AutoReply: system-generated auto-reply marker
+/// Everything else in the record headers is internal (webhook-only) and
+/// must NOT leak into external mail.
+pub const OUTBOUND_PASSTHROUGH_HEADERS: &[&str] = &[
+    "X-Agentmail-Agent",
+    "X-Board-Members",
+    "X-AMRelay-AutoReply",
+];
+
 /// MX direct deliverer — resolves MX per domain and delivers directly.
 pub struct MxDelivererImpl {
     resolver: Arc<hickory_resolver::TokioAsyncResolver>,
@@ -226,6 +239,18 @@ async fn build_mx_message(
     }
     if let Some(v) = headers_val.get("references").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         builder = builder.header(lettre::message::header::References::from(v.to_string()));
+    }
+    // ── Custom header passthrough (outbound-only whitelist) ──────────
+    // X-Agentmail-Agent / X-Board-Members / X-AMRelay-AutoReply are
+    // forwarded verbatim. All other record headers are internal
+    // (webhook-only) and must not leak into external mail.
+    for hname in OUTBOUND_PASSTHROUGH_HEADERS {
+        if let Some(v) = headers_val.get(*hname).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            builder = builder.header(crate::core::smtp::mime::PassthroughHeader {
+                name: hname.to_string(),
+                value: v.to_string(),
+            });
+        }
     }
     let email = builder
         .multipart(email_body.clone())

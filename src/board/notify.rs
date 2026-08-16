@@ -83,6 +83,20 @@ impl Notifier {
         let body = body.to_string();
         let is_internal = to.contains(&format!("@{}", self.gateway_domain));
         let attachments = self.attachments_json.clone();
+        // X-Board-Members is OUTBOUND-ONLY (cross-gateway member sync).
+        // Inbound (same-gateway webhook) deliveries must NOT carry it —
+        // members are already in the local board DB; the header is only
+        // consumed from raw SMTP text (receiver.rs) for external gateways.
+        let inbound_headers = headers.as_ref().map(|h| {
+            serde_json::from_str::<serde_json::Value>(h)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|mut m| {
+                    m.remove("X-Board-Members");
+                    serde_json::json!(m).to_string()
+                })
+                .unwrap_or_else(|| h.clone())
+        });
         let handle = tokio::spawn(async move {
             let result = if is_internal {
                 factory
@@ -95,7 +109,7 @@ impl Notifier {
                         &body,
                         None,
                         None,
-                        headers.as_deref(),
+                        inbound_headers.as_deref(),
                         3,
                     )
                     .await
@@ -110,7 +124,7 @@ impl Notifier {
                         &body,
                         None,
                         attachments.as_deref(),
-                        None,
+                        headers.as_deref(),
                         3,
                     )
                     .await
@@ -133,12 +147,21 @@ impl Notifier {
         // group whitelist with it, so member additions AND removals
         // propagate automatically across gateways (removed members drop
         // out of the whitelist).
+        //
+        // X-Board-Members is an OUTBOUND-ONLY header (cross-gateway member
+        // sync); inbound (webhook) deliveries skip it — same-gateway members
+        // are already in the local board DB. Headers must be a JSON object
+        // (EmailRecord::headers_parsed parses JSON; raw "Name: value" text
+        // silently parses to an empty map and the header is lost).
         let member_csv: String = members
             .iter()
             .map(|m| m.email.as_str())
             .collect::<Vec<_>>()
             .join(",");
-        let header = format!("X-Board-Members: {};{}", self.board_email, member_csv);
+        let header = serde_json::json!({
+            "X-Board-Members": format!("{};{}", self.board_email, member_csv),
+        })
+        .to_string();
         for m in members {
             self.create_email(&m.email, subject, body, Some(header.clone()));
         }
@@ -353,7 +376,12 @@ impl Notifier {
         );
         let subject = format!("[A2A] invite: {}", short_id);
         // Group-whitelist header: board address + member list (new members).
-        let header = format!("X-Board-Members: {};{}", board_email, members_csv);
+        // JSON object — EmailRecord::headers_parsed parses JSON; raw
+        // "Name: value" text silently parses to an empty map (header lost).
+        let header = serde_json::json!({
+            "X-Board-Members": format!("{};{}", board_email, members_csv),
+        })
+        .to_string();
         self.create_email(member_email, &subject, &body, Some(header));
     }
 

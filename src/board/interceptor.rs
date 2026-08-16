@@ -425,6 +425,19 @@ impl InboundInterceptor for A2aInterceptor {
                     );
 
                     if let Some(all_members) = members {
+                        // Init notification carries the full member set in
+                        // X-Board-Members (JSON object) so recipient gateways
+                        // can sync the board group whitelist — same contract
+                        // as notify.rs create_email_to_all.
+                        let member_csv: Vec<String> = all_members
+                            .iter()
+                            .filter_map(|m| m.get("email").and_then(|v| v.as_str()))
+                            .map(|s| s.to_string())
+                            .collect();
+                        let init_headers = serde_json::json!({
+                            "X-Board-Members": format!("{};{}", board_email, member_csv.join(",")),
+                        })
+                        .to_string();
                         for m in all_members {
                             let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                             if !email.is_empty() {
@@ -439,7 +452,7 @@ impl InboundInterceptor for A2aInterceptor {
                                         &notify_body,
                                         None,
                                         None,
-                                        None,
+                                        Some(&init_headers),
                                         3,
                                     )
                                     .await;

@@ -240,6 +240,22 @@ impl SmtpRelay {
         {
             builder = builder.header(lettre::message::header::References::from(v.to_string()));
         }
+        // ── Custom header passthrough (outbound-only whitelist) ──────────
+        // X-Agentmail-Agent / X-Board-Members / X-AMRelay-AutoReply are
+        // forwarded verbatim (same whitelist as mx_deliverer). All other
+        // record headers are internal (webhook-only).
+        for hname in crate::core::smtp::mx_deliverer::OUTBOUND_PASSTHROUGH_HEADERS {
+            if let Some(v) = headers_val
+                .get(*hname)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                builder = builder.header(crate::core::smtp::mime::PassthroughHeader {
+                    name: hname.to_string(),
+                    value: v.to_string(),
+                });
+            }
+        }
         let envelope = Envelope::new(Some(from_addr.clone()), recipients.to_vec())
             .map_err(|e| AppError::Smtp(format!("failed to build envelope: {}", e)))?;
         let email = builder
