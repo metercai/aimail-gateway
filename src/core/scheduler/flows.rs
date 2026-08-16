@@ -48,6 +48,42 @@ async fn finalize_after_delivery(
     }
 }
 
+// ── Shared exhaustion path ─────────────────────────────────────────
+
+/// Exhaust an email: record final send_count, insert auto-reply/notification,
+/// record metrics, then complete + cleanup. Shared by handle_overlimit,
+/// periodic_inspection and immediate_forward (AUDIT-1 P2-8 de-duplication).
+pub(crate) async fn exhaust_email(
+    email_factory: &EmailFactory,
+    attachment_factory: &AttachmentFactory,
+    config: &Config,
+    record: &EmailRecord,
+    metrics: &Metrics,
+    delivery_type: &str,
+    final_send_count: Option<i32>,
+) {
+    if let Some(count) = final_send_count {
+        let _ = email_factory.update_send_count(&record.id, count).await;
+    }
+    if record.direction == "inbound" {
+        insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
+    } else if record.direction == "outbound" {
+        insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
+    }
+    match delivery_type {
+        "webhook" => metrics.inc_webhook_exhausted(),
+        _ => metrics.inc_relay_failed(),
+    }
+    match email_factory.complete(&record.id).await {
+        Ok(Some(_)) => {
+            info!(email_id = %record.id, "Exhausted email marked completed");
+            cleanup_completed_email(attachment_factory, email_factory, record).await;
+        }
+        Ok(None) => warn!(email_id = %record.id, "Exhausted email not found (already processed?)"),
+        Err(e) => error!(email_id = %record.id, %e, "Failed to mark exhausted email as completed"),
+    }
+}
+
 // ── Flow 1: Overlimit handling ─────────────────────────────────────
 
 /// Process an exhausted email: send auto-reply and mark completed.
@@ -69,29 +105,16 @@ pub(crate) async fn handle_overlimit(
         "Email exhausted — sending auto-reply and marking completed"
     );
 
-    // Insert auto-reply / webhook notification as email records
-    //   inbound  → external sender → auto-reply record
-    //   outbound → internal sender → webhook notification record
-    if record.direction == "inbound" {
-        insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
-    } else if record.direction == "outbound" {
-        insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
-    }
-
-    // Record exhaustion metrics
-    match delivery_type {
-        "webhook" => metrics.inc_webhook_exhausted(),
-        _ => metrics.inc_relay_failed(),
-    }
-
-    match email_factory.complete(&record.id).await {
-        Ok(Some(_)) => {
-            info!(email_id = %record.id, "Overlimit email marked completed");
-            cleanup_completed_email(attachment_factory, email_factory, record).await;
-        }
-        Ok(None) => warn!(email_id = %record.id, "Overlimit email not found (already processed?)"),
-        Err(e) => error!(email_id = %record.id, %e, "Failed to mark overlimit email as completed"),
-    }
+    exhaust_email(
+        email_factory,
+        attachment_factory,
+        config,
+        record,
+        metrics,
+        delivery_type,
+        None,
+    )
+    .await;
 }
 
 // ── Flow 2: Periodic retry inspection ──────────────────────────────
@@ -138,28 +161,16 @@ pub(crate) async fn periodic_inspection(
             email_id = %record.id,
             "Retry delivery failed and attempts exhausted — promoting to overlimit"
         );
-        // Record the final attempt count before marking completed
-        let _ = email_factory
-            .update_send_count(&record.id, new_send_count)
-            .await;
-        // Inbound → external sender → auto-reply record
-        if record.direction == "inbound" {
-            insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
-        } else if record.direction == "outbound" {
-            insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
-        }
-
-        // Record exhaustion metrics
-        match delivery_type {
-            "webhook" => metrics.inc_webhook_exhausted(),
-            _ => metrics.inc_relay_failed(),
-        }
-
-        if let Err(e) = email_factory.complete(&record.id).await {
-            error!(email_id = %record.id, %e, "Failed to mark exhausted retry email as completed");
-        } else {
-            cleanup_completed_email(attachment_factory, email_factory, record).await;
-        }
+        exhaust_email(
+            email_factory,
+            attachment_factory,
+            config,
+            record,
+            metrics,
+            delivery_type,
+            Some(new_send_count),
+        )
+        .await;
         return;
     }
 
@@ -247,28 +258,16 @@ pub(crate) async fn immediate_forward(
             email_id = %record.id,
             "Immediate forward failed and max_attempts=1 — marking completed"
         );
-        // Record the final attempt count before marking completed
-        let _ = email_factory
-            .update_send_count(&record.id, new_send_count)
-            .await;
-        // Inbound → external sender → auto-reply record
-        if record.direction == "inbound" {
-            insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
-        } else if record.direction == "outbound" {
-            insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
-        }
-
-        // Record exhaustion metrics
-        match delivery_type {
-            "webhook" => metrics.inc_webhook_exhausted(),
-            _ => metrics.inc_relay_failed(),
-        }
-
-        if let Err(e) = email_factory.complete(&record.id).await {
-            error!(email_id = %record.id, %e, "Failed to mark completed");
-        } else {
-            cleanup_completed_email(attachment_factory, email_factory, record).await;
-        }
+        exhaust_email(
+            email_factory,
+            attachment_factory,
+            config,
+            record,
+            metrics,
+            delivery_type,
+            Some(new_send_count),
+        )
+        .await;
         return;
     }
 

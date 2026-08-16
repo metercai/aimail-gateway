@@ -250,6 +250,11 @@ pub async fn process_email_webhook(
     // of POSTed via webhook.  Other recipients proceed through the
     // normal endpoint loop below.
     let mut any_endpoint = false;
+    // AUDIT-1 P1-2: track whether we attempted pull-mode insertion at all.
+    // When pull recipients exist but EVERY insert_pending_delivery fails,
+    // we must NOT report success (email would be completed + deleted =
+    // silent loss). Only a clean "nothing to deliver" path returns true.
+    let mut pull_attempted = false;
     let mut pull_domains: std::collections::HashSet<String> = std::collections::HashSet::new();
     let payload_json = String::from_utf8(payload_bytes.clone()).unwrap_or_default();
     {
@@ -328,6 +333,7 @@ pub async fn process_email_webhook(
                         )
                         .await
                     {
+                        pull_attempted = true;
                         warn!(email_id = %record.id, domain = %d.domain, error = %e,
                               "Failed to insert pending delivery");
                     } else {
@@ -433,6 +439,15 @@ pub async fn process_email_webhook(
     }
 
     if !any_endpoint {
+        if pull_attempted {
+            // AUDIT-1 P1-2: every pull insertion failed — report failure so
+            // the scheduler retries instead of completing+deleting the email.
+            warn!(
+                email_id = %record.id,
+                "Pull-mode pending insertion failed for all recipients — scheduling retry"
+            );
+            return false;
+        }
         info!(operation="pull_mode", email_id = %record.id, "Pull mode — no webhook push endpoint, email queued for bridge");
         return true;
     }

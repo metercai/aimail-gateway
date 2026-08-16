@@ -1231,9 +1231,17 @@ pub fn handle_smtp_session_blocking(
                     }
                     crate::Action::NoReply => {}
                     crate::Action::UpgradeTls => {
-                        // STARTTLS not available in base edition — TLS migrated to advanced
-                        let _ = write_response_blocking(&mut stream, &response);
-                        break;
+                        // STARTTLS not available in base edition — TLS migrated
+                        // to advanced. Respond 454 (TLS not available) and keep
+                        // the connection alive instead of dropping it
+                        // (AUDIT-1 P2-9: hard-close confused SMTP clients).
+                        let resp = crate::Response::custom(
+                            454,
+                            "TLS not available".to_string(),
+                        );
+                        if write_response_blocking(&mut stream, &resp).is_err() {
+                            break;
+                        }
                     }
                 }
             }

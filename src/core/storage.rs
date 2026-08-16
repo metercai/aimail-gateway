@@ -608,6 +608,24 @@ impl Database {
         }).await
     }
 
+    /// Fetch an ACTIVE system-domain record by domain name.
+    /// Used by webhook delivery resolution — deactivated domains must not
+    /// receive email (AUDIT-1 P2-4).
+    pub async fn get_active_system_domain_by_domain(
+        &self,
+        domain: &str,
+    ) -> AppResult<Option<SystemDomainRecord>> {
+        let domain = domain.to_string();
+        self.call(move |conn| {
+            let row = conn.query_row(
+                "SELECT id, system_id, domain_addr, webhook_url, webhook_secret, is_active, created_at, updated_at FROM system_domains WHERE domain_addr = ?1 AND is_active = 1",
+                params![domain],
+                system_domain_row,
+            ).optional()?;
+            Ok(row)
+        }).await
+    }
+
     pub async fn list_system_domains(&self, system_id: &str) -> AppResult<Vec<SystemDomainRecord>> {
         let system_id = system_id.to_string();
         self.call(move |conn| {
@@ -844,7 +862,11 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.call(move |conn| {
             conn.execute(
-                "INSERT INTO whitelists (system_id, domain_addr, direction, value, description, is_active, created_at, category, api_key_id) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8) ON CONFLICT(system_id, domain_addr, value) DO UPDATE SET direction=excluded.direction, description=CASE WHEN excluded.description IS NOT NULL THEN excluded.description ELSE description END, is_active=1",
+                // AUDIT-1 P2-7: on conflict keep the ORIGINAL direction —
+                // re-inserting the same (system, domain, value) with a
+                // different direction must not silently overwrite the
+                // existing rule (previously direction=excluded.direction).
+                "INSERT INTO whitelists (system_id, domain_addr, direction, value, description, is_active, created_at, category, api_key_id) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8) ON CONFLICT(system_id, domain_addr, value) DO UPDATE SET is_active=1, description=CASE WHEN excluded.description IS NOT NULL THEN excluded.description ELSE description END",
                 params![system_id, domain_addr, direction, value, description, now, category, api_key_id],
             )?;
             let id = conn.last_insert_rowid();
@@ -1440,8 +1462,6 @@ impl Database {
         let sid = system_id.to_string();
         let domain_filter = domains.map(|d| d.to_vec());
         self.call(move |conn| {
-            let params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(sid.clone()), Box::new(limit)];
             let mut sql =
                 "SELECT id, system_id, domain_addr, email, headers, payload, status, created_at
                  FROM pending_deliveries
@@ -1451,13 +1471,25 @@ impl Database {
                 if !domains.is_empty() {
                     let mut conditions: Vec<String> = Vec::new();
                     for d in domains.iter() {
-                        conditions.push(format!("domain_addr LIKE '%@{}'", d));
+                        // Parameterized LIKE: value is bound, never interpolated
+                        // (AUDIT-1 P1-1: raw format! allowed SQL injection via
+                        // malicious domain strings from authenticated clients).
+                        // Placeholders: ?1=system_id, ?2=limit, ?3+ = LIKE values.
+                        conditions.push(format!("domain_addr LIKE ?{}", conditions.len() + 3));
                     }
                     sql.push_str(&format!(" AND ({})", conditions.join(" OR ")));
                 }
             }
             sql.push_str(" ORDER BY created_at ASC LIMIT ?2");
             let mut stmt = conn.prepare(&sql)?;
+            // Build param list: system_id, limit, then one LIKE value per domain
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(sid.clone()), Box::new(limit)];
+            if let Some(ref domains) = domain_filter {
+                for d in domains.iter() {
+                    params.push(Box::new(format!("%@{}", d)));
+                }
+            }
             let rows = stmt.query_map(
                 rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
                 |r| {
@@ -1517,5 +1549,104 @@ impl Database {
             }
             Ok(())
         }).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_db() -> Database {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("amailgw-test-{}", ts));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Database::open expects the SQLite FILE path (like main.rs passes
+        // config.storage.db_path() = <dir>/amail.db), not a directory.
+        let db = Database::open(&dir.join("amail.db"), 4, None).unwrap();
+        db.init_global();
+        db
+    }
+
+    #[tokio::test]
+    async fn pending_domains_filter_is_parameterized() {
+        // AUDIT-1 P1-1: a malicious domain string must be treated as a literal
+        // LIKE pattern, never spliced into SQL.
+        let db = temp_db();
+        db.insert_pending_delivery(
+            "sys1", "agent@good.test", "agent@good.test", "{}", "{}",
+        )
+        .await
+        .unwrap();
+        db.insert_pending_delivery(
+            "sys1", "agent@evil.com", "agent@evil.com", "{}", "{}",
+        )
+        .await
+        .unwrap();
+
+        // Injection attempt: closes the LIKE, ORs a tautology, comments out the rest.
+        let evil = "x' OR '1'='1";
+        let rows = db
+            .list_pending_deliveries("sys1", 50, Some(&[evil.to_string()]))
+            .await
+            .unwrap();
+        // No rows match the literal pattern "%@x' OR '1'='1" → empty.
+        assert!(rows.is_empty(), "injection must not return rows");
+
+        // Normal filter still works.
+        let rows = db
+            .list_pending_deliveries("sys1", 50, Some(&["good.test".to_string()]))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].email, "agent@good.test");
+    }
+
+    #[tokio::test]
+    async fn active_domain_query_excludes_deactivated() {
+        // AUDIT-1 P2-4
+        let db = temp_db();
+        db.insert_system_domain("d1", "sys1", "active.test", Some("http://a"), None)
+            .await
+            .unwrap();
+        db.insert_system_domain("d2", "sys1", "dead.test", Some("http://d"), None)
+            .await
+            .unwrap();
+        db.update_system_domain("d2", None, None, Some(false))
+            .await
+            .unwrap();
+
+        assert!(db
+            .get_active_system_domain_by_domain("active.test")
+            .await
+            .unwrap()
+            .is_some());
+        assert!(db
+            .get_active_system_domain_by_domain("dead.test")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn whitelist_conflict_keeps_original_direction() {
+        // AUDIT-1 P2-7: re-inserting (system, domain, value) with a different
+        // direction must not overwrite the existing direction.
+        let db = temp_db();
+        db.insert_whitelist("sys1", "a@x.com", "from", "v@y.com", "system", None, None)
+            .await
+            .unwrap();
+        db.insert_whitelist("sys1", "a@x.com", "to", "v@y.com", "system", None, None)
+            .await
+            .unwrap();
+        let rec = db
+            .get_whitelist("sys1", "a@x.com", "v@y.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.direction, "from", "original direction preserved");
     }
 }

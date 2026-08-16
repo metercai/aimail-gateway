@@ -507,16 +507,18 @@ impl EnvFactory {
 
     /// Resolve webhook URL for a given address.
     /// Two-step: exact match on full email → fallback to bare domain.
+    /// Only ACTIVE domains are resolved (AUDIT-1 P2-4: deactivated domains
+    /// must not receive deliveries).
     pub async fn resolve_webhook_url(&self, sender: &str) -> Option<String> {
         let lower = sender.to_lowercase();
-        // Step 1: exact match on full email address
-        if let Ok(Some(record)) = self.db.get_system_domain_by_domain(&lower).await {
+        // Step 1: exact match on full email address (active only)
+        if let Ok(Some(record)) = self.db.get_active_system_domain_by_domain(&lower).await {
             let url = record.webhook_url.as_deref().filter(|u| !u.is_empty())?;
             return Some(url.to_string());
         }
-        // Step 2: fallback to bare domain
+        // Step 2: fallback to bare domain (active only)
         if let Some(domain) = lower.split('@').nth(1) {
-            if let Ok(Some(record)) = self.db.get_system_domain_by_domain(domain).await {
+            if let Ok(Some(record)) = self.db.get_active_system_domain_by_domain(domain).await {
                 return record.webhook_url.filter(|u| !u.is_empty());
             }
         }

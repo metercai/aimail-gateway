@@ -193,7 +193,9 @@ pub async fn download_attachment(
     }
 
     // Compute file path from sender_email and attachment_id
-    let ext = record.filename.rsplit('.').next().unwrap_or("dat");
+    // Extension must match the save-side default ("bin" for extensionless
+    // filenames, AUDIT-1 P2-5: download used "dat" → file-not-found 500).
+    let ext = record.filename.rsplit('.').next().unwrap_or("bin");
     let file_path = state
         .factories
         .attachment
@@ -239,7 +241,17 @@ pub async fn download_attachment(
                 .header("Content-Type", &content_type)
                 .header(
                     "Content-Disposition",
-                    format!("attachment; filename=\"{}\"", filename),
+                    // AUDIT-1 P2-6: sanitize the filename — strip control chars
+                    // (CR/LF header injection) and replace quotes that would
+                    // break the header value (malicious names caused a panic).
+                    format!(
+                        "attachment; filename=\"{}\"",
+                        filename
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .collect::<String>()
+                            .replace('"', "'")
+                    ),
                 )
                 .header("Content-Length", file_size.to_string())
                 .body(body)

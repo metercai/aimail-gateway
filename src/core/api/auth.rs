@@ -128,8 +128,10 @@ fn check_domain_access(
     target: &str,
     role_label: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    // Admin system bypass
-    if key.system_id.starts_with("system-") || key.system_id == "admin" {
+    // Admin system bypass — AUDIT-1 P2-1: decided by SCOPE, not by the
+    // system_id prefix. Platform/System admin keys may manage any address.
+    // ("admin" is the legacy default-system name kept for compatibility.)
+    if is_platform_admin_scope(key) || is_system_admin_scope(key) || key.system_id == "admin" {
         return Ok(());
     }
     // System-level key (empty email) — unrestricted
@@ -285,4 +287,57 @@ pub fn sha256_hex(input: &str) -> String {
 /// Falls back to the input unchanged if no '@' is present.
 pub fn domain_from_email(address: &str) -> &str {
     address.split('@').nth(1).unwrap_or(address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::storage::ApiKeyRecord;
+
+    fn key(system_id: &str, email: &str, scopes: &[&str]) -> ApiKeyRecord {
+        ApiKeyRecord {
+            id: 1,
+            system_id: system_id.to_string(),
+            email_address: email.to_string(),
+            key_hash: "h".into(),
+            key_prefix: "p".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            is_active: true,
+            created_at: String::new(),
+            expires_at: None,
+            last_used_at: None,
+            category: "agent".into(),
+            activation_code_hash: None,
+            activation_expires_at: None,
+            claimed_at: None,
+        }
+    }
+
+    #[test]
+    fn domain_access_agent_key_on_bootstrap_system_is_scoped() {
+        // AUDIT-1 P2-1: an agent-scope key must NOT bypass domain checks even
+        // when its system_id looks like a bootstrap system (system-*).
+        let k = key("system-abc", "alice@example.com", &["agent"]);
+        assert!(check_domain_access(&k, "bob@other.com", "API key").is_err());
+        // own address still allowed
+        assert!(check_domain_access(&k, "alice@example.com", "API key").is_ok());
+    }
+
+    #[test]
+    fn domain_access_platform_admin_bypasses() {
+        let k = key("system-abc", "", &["platform"]);
+        assert!(check_domain_access(&k, "anyone@anywhere.com", "API key").is_ok());
+    }
+
+    #[test]
+    fn domain_access_system_admin_bypasses() {
+        let k = key("shared-token-1", "", &["system"]);
+        assert!(check_domain_access(&k, "anyone@anywhere.com", "API key").is_ok());
+    }
+
+    #[test]
+    fn domain_access_agent_cannot_cross_address() {
+        let k = key("shared-token-1", "alice@example.com", &["agent"]);
+        assert!(check_domain_access(&k, "bob@example.com", "API key").is_err());
+    }
 }
