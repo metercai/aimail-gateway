@@ -1173,8 +1173,11 @@ async fn list_whitelists(
     Query(query): Query<ListWhitelistsQuery>,
 ) -> Result<Json<Vec<WhitelistResponse>>, (StatusCode, Json<ErrorResponse>)> {
     let domain = query.domain.as_deref().unwrap_or("");
-    if is_agent_scope(&api_key) {
+    if is_agent_scope(&api_key) && !is_admin_scope(&api_key) {
         // Agent: only return category='agent' AND api_key_id=their own key id
+        // NOTE: admin-scoped keys that also carry "agent" scope (system keys
+        // get scopes=["system","agent"]) must NOT take this branch — admin
+        // visibility is strictly wider (see is_admin_scope branch below).
         match state
             .factories
             .email
@@ -1198,7 +1201,7 @@ async fn list_whitelists(
                 }),
             )),
         }
-    } else if is_agent_admin_scope(&api_key) {
+    } else if is_agent_admin_scope(&api_key) && !is_system_admin_scope(&api_key) && !is_platform_admin_scope(&api_key) {
         // AA: return category='agent' entries for agents they manage
         // Fetch all managed agent emails from domain_addr_meta, then filter whitelist
         let all = state
