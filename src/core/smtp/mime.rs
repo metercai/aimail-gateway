@@ -1,8 +1,7 @@
 //! MIME helpers for building multipart email bodies and custom headers.
 
-use base64::Engine;
-use lettre::message::header::{ContentType, Header, HeaderName, HeaderValue};
-use lettre::message::{MultiPart, SinglePart};
+use lettre::message::header::{ContentTransferEncoding, ContentType, Header, HeaderName, HeaderValue};
+use lettre::message::{Body, MultiPart, SinglePart};
 use lettre::Address;
 
 use crate::core::errors::{AppError, AppResult};
@@ -78,15 +77,6 @@ pub(crate) fn build_with_attachments(
     let mut mixed = MultiPart::mixed().multipart(alt_part);
 
     for (filename, content_type, data) in attachments {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-
-        let wrapped: String = encoded
-            .as_bytes()
-            .chunks(76)
-            .map(|chunk| std::str::from_utf8(chunk).unwrap_or(""))
-            .collect::<Vec<_>>()
-            .join("\r\n");
-
         let content_type_str = if content_type.is_empty() {
             format!("application/octet-stream; name=\"{}\"", filename)
         } else {
@@ -103,7 +93,13 @@ pub(crate) fn build_with_attachments(
             )
             .header(ContentDispositionRaw(disposition))
             .header(ContentTransferEncodingRaw("base64".to_string()))
-            .body(wrapped);
+            // AUDIT-1 P2-11 (smtp_sender verify): let lettre do the base64
+            // encoding. Previously we pre-encoded AND declared base64, so
+            // lettre encoded again → double-encoded attachment bodies.
+            .body(
+                Body::new_with_encoding(data.to_vec(), ContentTransferEncoding::Base64)
+                    .expect("base64 body encoding"),
+            );
 
         mixed = mixed.singlepart(part);
     }
