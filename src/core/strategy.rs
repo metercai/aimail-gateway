@@ -31,6 +31,15 @@ pub trait InboundSecurity: Send + Sync {
     fn resolve_sender(&self, _from: &str) -> Option<String> {
         None
     }
+
+    /// Post-DATA inbound message check (DKIM/DMARC verification), called at
+    /// data_end with the full raw message (headers + body).
+    /// Base edition: accept (no-op). Advanced edition verifies DKIM/DMARC
+    /// according to its policies. `sender` is the MAIL FROM envelope sender
+    /// (empty for null-sender bounce — implementations must exempt it).
+    fn check_inbound_message(&self, _sender: &str, _raw: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 // ── MessageSigner ─────────────────────────────────────────────────────

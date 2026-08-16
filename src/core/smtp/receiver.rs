@@ -461,6 +461,22 @@ impl Handler for ConnectionHandler {
 
         let raw_data = std::mem::take(&mut self.message_data);
 
+        // ── Post-DATA message security (DKIM/DMARC) ────────────────
+        // Base edition: no-op. Advanced edition verifies the full raw
+        // message per its dkim/dmarc policies. Null-sender (bounce) is
+        // exempted inside implementations (RFC 5321).
+        if !sender.is_empty() {
+            if let Err(e) = self.inbound_security.check_inbound_message(&sender, &raw_data) {
+                tracing::warn!(
+                    operation = "inbound_message_rejected",
+                    sender = %sender,
+                    reason = %e,
+                    "Inbound message security check failed"
+                );
+                return perm_fail(&e);
+            }
+        }
+
         // ── Bounce / NDR pre-verification ─────────────────────────
         // MAIL FROM:<> with an internal RCPT TO → potential bounce.
         // Parse the DSN to verify legitimacy before storing anything.
