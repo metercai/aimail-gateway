@@ -93,6 +93,11 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
             actor TEXT,
             payload TEXT,
             created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS task_seq (
+            board_id TEXT PRIMARY KEY,
+            next_val INTEGER NOT NULL
         );",
     )?;
     Ok(())
@@ -247,6 +252,101 @@ pub fn insert_role_permissions(
     Ok(())
 }
 
+/// Single source of truth for default role→verb permissions (L3 fix:
+/// the seed previously existed twice with different verb sets — init
+/// path (commands.rs) and new path (interceptor.rs) diverged, so the
+/// same role had different capabilities depending on how the board was
+/// created). This is the union: every role gets its full verb set on
+/// every creation path.
+pub fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
+    let defaults: &[(&str, &[&str])] = &[
+        (
+            "orchestrator",
+            &[
+                "init",
+                "tasks",
+                "create",
+                "assign",
+                "review",
+                "block",
+                "unblock",
+                "cancel",
+                "reassign",
+                "edit",
+                "deadline",
+                "output",
+                "notify",
+                "members",
+                "roles",
+                "config",
+                "arbitrate",
+                "comment",
+                "list",
+                "show",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "verifier",
+            &[
+                "verify",
+                "approve",
+                "reject",
+                "output",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "worker",
+            &[
+                "complete",
+                "commit",
+                "block",
+                "heartbeat",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+            ],
+        ),
+        (
+            "owner",
+            &[
+                "create",
+                "tasks",
+                "unblock",
+                "reassign",
+                "reopen",
+                "comment",
+                "list",
+                "show",
+                "status",
+                "members",
+                "roles",
+                "heartbeat",
+            ],
+        ),
+    ];
+    for (role, verbs) in defaults {
+        for verb in *verbs {
+            conn.execute(
+                "INSERT OR IGNORE INTO role_permissions (role, verb) VALUES (?1, ?2)",
+                rusqlite::params![role, verb],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Check if a role has permission for a verb. Returns true if no permissions defined (open mode).
 pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppResult<bool> {
     let count: i64 = conn.query_row(
@@ -268,7 +368,7 @@ pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppRe
 
 pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<Option<Member>> {
     let mut stmt = conn.prepare(
-        "SELECT email, role, display_name, board_id, joined_at, domains, capability_snapshot
+        "SELECT email, role, display_name, board_token, board_id, joined_at, domains, capability_snapshot
      FROM board_members WHERE board_id = ?1 AND email = ?2",
     )?;
     let mut rows = stmt.query(params![board_id, email])?;
@@ -277,13 +377,13 @@ pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<O
             email: row.get(0)?,
             role: row.get(1)?,
             display_name: row.get(2)?,
-            board_token: None,
-            board_id: row.get(3)?,
-            joined_at: row.get(4)?,
+            board_token: row.get(3)?,
+            board_id: row.get(4)?,
+            joined_at: row.get(5)?,
             domains: row
-                .get::<_, Option<String>>(5)?
+                .get::<_, Option<String>>(6)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-            capability_snapshot: row.get(6)?,
+            capability_snapshot: row.get(7)?,
         }))
     } else {
         Ok(None)
@@ -297,17 +397,16 @@ pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>>
     )?;
     let rows = stmt.query_map(params![board_id], |row| {
         Ok(Member {
-            board_token: None,
             email: row.get(0)?,
             role: row.get(1)?,
             display_name: row.get(2)?,
-
-            board_id: row.get(3)?,
-            joined_at: row.get(4)?,
+            board_token: row.get(3)?,
+            board_id: row.get(4)?,
+            joined_at: row.get(5)?,
             domains: row
-                .get::<_, Option<String>>(5)?
+                .get::<_, Option<String>>(6)?
                 .and_then(|s| serde_json::from_str(&s).ok()),
-            capability_snapshot: row.get(6)?,
+            capability_snapshot: row.get(7)?,
         })
     })?;
     let mut members = Vec::new();
@@ -586,13 +685,18 @@ fn parse_task_status(s: &str) -> TaskStatus {
 }
 
 /// Generate a sequential short_id (T1, T2, T3...).
+/// Atomic per-board counter (task_seq): concurrent creates and deleted
+/// tasks can never collide or reuse ids (L5 — COUNT(*)+1 raced and
+/// reused ids after deletions).
 pub fn next_short_id(conn: &Connection, board_id: &str) -> AppResult<String> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE board_id = ?1",
+    let next: i64 = conn.query_row(
+        "INSERT INTO task_seq (board_id, next_val) VALUES (?1, 1)
+         ON CONFLICT(board_id) DO UPDATE SET next_val = next_val + 1
+         RETURNING next_val",
         params![board_id],
         |row| row.get(0),
     )?;
-    Ok(format!("T{}", count + 1))
+    Ok(format!("T{}", next))
 }
 
 /// Generate a unique task ID: t_{board_id}_{short_id}

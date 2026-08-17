@@ -10,16 +10,23 @@ pub fn archive_loop(storage_path: &str) {
     loop {
         if let Ok(entries) = std::fs::read_dir(&path) {
             for entry in entries.flatten() {
-                let board_id = entry.file_name().to_string_lossy().to_string();
-                if let Ok(conn) = db::open_board_db(storage_path, &board_id) {
-                    if let Ok(board) = db::get_board(&conn, &board_id) {
+                // Single-file layout: {board_id}.db
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(board_id) = name.strip_suffix(".db") else {
+                    continue;
+                };
+                if board_id.is_empty() {
+                    continue;
+                }
+                if let Ok(conn) = db::open_board_db(storage_path, board_id) {
+                    if let Ok(board) = db::get_board(&conn, board_id) {
                         if let Some(ref completed_at) = board.completed_at {
                             if let Ok(completed) =
                                 chrono::DateTime::parse_from_rfc3339(completed_at)
                             {
                                 let age = Utc::now().signed_duration_since(completed);
                                 if age.num_days() >= 7 {
-                                    if let Ok(mut b) = db::get_board(&conn, &board_id) {
+                                    if let Ok(mut b) = db::get_board(&conn, board_id) {
                                         b.status = crate::board::models::BoardStatus::Archived;
                                         let _ = db::update_board(&conn, &b);
                                     }

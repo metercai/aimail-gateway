@@ -150,6 +150,9 @@ pub async fn scan_completed_boards(storage_path: &str, threshold_secs: u64) {
 // ── Helpers ────────────────────────────────────────────────────────
 
 /// List active board IDs from the filesystem (`<storage_path>/a2a_board/`).
+/// Single-file layout (6b21684): each board is `a2a_board/{board_id}.db`.
+/// Legacy directory layout (`{board_id}/board.db`) is migrated by
+/// open_board_db on first open; stale empty dirs are ignored here.
 pub fn list_active_boards(storage_path: &str) -> AppResult<Vec<String>> {
     let dir = PathBuf::from(storage_path).join("a2a_board");
     let mut ids = Vec::new();
@@ -158,11 +161,11 @@ pub fn list_active_boards(storage_path: &str) -> AppResult<Vec<String>> {
     }
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name != "_archived" {
-                    ids.push(name.to_string());
-                }
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Single-file layout: {board_id}.db
+        if let Some(stripped) = name.strip_suffix(".db") {
+            if !stripped.is_empty() {
+                ids.push(stripped.to_string());
             }
         }
     }

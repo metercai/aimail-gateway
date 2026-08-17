@@ -673,7 +673,16 @@ impl Handler for ConnectionHandler {
         // at receive time, so both push (webhook) and pull (pending) modes
         // build the list.
         if sender.contains(".a2a@") && subject.starts_with("[A2A]") {
-            let raw_text = String::from_utf8_lossy(&raw_data);
+            // S1 anchor: only learn from a well-formed board address.
+            // parse_board_email validates the {short}[.{sys}].a2a@{domain}
+            // layout — arbitrary forged ".a2a@" strings are rejected here,
+            // so a random sender cannot inject a fresh board namespace.
+            // (Cross-gateway first invite has no local record yet, so an
+            // existence check would break the bootstrap; authenticity is
+            // anchored by DKIM/DMARC in the advanced edition via
+            // check_inbound_message at data_end, which runs before this.)
+            if crate::board::models::parse_board_email(&sender).is_some() {
+                let raw_text = String::from_utf8_lossy(&raw_data);
             let header_val = raw_text.lines().find_map(|l| {
                 l.trim()
                     .strip_prefix("X-Board-Members:")
@@ -686,6 +695,10 @@ impl Handler for ConnectionHandler {
                         .split(',')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
+                        // Accept only plausible email addresses — prevents
+                        // junk members / whitelist bloat from a malformed
+                        // header.
+                        .filter(|s| s.contains('@') && !s.starts_with('@') && !s.ends_with('@'))
                         .collect();
                     if !members.is_empty() {
                         match self
@@ -716,6 +729,7 @@ impl Handler for ConnectionHandler {
                     );
                 }
             }
+            } // end: parse_board_email(sender).is_some()
         }
 
         let mail_uuid = Uuid::new_v4().to_string();

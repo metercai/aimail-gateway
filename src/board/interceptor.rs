@@ -46,85 +46,10 @@ impl A2aInterceptor {
 fn seed_default_role_permissions_conn(
     conn: &rusqlite::Connection,
 ) -> crate::core::errors::AppResult<()> {
-    let defaults: &[(&str, &[&str])] = &[
-        (
-            "orchestrator",
-            &[
-                "init",
-                "tasks",
-                "assign",
-                "review",
-                "block",
-                "unblock",
-                "cancel",
-                "reassign",
-                "edit",
-                "deadline",
-                "output",
-                "notify",
-                "members",
-                "roles",
-                "config",
-                "arbitrate",
-                "comment",
-                "list",
-                "show",
-                "heartbeat",
-            ],
-        ),
-        (
-            "verifier",
-            &[
-                "verify",
-                "approve",
-                "reject",
-                "output",
-                "comment",
-                "list",
-                "show",
-                "roles",
-                "members",
-                "status",
-                "heartbeat",
-            ],
-        ),
-        (
-            "worker",
-            &[
-                "complete",
-                "commit",
-                "block",
-                "heartbeat",
-                "comment",
-                "list",
-                "show",
-                "roles",
-                "members",
-                "status",
-            ],
-        ),
-        (
-            "owner",
-            &[
-                "tasks",
-                "unblock",
-                "reassign",
-                "comment",
-                "list",
-                "show",
-                "heartbeat",
-            ],
-        ),
-    ];
-    for (role, verbs) in defaults {
-        for verb in *verbs {
-            conn.execute(
-                "INSERT OR IGNORE INTO role_permissions (role, verb) VALUES (?1, ?2)",
-                rusqlite::params![role, verb],
-            )?;
-        }
-    }
-    Ok(())
+    // Single source of truth in db::seed_default_role_permissions (L3) —
+    // this was a divergent duplicate that gave roles different verbs
+    // depending on the board creation path.
+    crate::board::db::seed_default_role_permissions(conn)
 }
 
 #[async_trait]
@@ -297,6 +222,26 @@ impl InboundInterceptor for A2aInterceptor {
                     self.board_quota.invalidate_cache();
                 }
 
+                // Validate: sender must be declared as the owner member
+                // BEFORE any side effect (board row, members, tokens) —
+                // a non-owner sender must never create junk boards or
+                // mint member tokens.
+                let sender_is_owner = members
+                    .map(|arr| {
+                        arr.iter().any(|m| {
+                            m.get("role").and_then(|v| v.as_str()) == Some("owner")
+                                && m.get("email").and_then(|v| v.as_str()) == Some(sender.as_str())
+                        })
+                    })
+                    .unwrap_or(false);
+                if !sender_is_owner {
+                    tracing::warn!(
+                        "[a2a_board] [A2A] new rejected: sender {} is not declared owner",
+                        sender
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
+
                 // Register members and collect invite info
                 let mut member_invites: Vec<(String, String)> = Vec::new();
                 if let Some(members) = members {
@@ -339,20 +284,6 @@ impl InboundInterceptor for A2aInterceptor {
                     .db
                     .replace_board_members(&board_email, &all_members)
                     .await;
-
-                // Validate: sender must be an owner member
-                let sender_is_owner = db::get_member(&conn, &board_id, &sender)
-                    .ok()
-                    .flatten()
-                    .map(|m| m.role == "owner")
-                    .unwrap_or(false);
-                if !sender_is_owner {
-                    tracing::warn!(
-                        "[a2a_board] [A2A] new rejected: sender {} is not an owner",
-                        sender
-                    );
-                    return crate::core::strategy::InterceptorDecision::PassThrough;
-                }
 
                 // Seed default role_permissions
                 // Parse role_permissions from body if provided (override defaults)
@@ -410,13 +341,13 @@ impl InboundInterceptor for A2aInterceptor {
                         ("Project", "Team Members")
                     };
                     let notify_body = format!(
-                    "{proj_l}: {} ({})\\nBoard Email: {}\\nBoard ID: {}\\nGateway: {}\\n\\n{members_l}:\\n{}",
+                    "{proj_l}: {} ({})\nBoard Email: {}\nBoard ID: {}\nGateway: {}\n\n{members_l}:\n{}",
                     short_id,
                     description,
                     board_email,
                     board_id,
                     self.gateway_url,
-                    members_list.join("\\n"),
+                    members_list.join("\n"),
                 );
                     let notify_subject = format!(
                         "[A2A] notice: Board {} created — {}",
@@ -580,6 +511,15 @@ impl InboundInterceptor for A2aInterceptor {
                         completed_at: None,
                     };
                     let _ = db::create_board(&conn, &board);
+                    // Seed default role_permissions — without it
+                    // check_role_permission sees an empty table and opens
+                    // the board to every verb for every member.
+                    if let Err(e) = seed_default_role_permissions_conn(&conn) {
+                        tracing::warn!(
+                            "[a2a_board] [A-flow] role_permissions seed failed: {:?}",
+                            e
+                        );
+                    }
                     self.board_quota.invalidate_cache();
                     board
                 }

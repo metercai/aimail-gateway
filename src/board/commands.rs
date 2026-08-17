@@ -36,11 +36,11 @@ pub fn execute_command(
         "deadline" => handle_deadline(conn, cmd, sender),
         "reopen" => handle_reopen(conn, notifier, cmd, sender),
         "output" => handle_output(conn, notifier, cmd, sender),
-        "show" => handle_show(conn, cmd),
-        "list" => handle_list(conn, cmd),
-        "members" => handle_members(conn, cmd),
-        "roles" => handle_roles(conn, cmd),
-        "status" => handle_board_status(conn, cmd),
+        "show" => handle_show(conn, cmd, sender),
+        "list" => handle_list(conn, cmd, sender),
+        "members" => handle_members(conn, cmd, sender),
+        "roles" => handle_roles(conn, cmd, sender),
+        "status" => handle_board_status(conn, cmd, sender),
         "gateway-info" => handle_gateway_info(conn, cmd),
         "create" => handle_create(conn, notifier, cmd, sender),
         "refresh" => handle_init(conn, notifier, cmd, sender),
@@ -85,6 +85,16 @@ fn require_assignee(task: &Task, sender: &str) -> AppResult<()> {
             "only assignee can perform this action: {}",
             sender
         )))
+    }
+}
+
+fn require_member(conn: &Connection, board_id: &str, sender: &str) -> AppResult<()> {
+    match db::get_member(conn, board_id, sender)? {
+        Some(_) => Ok(()),
+        None => Err(crate::core::errors::AppError::Forbidden(format!(
+            "sender not a board member: {}",
+            sender
+        ))),
     }
 }
 
@@ -222,6 +232,12 @@ fn handle_approve(
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_reviewer(&task, sender)?;
+    if task.status != TaskStatus::Reviewing {
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "approve invalid for task status: {}",
+            task.status
+        )));
+    }
 
     let ts = now();
     task.status = TaskStatus::Done;
@@ -253,6 +269,12 @@ fn handle_reject(
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
     require_reviewer(&task, sender)?;
+    if task.status != TaskStatus::Reviewing {
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "reject invalid for task status: {}",
+            task.status
+        )));
+    }
 
     let reason = cmd
         .params
@@ -361,6 +383,8 @@ fn handle_comment(
         .as_ref()
         .and_then(|p| p.get("text").and_then(|v| v.as_str()))
         .unwrap_or("");
+    let task = db::get_task(conn, &task_id)?;
+    require_role(conn, &task.board_id, sender, "comment")?;
     let ts = now();
     db::insert_event(
         conn,
@@ -374,7 +398,6 @@ fn handle_comment(
         },
     )?;
 
-    let task = db::get_task(conn, &task_id)?;
     notifier.notify_comment(&task, sender, comment);
     Ok(ok_response(None))
 }
@@ -565,9 +588,10 @@ fn handle_output(
     Ok(ok_response(Some(task)))
 }
 
-fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+fn handle_show(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let (task, parent_summaries) = crate::board::awareness::get_task(conn, &task_id)?;
+    require_member(conn, &task.board_id, sender)?;
 
     let mut resp = ok_response(Some(task));
     if !parent_summaries.is_empty() {
@@ -576,13 +600,14 @@ fn handle_show(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     Ok(resp)
 }
 
-fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+fn handle_list(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     // params: board_id (from command params)
     let board_id = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
+    require_member(conn, board_id, sender)?;
     let status = cmd
         .params
         .as_ref()
@@ -605,19 +630,20 @@ fn handle_list(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse
     Ok(data_response(json!({"tasks": task_list})))
 }
 
-fn handle_roles(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
-    let _board_id = cmd
+fn handle_roles(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+    let board_id = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
+    require_member(conn, board_id, sender)?;
     let roles = crate::board::awareness::list_roles(conn)?;
     let role_names: Vec<String> = roles.keys().cloned().collect();
     tracing::info!("[a2a_board] roles: {:?}", role_names);
     Ok(data_response(json!({"roles": roles})))
 }
 
-fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+fn handle_board_status(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let board_id = cmd
         .params
         .as_ref()
@@ -625,18 +651,20 @@ fn handle_board_status(conn: &Connection, cmd: &A2aCommand) -> AppResult<Command
         .ok_or_else(|| {
             crate::core::errors::AppError::BadRequest("board_id required".to_string())
         })?;
+    require_member(conn, board_id, sender)?;
     let status = crate::board::awareness::board_status(conn, board_id)?;
 
     tracing::info!("[a2a_board] board_status: board={}", board_id);
     Ok(data_response(status))
 }
 
-fn handle_members(conn: &Connection, cmd: &A2aCommand) -> AppResult<CommandResponse> {
+fn handle_members(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
     let board_id = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("board_id").and_then(|v| v.as_str()))
         .unwrap_or("");
+    require_member(conn, board_id, sender)?;
     let members = crate::board::awareness::list_members(conn, board_id, None)?;
     let member_list: Vec<serde_json::Value> = members
         .iter()
@@ -774,7 +802,22 @@ fn handle_init(
         created_at: ts.clone(),
         completed_at: None,
     };
-    db::create_board(conn, &board)?;
+    // Idempotent upsert: first-time init creates the board record;
+    // refresh on an existing board (auto-created by the interceptor)
+    // must not fail — create_board refuses duplicates (903facc A2).
+    match db::get_board(conn, board_id) {
+        Ok(existing) => {
+            let mut updated = existing;
+            if board.goal.is_some() {
+                updated.goal = board.goal.clone();
+            }
+            updated.status = BoardStatus::Active;
+            db::update_board(conn, &updated)?;
+        }
+        Err(_) => {
+            db::create_board(conn, &board)?;
+        }
+    }
 
     // Add members (required)
     let members_arr = cmd
@@ -908,80 +951,9 @@ fn handle_init(
 /// Default role-permission mappings (secure defaults).
 /// Each verb is mapped to allowed roles. If role_permissions is provided in init,
 /// these defaults are overwritten by the user-specified values.
+/// Single source of truth lives in db::seed_default_role_permissions (L3).
 fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
-    let defaults: &[(&str, &[&str])] = &[
-        (
-            "orchestrator",
-            &[
-                "create",
-                "assign",
-                "review",
-                "block",
-                "unblock",
-                "cancel",
-                "reassign",
-                "edit",
-                "deadline",
-                "notify",
-                "members",
-                "roles",
-                "config",
-                "arbitrate",
-                "comment",
-                "list",
-                "show",
-                "status",
-                "heartbeat",
-            ],
-        ),
-        (
-            "verifier",
-            &[
-                "verify",
-                "approve",
-                "reject",
-                "output",
-                "comment",
-                "list",
-                "show",
-                "roles",
-                "members",
-                "status",
-                "heartbeat",
-            ],
-        ),
-        (
-            "worker",
-            &[
-                "complete",
-                "commit",
-                "block",
-                "heartbeat",
-                "comment",
-                "list",
-                "show",
-                "roles",
-                "members",
-                "status",
-            ],
-        ),
-        (
-            "owner",
-            &[
-                "create", "unblock", "reassign", "reopen", "comment", "list", "show", "status",
-                "members", "roles",
-            ],
-        ),
-    ];
-    for (role, verbs) in defaults {
-        for verb in *verbs {
-            conn.execute(
-                "INSERT OR IGNORE INTO role_permissions (role, verb) VALUES (?1, ?2)",
-                rusqlite::params![role, verb],
-            )?;
-        }
-    }
-    Ok(())
+    db::seed_default_role_permissions(conn)
 }
 
 fn handle_reopen(
@@ -1006,11 +978,28 @@ fn handle_reopen(
         ));
     }
 
-    // Reset all done tasks to running
+    // Reset all done tasks to running; also demote already-Ready
+    // children back to Todo — they became executable only because the
+    // parent completed, so reopening the parent must invalidate them
+    // (L4: reopen was one-way, leaving children runnable while the
+    // parent was being redone).
     let tasks = db::list_tasks(conn, board_id, None, None)?;
+    let reopened: Vec<String> = tasks
+        .iter()
+        .filter(|t| t.status == TaskStatus::Done)
+        .map(|t| t.short_id.clone())
+        .collect();
     for mut task in tasks {
         if task.status == TaskStatus::Done {
             task.status = TaskStatus::Running;
+            task.updated_at = now();
+            db::update_task(conn, &task)?;
+        } else if task.status == TaskStatus::Ready
+            && task.parent_ids.iter().any(|p| reopened.contains(p))
+        {
+            // Child of a reopened task: not ready to run until the
+            // parent completes again.
+            task.status = TaskStatus::Todo;
             task.updated_at = now();
             db::update_task(conn, &task)?;
         }
@@ -1051,7 +1040,7 @@ fn handle_arbitrate(
         .as_ref()
         .and_then(|p| p.get("dispute").and_then(|v| v.as_str()))
         .unwrap_or("");
-    let admin_email = ""; // TODO: resolve from board config
+    let admin_email = ""; // TODO: resolve from board config (no admin field on Board yet)
 
     notifier.notify_arbitrate(task.as_ref(), sender, admin_email, dispute);
     Ok(ok_response(None))
@@ -1380,13 +1369,93 @@ mod tests {
         assert!(resp.is_err());
     }
 
+    // ── approve/reject status machine (P2-2) ─────────────────────
+    #[test]
+    fn test_approve_rejected_unless_reviewing() {
+        // A task that is not in Reviewing must not be approvable even by
+        // its reviewer — the state machine must gate the transition.
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
+        let cmd = make_cmd("approve", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io");
+        assert!(resp.is_err(), "approve of non-Reviewing task must be rejected");
+    }
+
+    #[test]
+    fn test_reject_rejected_unless_reviewing() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
+        let cmd = make_cmd("reject", Some(&tid), Some(serde_json::json!({"reason": "x"})));
+        let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io");
+        assert!(resp.is_err(), "reject of non-Reviewing task must be rejected");
+    }
+
+    // ── reopen demotes Ready children (L4) ────────────────────────
+    #[test]
+    fn test_reopen_demotes_ready_children() {
+        let (conn, board_id, notifier) = setup();
+        // Parent task: done. Child: ready (promoted when parent completed).
+        let ptid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let child = Task {
+            id: db::make_task_id(&board_id, "T2"),
+            short_id: "T2".to_string(),
+            board_id: board_id.clone(),
+            title: "Child".to_string(),
+            body: String::new(),
+            status: TaskStatus::Ready,
+            assignee: "worker@t.io".to_string(),
+            reviewer: None,
+            parent_ids: vec!["T1".to_string()],
+            tags: vec![],
+            summary: String::new(),
+            metadata: None,
+            created_by: "orch@t.io".to_string(),
+            created_at: now(),
+            updated_at: now(),
+            completed_at: None,
+            cancelled_at: None,
+            deadline: None,
+        };
+        db::create_task(&conn, &child).unwrap();
+        // Parent done + board awaiting owner
+        let mut parent = db::get_task(&conn, &ptid).unwrap();
+        parent.status = TaskStatus::Done;
+        db::update_task(&conn, &parent).unwrap();
+        let mut board = db::get_board(&conn, &board_id).unwrap();
+        board.status = BoardStatus::AwaitingOwner;
+        db::update_board(&conn, &board).unwrap();
+
+        let cmd = make_cmd("reopen", None, Some(serde_json::json!({"board_id": board_id})));
+        let resp = execute_command(&conn, &notifier, &cmd, "human@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let child_after = db::get_task(&conn, &db::make_task_id(&board_id, "T2")).unwrap();
+        assert_eq!(
+            child_after.status,
+            TaskStatus::Todo,
+            "Ready child of a reopened task must be demoted to Todo"
+        );
+    }
+
+    // ── seed unification (L3) ─────────────────────────────────────
+    #[test]
+    fn test_orchestrator_has_output_and_create_perms() {
+        // Both creation paths must give orchestrator the full verb set —
+        // output (new path) and create/status (init path) must coexist.
+        let (conn, _board_id, _notifier) = setup();
+        assert!(db::check_role_permission(&conn, "orchestrator", "output").unwrap());
+        assert!(db::check_role_permission(&conn, "orchestrator", "create").unwrap());
+        assert!(db::check_role_permission(&conn, "orchestrator", "status").unwrap());
+        assert!(db::check_role_permission(&conn, "orchestrator", "init").unwrap());
+        assert!(db::check_role_permission(&conn, "owner", "reopen").unwrap());
+    }
+
     // ── queries ───────────────────────────────────────────────────
     #[test]
     fn test_list_tasks() {
         let (conn, board_id, notifier) = setup();
         make_task(&conn, &board_id, "T1", "worker@t.io");
         make_task(&conn, &board_id, "T2", "worker@t.io");
-        let cmd = make_cmd("list", None, None);
+        let cmd = make_cmd("list", None, Some(serde_json::json!({"board_id": board_id})));
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1411,7 +1480,7 @@ mod tests {
     #[test]
     fn test_members() {
         let (conn, board_id, notifier) = setup();
-        let cmd = make_cmd("members", None, None);
+        let cmd = make_cmd("members", None, Some(serde_json::json!({"board_id": board_id})));
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1419,7 +1488,7 @@ mod tests {
     #[test]
     fn test_roles() {
         let (conn, board_id, notifier) = setup();
-        let cmd = make_cmd("roles", None, None);
+        let cmd = make_cmd("roles", None, Some(serde_json::json!({"board_id": board_id})));
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1441,5 +1510,46 @@ mod tests {
         let cmd = make_cmd("nonexistent", None, None);
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "error");
+    }
+
+    // ── init/refresh idempotency (903facc A2 regression) ──────────
+    #[test]
+    fn test_init_on_existing_board_succeeds() {
+        // handle_init must not fail when the board record already exists
+        // (interceptor auto-creates it before dispatching the command).
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [
+                    {"email": "orch@t.io", "role": "orchestrator", "display_name": "Orch"},
+                    {"email": "worker@t.io", "role": "worker", "display_name": "Worker"},
+                ],
+                "description": "updated goal",
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "human@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let board = db::get_board(&conn, &board_id).unwrap();
+        assert_eq!(board.goal.as_deref(), Some("updated goal"));
+        assert_eq!(board.status, BoardStatus::Active);
+    }
+
+    #[test]
+    fn test_init_non_owner_rejected() {
+        // Only an owner member may refresh the member set.
+        let (conn, _board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [
+                    {"email": "orch@t.io", "role": "orchestrator", "display_name": "Orch"},
+                ],
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io");
+        assert!(resp.is_err(), "non-owner init must be rejected");
     }
 }

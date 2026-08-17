@@ -310,7 +310,7 @@ impl Notifier {
             &format!("[Confirm] output {} — {}", self.board_short_id, t(task, "验收通过", "Accepted")),
         );
         if let Ok(members) = crate::board::db::list_members(
-            &crate::board::db::open_board_db("", &self.board_id).unwrap(),
+            &crate::board::db::open_board_db(&self.board_db_path, &self.board_id).unwrap(),
             &self.board_id,
         ) {
             for m in &members {
@@ -346,7 +346,7 @@ impl Notifier {
     pub fn notify_all(&self, board_id: &str, message: &str) {
         let subject = format!("[A2A] notice: {} {}", self.board_short_id, message);
         if let Ok(members) = crate::board::db::list_members(
-            &crate::board::db::open_board_db("", board_id).unwrap(),
+            &crate::board::db::open_board_db(&self.board_db_path, board_id).unwrap(),
             board_id,
         ) {
             self.create_email_to_all(&members, &subject, message);
@@ -466,7 +466,10 @@ mod tests {
     fn test_notify_assigned_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -486,7 +489,10 @@ mod tests {
     fn test_notify_review_needed_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -505,7 +511,10 @@ mod tests {
     fn test_notify_approved_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -524,7 +533,10 @@ mod tests {
     fn test_notify_rejected_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -543,7 +555,10 @@ mod tests {
     fn test_notify_blocked_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -562,7 +577,10 @@ mod tests {
     fn test_notify_unblocked_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -581,7 +599,10 @@ mod tests {
     fn test_notify_cancelled_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -600,7 +621,10 @@ mod tests {
     fn test_notify_comment_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -619,7 +643,10 @@ mod tests {
     fn test_notify_comment_to_reviewer_when_assignee_comments() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -639,7 +666,10 @@ mod tests {
     fn test_notify_all_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
@@ -657,7 +687,10 @@ mod tests {
     fn test_notify_arbitrate_subject() {
         let board = make_board();
         let notifier = Notifier {
-            board_db_path: "".to_string(),
+            board_db_path: std::env::temp_dir()
+                .join("amail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
             email_factory: None,
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
