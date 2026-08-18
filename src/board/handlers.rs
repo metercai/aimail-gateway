@@ -38,6 +38,24 @@ fn verify_board_token(
         .flatten()
 }
 
+/// S2: token auth + role authorization in one step — mirrors the email
+/// command path (require_role in commands.rs). Returns the member email
+/// only when the token is valid AND the member's role may use `verb`.
+fn authorize(
+    headers: &HeaderMap,
+    storage_path: &str,
+    board_id: &str,
+    member_email: &str,
+    verb: &str,
+) -> Option<String> {
+    let email = verify_board_token(headers, storage_path, board_id, member_email)?;
+    let conn = db::open_board_db(storage_path, board_id).ok()?;
+    let member = db::get_member(&conn, board_id, &email).ok()??;
+    db::check_role_permission(&conn, &member.role, verb)
+        .ok()
+        .and_then(|allowed| allowed.then_some(email))
+}
+
 pub async fn handle_list_tasks(
     Path(board_id): Path<String>,
     State(state): State<HttpState>,
@@ -45,10 +63,11 @@ pub async fn handle_list_tasks(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
+    let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
+    if authorize(&headers, &s, &board_id, email, "list").is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
+            Json(json!({"error":"invalid token or role"})),
         ));
     }
     let status_filter = query.get("status").map(|s| s.as_str());
@@ -75,15 +94,15 @@ pub async fn handle_list_members(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
+    let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
+    if authorize(&headers, &s, &board_id, email, "members").is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
+            Json(json!({"error":"invalid token or role"})),
         ));
     }
-    let email = query.get("email").map(|v| v.as_str());
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match awareness::list_members(&conn, &board_id, email) {
+        Ok(conn) => match awareness::list_members(&conn, &board_id, query.get("email").map(|v| v.as_str())) {
             Ok(members) => Ok(Json(json!({"status": "ok", "members": members}))),
             Err(e) => Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -104,10 +123,11 @@ pub async fn handle_list_roles(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
+    let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
+    if authorize(&headers, &s, &board_id, email, "roles").is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
+            Json(json!({"error":"invalid token or role"})),
         ));
     }
     match db::open_board_db(&s, &board_id) {
@@ -132,10 +152,11 @@ pub async fn handle_get_task(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
+    let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
+    if authorize(&headers, &s, &board_id, email, "show").is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
+            Json(json!({"error":"invalid token or role"})),
         ));
     }
     match db::open_board_db(&s, &board_id) {
@@ -167,12 +188,18 @@ pub async fn handle_post_heartbeat(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
     // Bearer token identifies the member → member email is the heartbeat actor.
-    let actor = match verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")) {
+    let actor = match authorize(
+        &headers,
+        &s,
+        &board_id,
+        query.get("email").map(|v| v.as_str()).unwrap_or(""),
+        "heartbeat",
+    ) {
         Some(email) => email,
         None => {
             return Err((
                 StatusCode::UNAUTHORIZED,
-                Json(json!({"error":"invalid token"})),
+                Json(json!({"error":"invalid token or role"})),
             ))
         }
     };
@@ -200,10 +227,11 @@ pub async fn handle_board_status(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
-    if verify_board_token(&headers, &s, &board_id, query.get("email").map(|v| v.as_str()).unwrap_or("")).is_none() {
+    let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
+    if authorize(&headers, &s, &board_id, email, "status").is_none() {
         return Err((
             StatusCode::UNAUTHORIZED,
-            Json(json!({"error":"invalid token"})),
+            Json(json!({"error":"invalid token or role"})),
         ));
     }
     match db::open_board_db(&s, &board_id) {

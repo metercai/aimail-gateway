@@ -47,12 +47,10 @@ static ZH_SIG: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 fn extract_chinese_bare(body: &str) -> Option<String> {
-    // Only check the last 500 characters
-    let tail = if body.len() > 500 {
-        &body[body.len() - 500..]
-    } else {
-        body
-    };
+    // Only check the last 500 characters (R1: byte slicing at a non-char
+    // boundary would panic — floor_char_boundary snaps to a valid edge).
+    let start = body.len().saturating_sub(500);
+    let tail = &body[body.floor_char_boundary(start)..];
     let caps = ZH_SIG.captures(tail)?;
     let name = caps.get(1)?.as_str();
     let org = caps.get(2)?.as_str();
@@ -74,10 +72,10 @@ fn clean_signature(sig: &str) -> String {
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
         .collect();
-    // Join with " | " and truncate to 300 chars
+    // Join with " | " and truncate to 300 chars (R1: safe boundary).
     let joined = lines.join(" | ");
     if joined.len() > 300 {
-        joined[..300].to_string()
+        joined[..joined.floor_char_boundary(300)].to_string()
     } else {
         joined
     }
@@ -490,5 +488,40 @@ mod tests {
             "RFC 3676 confidence expected 0.95"
         );
         assert!(sig.unwrap().contains("Jane Smith"));
+    }
+
+    // ── R1: UTF-8 boundary safety ──────────────────────────────────
+    #[test]
+    fn test_utf8_boundary_no_panic_chinese_tail() {
+        // >500 bytes of CJK with a multi-byte char straddling the byte
+        // boundary at len-500 — used to panic in extract_chinese_bare.
+        let mut body = String::new();
+        while body.len() < 600 {
+            body.push('字'); // 3 bytes each
+        }
+        body.push('\n');
+        body.push_str("张三\n某某科技公司");
+        let (sig, _conf) = extract_signature(&body);
+        // Must not panic; Chinese bare-name rule may or may not match the
+        // tail — the contract is: no panic, graceful None or Some.
+        if let Some(s) = sig {
+            assert!(s.contains("张三"), "unexpected sig: {s}");
+        }
+    }
+
+    #[test]
+    fn test_utf8_boundary_no_panic_truncation() {
+        // clean_signature truncates at 300 bytes — CJK join must not panic.
+        let mut long_line = String::new();
+        while long_line.len() < 600 {
+            long_line.push('字');
+        }
+        let body = format!("Text.\n-- \n{long_line}");
+        let (sig, conf) = extract_signature(&body);
+        assert!(sig.is_some());
+        assert!(conf > 0.9);
+        let s = sig.unwrap();
+        assert!(s.len() <= 300, "truncated sig too long: {}", s.len());
+        assert!(s.is_char_boundary(s.len()), "truncation must end on a char boundary");
     }
 }

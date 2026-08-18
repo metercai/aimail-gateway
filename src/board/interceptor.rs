@@ -248,6 +248,18 @@ impl InboundInterceptor for A2aInterceptor {
                     for m in members {
                         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("worker");
+                        // S5: role whitelist — arbitrary role strings would
+                        // register a role with no permission rows (open-mode
+                        // under R2) or fake privilege. Reject the whole
+                        // command instead of silently registering a bad role.
+                        if !db::KNOWN_ROLES.contains(&role) {
+                            tracing::warn!(
+                                "[a2a_board] [A2A] new rejected: unknown role '{}' (sender {})",
+                                role,
+                                sender
+                            );
+                            return crate::core::strategy::InterceptorDecision::PassThrough;
+                        }
                         let display = m
                             .get("display_name")
                             .and_then(|v| v.as_str())
@@ -492,6 +504,22 @@ impl InboundInterceptor for A2aInterceptor {
                 }
                 Err(_) => {
                     // Auto-create board record if not exists (for init command)
+                    // S3: quota enforcement on this fallback — resolve the
+                    // sender's system and refuse when the active-board quota
+                    // is exhausted (mirrors the [A2A] new path).
+                    let sys_id = self
+                        .email_factory
+                        .env_factory
+                        .lookup_domain_addr(&sender)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|r| r.system_id)
+                        .unwrap_or_default();
+                    if let Err(e) = self.board_quota.check_active_boards(&sys_id) {
+                        tracing::warn!("[a2a_board] [A-flow] Board quota exceeded: {e:?}");
+                        return crate::core::strategy::InterceptorDecision::PassThrough;
+                    }
                     let ts = chrono::Utc::now().to_rfc3339();
                     let board_domain = to_addr.split('@').nth(1).unwrap_or("");
                     let board = Board {

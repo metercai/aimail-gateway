@@ -22,6 +22,9 @@ pub fn execute_command(
         "complete" => handle_complete(conn, notifier, cmd, sender),
         "approve" => handle_approve(conn, notifier, cmd, sender),
         "review" => handle_review(conn, notifier, cmd, sender),
+        // Q2: "verify" is deliberately the same handler as "approve" —
+        // both verbs complete the review gate; kept as an alias for
+        // clients that use verify/reject terminology.
         "verify" => handle_approve(conn, notifier, cmd, sender),
         "reject" => handle_reject(conn, notifier, cmd, sender),
         "block" => handle_block(conn, notifier, cmd, sender),
@@ -457,6 +460,13 @@ fn handle_reassign(
             "assignee required".to_string(),
         ));
     }
+    // S5: assignee must be an existing board member (non-member tasks
+    // can never be heartbeat/complete'd and stay stuck forever).
+    if db::get_member(conn, &task.board_id, new_assignee)?.is_none() {
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "assignee not a board member: {new_assignee}"
+        )));
+    }
     task.assignee = new_assignee.to_string();
     task.updated_at = now();
     db::update_task(conn, &task)?;
@@ -496,6 +506,18 @@ fn handle_deadline(
         .as_ref()
         .and_then(|p| p.get("deadline").and_then(|v| v.as_str()))
         .unwrap_or("");
+    if deadline.is_empty() {
+        return Err(crate::core::errors::AppError::BadRequest(
+            "deadline required".to_string(),
+        ));
+    }
+    // S5: deadline must be RFC3339 — arbitrary strings would never
+    // sort/compare correctly against other timestamps.
+    if chrono::DateTime::parse_from_rfc3339(deadline).is_err() {
+        return Err(crate::core::errors::AppError::BadRequest(format!(
+            "deadline must be RFC3339, got: {deadline}"
+        )));
+    }
     task.deadline = Some(deadline.to_string());
     task.updated_at = now();
     db::update_task(conn, &task)?;
@@ -708,6 +730,25 @@ fn handle_create(
             for t in tasks {
                 let title = t.get("title").and_then(|v| v.as_str()).unwrap_or("");
                 let assignee = t.get("assignee").and_then(|v| v.as_str()).unwrap_or("");
+                let reviewer = t
+                    .get("reviewer")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                // S5: assignee/reviewer must be existing board members —
+                // a non-member could never heartbeat/complete the task,
+                // leaving it stuck forever.
+                if !assignee.is_empty() && db::get_member(conn, board_id, assignee)?.is_none() {
+                    return Err(crate::core::errors::AppError::BadRequest(format!(
+                        "assignee not a board member: {assignee}"
+                    )));
+                }
+                if let Some(rev) = &reviewer {
+                    if !rev.is_empty() && db::get_member(conn, board_id, rev)?.is_none() {
+                        return Err(crate::core::errors::AppError::BadRequest(format!(
+                            "reviewer not a board member: {rev}"
+                        )));
+                    }
+                }
                 let short_id = db::next_short_id(conn, board_id)?;
                 let task_id = db::make_task_id(board_id, &short_id);
                 let ts = now();
@@ -727,10 +768,7 @@ fn handle_create(
                         TaskStatus::Ready
                     },
                     assignee: assignee.to_string(),
-                    reviewer: t
-                        .get("reviewer")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                    reviewer,
                     parent_ids: t
                         .get("parents")
                         .and_then(|v| v.as_array())
@@ -775,6 +813,20 @@ fn handle_init(
     let board_id = &notifier.board_id;
     let short_id = &notifier.board_short_id;
     let ts = now();
+
+    // Hardcoded: only human (owner) can init/refresh a board — checked
+    // BEFORE any board-record or member mutation (S4: the upsert used to
+    // run first, so a non-owner could flip status/goal before being
+    // rejected; member set is never touched by non-owners).
+    let sender_member = db::get_member(conn, board_id, sender)?;
+    match sender_member {
+        Some(m) if m.role == "owner" => {}
+        _ => {
+            return Err(crate::core::errors::AppError::Forbidden(
+                "only human can refresh board".to_string(),
+            ))
+        }
+    }
 
     // refresh keeps the existing goal when none is provided
     // (INSERT OR REPLACE would otherwise overwrite it with NULL).
@@ -828,18 +880,6 @@ fn handle_init(
         .ok_or_else(|| {
             crate::core::errors::AppError::BadRequest("members array required".to_string())
         })?;
-    // Hardcoded: only human (owner) can refresh board — check BEFORE
-    // any member mutation so a non-owner can never alter the member set.
-    let sender_member = db::get_member(conn, board_id, sender)?;
-    match sender_member {
-        Some(m) if m.role == "owner" => {}
-        _ => {
-            return Err(crate::core::errors::AppError::Forbidden(
-                "only human can refresh board".to_string(),
-            ))
-        }
-    }
-
     // Existing members keep their tokens; only new members get fresh
     // tokens (so existing credentials stay valid across refreshes).
     let existing_tokens: std::collections::HashMap<String, String> = db::list_members(conn, &board_id)?
@@ -850,6 +890,15 @@ fn handle_init(
     for m in members_arr {
         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("worker");
+        // S5: role whitelist — an arbitrary role string would otherwise
+        // register a role with no permission rows, which R2's open-mode
+        // used to treat as allow-all (privilege escalation).
+        if !db::KNOWN_ROLES.contains(&role) {
+            return Err(crate::core::errors::AppError::BadRequest(format!(
+                "unknown role '{role}' — known roles: {}",
+                db::KNOWN_ROLES.join(", ")
+            )));
+        }
         let display_name = m
             .get("display_name")
             .and_then(|v| v.as_str())
@@ -916,6 +965,25 @@ fn handle_init(
                 Some((role, verbs))
             })
             .collect();
+        // S5: role and verb whitelists — an arbitrary role would get
+        // no permission rows (open-mode under R2) and arbitrary verbs
+        // would silently mint inert/privileged rows.
+        for (role, verbs) in &perms {
+            if !db::KNOWN_ROLES.contains(&role.as_str()) {
+                return Err(crate::core::errors::AppError::BadRequest(format!(
+                    "unknown role '{role}' in role_permissions — known roles: {}",
+                    db::KNOWN_ROLES.join(", ")
+                )));
+            }
+            for verb in verbs {
+                if !db::KNOWN_VERBS.contains(&verb.as_str()) {
+                    return Err(crate::core::errors::AppError::BadRequest(format!(
+                        "unknown verb '{verb}' for role '{role}' — known verbs: {}",
+                        db::KNOWN_VERBS.join(", ")
+                    )));
+                }
+            }
+        }
         db::insert_role_permissions(conn, board_id, &perms)?;
         tracing::info!(
             "[a2a_board] role_permissions override: {} roles",
@@ -1051,14 +1119,17 @@ fn handle_arbitrate(
 fn promote_children(conn: &Connection, notifier: &Notifier, parent: &Task) {
     // Find tasks whose parent_ids contain this task's short_id
     if let Ok(tasks) = db::list_tasks(conn, &parent.board_id, None, None) {
+        // R3: one scan instead of N+1 — load the done set once and check
+        // parent completion in memory.
+        let done: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .map(|t| t.short_id.clone())
+            .collect();
         for mut child in tasks {
             if child.parent_ids.contains(&parent.short_id) {
                 // Check if all parents are done
-                let all_done = child.parent_ids.iter().all(|pid| {
-                    db::list_tasks(conn, &parent.board_id, Some("done"), None)
-                        .map(|t| t.iter().any(|x| x.short_id == *pid))
-                        .unwrap_or(false)
-                });
+                let all_done = child.parent_ids.iter().all(|pid| done.contains(pid));
                 if all_done && child.status == TaskStatus::Todo {
                     child.status = TaskStatus::Ready;
                     let _ = db::update_task(conn, &child);
@@ -1128,7 +1199,12 @@ mod tests {
 
         let notifier = Notifier {
             email_factory: None,
-            board_db_path: "".to_string(),
+            // temp dir — notify helpers open_board_db on this path and
+            // must never create a2a_board/ under the repo root.
+            board_db_path: std::env::temp_dir()
+                .join("amail-commands-test")
+                .to_string_lossy()
+                .to_string(),
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
             board_email: board.board_email.clone(),
@@ -1551,5 +1627,109 @@ mod tests {
         );
         let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io");
         assert!(resp.is_err(), "non-owner init must be rejected");
+    }
+
+    // ── S4: init gate precedes board-record mutation ───────────────
+    #[test]
+    fn test_init_non_owner_does_not_mutate_board() {
+        let (conn, board_id, notifier) = setup();
+        let before = db::get_board(&conn, &board_id).unwrap();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [{"email": "orch@t.io", "role": "orchestrator"}],
+                "description": "hacked goal",
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io");
+        assert!(resp.is_err(), "non-owner init must be rejected");
+        let after = db::get_board(&conn, &board_id).unwrap();
+        assert_eq!(
+            after.goal, before.goal,
+            "S4: non-owner init must not change the goal"
+        );
+        assert_eq!(after.status, before.status, "S4: status must stay untouched");
+    }
+
+    // ── S5: role/verb whitelists and member/deadline validation ────
+    #[test]
+    fn test_init_rejects_unknown_member_role() {
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [{"email": "ghost@t.io", "role": "admin"}],
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "human@t.io");
+        assert!(resp.is_err(), "unknown member role must be rejected");
+        // No member may have been registered with the bogus role.
+        assert!(db::get_member(&conn, &board_id, "ghost@t.io")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn test_init_rejects_unknown_role_permission_role() {
+        let (conn, _board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [{"email": "orch@t.io", "role": "orchestrator"}],
+                "role_permissions": [{"role": "admin", "verbs": ["list"]}],
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "human@t.io");
+        assert!(resp.is_err(), "unknown role in role_permissions must be rejected");
+    }
+
+    #[test]
+    fn test_init_rejects_unknown_role_permission_verb() {
+        let (conn, _board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "init",
+            None,
+            Some(serde_json::json!({
+                "members": [{"email": "orch@t.io", "role": "orchestrator"}],
+                "role_permissions": [{"role": "worker", "verbs": ["delete"]}],
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "human@t.io");
+        assert!(resp.is_err(), "unknown verb in role_permissions must be rejected");
+    }
+
+    #[test]
+    fn test_create_rejects_non_member_assignee() {
+        let (conn, board_id, notifier) = setup();
+        let cmd = make_cmd(
+            "create",
+            None,
+            Some(serde_json::json!({
+                "board_id": board_id,
+                "tasks": [{"title": "x", "assignee": "ghost@t.io"}],
+            })),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err(), "non-member assignee must be rejected");
+    }
+
+    #[test]
+    fn test_deadline_rejects_bad_format() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd(
+            "deadline",
+            Some(&tid),
+            Some(serde_json::json!({"deadline": "tomorrow"})),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
+        assert!(resp.is_err(), "non-RFC3339 deadline must be rejected");
+        assert!(
+            db::get_task(&conn, &tid).unwrap().deadline.is_none(),
+            "bad deadline must not be stored"
+        );
     }
 }

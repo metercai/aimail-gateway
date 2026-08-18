@@ -252,6 +252,21 @@ pub fn insert_role_permissions(
     Ok(())
 }
 
+/// Known board roles (S5 whitelist). Custom role strings are rejected at
+/// member registration and role_permissions override — an arbitrary role
+/// used to get open-mode permissions (R2) and enabled privilege escalation.
+pub const KNOWN_ROLES: &[&str] = &["orchestrator", "verifier", "worker", "owner"];
+
+/// Known command verbs (S5 whitelist for role_permissions overrides).
+/// Union of every role's seeded verb set — typos/unknown verbs are rejected
+/// instead of silently creating inert permission rows.
+pub const KNOWN_VERBS: &[&str] = &[
+    "init", "tasks", "create", "assign", "review", "block", "unblock",
+    "cancel", "reassign", "edit", "deadline", "output", "notify", "members",
+    "roles", "config", "arbitrate", "comment", "list", "show", "status",
+    "heartbeat", "verify", "approve", "reject", "complete", "commit", "reopen",
+];
+
 /// Single source of truth for default role→verb permissions (L3 fix:
 /// the seed previously existed twice with different verb sets — init
 /// path (commands.rs) and new path (interceptor.rs) diverged, so the
@@ -347,7 +362,10 @@ pub fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-/// Check if a role has permission for a verb. Returns true if no permissions defined (open mode).
+/// Check if a role has permission for a verb (R2: an unseeded role used to
+/// be open — allow-all — which combined with S5's arbitrary roles meant a
+/// custom role got every verb. Now: known roles are seeded idempotently on
+/// first check; unknown roles are denied outright).
 pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppResult<bool> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM role_permissions WHERE role = ?1",
@@ -355,8 +373,14 @@ pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppRe
         |r| r.get(0),
     )?;
     if count == 0 {
-        // If no permissions defined, allow all (backward compatible)
-        return Ok(true);
+        if KNOWN_ROLES.contains(&role) {
+            // Legacy board (created before every creation path seeded):
+            // seed defaults once — INSERT OR IGNORE is idempotent.
+            seed_default_role_permissions(conn)?;
+        } else {
+            // Unknown role: no permissions at all.
+            return Ok(false);
+        }
     }
     let allowed: i64 = conn.query_row(
         "SELECT COUNT(*) FROM role_permissions WHERE role = ?1 AND verb = ?2",
@@ -963,5 +987,28 @@ mod tests {
         create_task(&conn, &t1).unwrap();
         let id2 = next_short_id(&conn, &board_id).unwrap();
         assert_eq!(id2, "T2");
+    }
+
+    // ── R2: role_permissions open-mode closure ─────────────────────
+    #[test]
+    fn test_check_role_permission_unknown_role_denied() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // Unknown role on an unseeded table used to be open (allow-all).
+        assert!(!check_role_permission(&conn, "admin", "list").unwrap());
+        assert!(!check_role_permission(&conn, "root", "arbitrate").unwrap());
+    }
+
+    #[test]
+    fn test_check_role_permission_known_role_seeds_and_allows() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // Known role on an empty (legacy) table: seeded idempotently, then
+        // its default verbs apply; non-default verbs still denied.
+        assert!(check_role_permission(&conn, "worker", "list").unwrap());
+        assert!(check_role_permission(&conn, "worker", "heartbeat").unwrap());
+        assert!(!check_role_permission(&conn, "worker", "arbitrate").unwrap());
+        assert!(check_role_permission(&conn, "orchestrator", "init").unwrap());
+        assert!(!check_role_permission(&conn, "orchestrator", "complete").unwrap());
     }
 }
