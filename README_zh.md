@@ -1,6 +1,6 @@
 [English](README.md) | 🇨🇳 中文
 
-# amail-gateway
+# aimail-gateway
 
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
 
@@ -9,23 +9,23 @@
 
 ---
 
-## 1. 什么是 amail-gateway
+## 1. 什么是 aimail-gateway
 
-amail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决了 Agent 收发邮件的核心问题：
+aimail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决了 Agent 收发邮件的核心问题：
 
-- **收信：** 传统方案依赖 IMAP/POP3 轮询，延迟高、资源浪费。amail-gateway 通过 Webhook 实时推送入站邮件，无需轮询。
+- **收信：** 传统方案依赖 IMAP/POP3 轮询，延迟高、资源浪费。aimail-gateway 通过 Webhook 实时推送入站邮件，无需轮询。
 - **发信：** 提供标准 HTTP API，通过调用 toolset 即可发信。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发，高效快捷。
 
-此外，amail-gateway 针对 Agent 在实际邮件场景的特点，做了专门的优化：
+此外，aimail-gateway 针对 Agent 在实际邮件场景的特点，做了专门的优化：
 
-- **安全：** Agent 不应暴露在开放的邮件网络中承受垃圾邮件和恶意攻击。amail-gateway 默认白名单机制，即只能与已授权联系人互发邮件，非授权不能发，非授不能收，双向管控杜绝安全隐患。同时，为每个 Agent 配置安全员，对关键操作进行把关，对完全兜底。
-- **内容：** 传统LLM 处理原始 HTML/MIME 邮件效率低下、浪费Token严重。amail-gateway 具有内容处理链，自动提取关键信息，剥离样式噪声，统一转换为 LLM 适用的 Markdown 干净文本。
-- **协作：** Agent 收发邮件的目的不仅仅是信息传递，更重要的是与外界进行类人的会话与协作。amail-gateway 为此内置了多项能力：
+- **安全：** Agent 不应暴露在开放的邮件网络中承受垃圾邮件和恶意攻击。aimail-gateway 默认白名单机制，即只能与已授权联系人互发邮件，非授权不能发，非授不能收，双向管控杜绝安全隐患。同时，为每个 Agent 配置安全员，对关键操作进行把关，对完全兜底。
+- **内容：** 传统LLM 处理原始 HTML/MIME 邮件效率低下、浪费Token严重。aimail-gateway 具有内容处理链，自动提取关键信息，剥离样式噪声，统一转换为 LLM 适用的 Markdown 干净文本。
+- **协作：** Agent 收发邮件的目的不仅仅是信息传递，更重要的是与外界进行类人的会话与协作。aimail-gateway 为此内置了多项能力：
   - **联系人画像和会话记忆**，让多方会话清晰自然，对答如流。
   - **陌生人 WHOAMI**，向公众展示自身定位，便于角色的发现和高效率的角色会话。
   - **A2A 看板引擎**，基于邮件协议实现异构多 Agent 之间的自主协作。
 
-**amail-gateway 是 AgentMail 的核心基础设施**，由 [AgentMail](https://github.com/metercai/agentmail) 的工具链完成不同 Agent 系统的集成，实现异构多 Agent 间的类人会话与协作。
+**aimail-gateway 是 AgentMail 的核心基础设施**，由 [AgentMail](https://github.com/metercai/agentmail) 的工具链完成不同 Agent 系统的集成，实现异构多 Agent 间的类人会话与协作。
 
 ---
 
@@ -81,7 +81,7 @@ amail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决
 
 ## 3. 快速开始
 
-amail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS，防火墙打开配置的smtp和http端口。
+aimail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS，防火墙打开配置的smtp和http端口。
 
 ```bash
 cp .env.example .env
@@ -176,7 +176,7 @@ path = "./data"
 
 [logging]
 # level = "info"
-# file = "/var/log/amail-gateway.log"
+# file = "/var/log/aimail-gateway.log"
 
 [admin]
 # email = "admin@yourdomain.com"

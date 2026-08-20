@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-docker.sh — Build & deploy amail-gateway Docker image to remote host
+# deploy-docker.sh — Build & deploy aimail-gateway Docker image to remote host
 #
 # Usage:
 #   export AMAIL_DEPLOY_HOST="1.2.3.4"
@@ -30,7 +30,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
 
 GIT_HASH=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 IMAGE_TAG="${AMAIL_IMAGE_TAG:-$GIT_HASH}"
-IMAGE_NAME="amail-gateway:${IMAGE_TAG}"
+IMAGE_NAME="aimail-gateway:${IMAGE_TAG}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_PATH="${AMAIL_CONFIG_PATH:-/etc/amail/config.toml}"
@@ -61,9 +61,9 @@ push() {
 run() {
     echo "Starting container on ${HOST}..."
     ssh -p "$PORT" $SSH_OPTS "${USER}@${HOST}" "
-        docker rm -f amail-gateway 2>/dev/null || true
+        docker rm -f aimail-gateway 2>/dev/null || true
         docker run -d --restart=always \
-            --name amail-gateway \
+            --name aimail-gateway \
             -p ${HTTP_PORT}:8080 \
             -p ${SMTP_PORT}:25 \
             -v ${CONFIG_PATH}:/config.toml:ro \
@@ -78,7 +78,7 @@ run() {
 stop() {
     echo "Stopping container on ${HOST}..."
     ssh -p "$PORT" $SSH_OPTS "${USER}@${HOST}" "
-        docker rm -f amail-gateway 2>/dev/null && echo 'stopped' || echo 'not running'
+        docker rm -f aimail-gateway 2>/dev/null && echo 'stopped' || echo 'not running'
     "
 }
 
@@ -90,7 +90,7 @@ health() {
 
 logs() {
     ssh -p "$PORT" $SSH_OPTS "${USER}@${HOST}" "
-        docker logs --tail 50 amail-gateway 2>/dev/null || echo 'no logs'
+        docker logs --tail 50 aimail-gateway 2>/dev/null || echo 'no logs'
     "
 }
 

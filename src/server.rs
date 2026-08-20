@@ -14,7 +14,7 @@ use amail_base::core::api::http::create_router;
 use amail_base::core::api::monitor::Metrics;
 use amail_base::core::strategy::RouterHook;
 
-/// amail-gateway server: SMTP, HTTP, and retry worker.
+/// aimail-gateway server: SMTP, HTTP, and retry worker.
 pub struct Server {
     config: Config,
     db: Database,

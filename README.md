@@ -1,6 +1,6 @@
 [English](README.md) | [🇨🇳 中文](README_zh.md)
 
-# amail-gateway
+# aimail-gateway
 
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
 
@@ -9,23 +9,23 @@
 
 ---
 
-## 1. What is amail-gateway
+## 1. What is aimail-gateway
 
-amail-gateway is a lightweight, high-performance Rust mail gateway that solves the core problems of Agent email sending and receiving:
+aimail-gateway is a lightweight, high-performance Rust mail gateway that solves the core problems of Agent email sending and receiving:
 
-- **Inbound:** Traditional solutions rely on IMAP/POP3 polling — high latency, wasted resources. amail-gateway pushes inbound mail to Agents in real-time via Webhook. No polling required.
+- **Inbound:** Traditional solutions rely on IMAP/POP3 polling — high latency, wasted resources. aimail-gateway pushes inbound mail to Agents in real-time via Webhook. No polling required.
 - **Outbound:** A standard HTTP API lets Agents send mail with a single toolset call. Same-gateway recipients go through internal Webhook direct delivery; external addresses go through SMTP relay — fast and efficient.
 
-Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actually use email:
+Beyond these fundamentals, aimail-gateway is purpose-built for how AI Agents actually use email:
 
 - **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. The default whitelist enforces bidirectional control — unauthorized senders cannot reach Agents, and Agents cannot send to unauthorized addresses. Every Agent has a designated security officer to gatekeep critical operations and provide a safety net.
-- **Content:** Traditional LLMs struggle with raw HTML/MIME email — inefficient and severely token-wasteful. amail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and uniformly converts to clean Markdown optimized for LLM consumption.
-- **Collaboration:** Email for Agents goes beyond message delivery — it's about human-like conversation and coordination. amail-gateway has several built-in capabilities for this:
+- **Content:** Traditional LLMs struggle with raw HTML/MIME email — inefficient and severely token-wasteful. aimail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and uniformly converts to clean Markdown optimized for LLM consumption.
+- **Collaboration:** Email for Agents goes beyond message delivery — it's about human-like conversation and coordination. aimail-gateway has several built-in capabilities for this:
   - **Contact profiling and session memory** — multi-party conversations stay clear and natural.
   - **Stranger [WHOAMI]** — Agents can publicly declare their role for easy discovery and efficient role-based interaction.
   - **A2A Board engine** — autonomous heterogeneous multi-Agent collaboration via standard mail protocols.
 
-**amail-gateway is the core infrastructure of AgentMail.** The [AgentMail](https://github.com/metercai/agentmail) toolchain integrates different Agent systems, enabling heterogeneous multi-Agent human-like conversation and collaboration over email.
+**aimail-gateway is the core infrastructure of AgentMail.** The [AgentMail](https://github.com/metercai/agentmail) toolchain integrates different Agent systems, enabling heterogeneous multi-Agent human-like conversation and collaboration over email.
 
 ---
 
@@ -82,7 +82,7 @@ Beyond these fundamentals, amail-gateway is purpose-built for how AI Agents actu
 
 ## 3. Quick Start
 
-amail-gateway needs to connect to the external mail network. Prepare a VPS with firewall ports open for SMTP and HTTP.
+aimail-gateway needs to connect to the external mail network. Prepare a VPS with firewall ports open for SMTP and HTTP.
 
 ```bash
 cp .env.example .env
@@ -177,7 +177,7 @@ path = "./data"
 
 [logging]
 # level = "info"
-# file = "/var/log/amail-gateway.log"
+# file = "/var/log/aimail-gateway.log"
 
 [admin]
 # email = "admin@yourdomain.com"

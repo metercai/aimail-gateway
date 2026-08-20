@@ -1,4 +1,4 @@
-//! amail-gateway CLI entry point.
+//! aimail-gateway CLI entry point.
 
 mod server;
 
@@ -32,7 +32,7 @@ async fn main() -> AppResult<()> {
             cmd_stop(&cli.pid_file)?;
             cmd_start(&cli).await
         }
-        Commands::Status => cmd_status("amail-gateway", &cli.pid_file),
+        Commands::Status => cmd_status("aimail-gateway", &cli.pid_file),
     }
 }
 

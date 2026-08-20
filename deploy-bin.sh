@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy.sh — Deploy amail-gateway to remote host
+# deploy.sh — Deploy aimail-gateway to remote host
 #
 # Usage:
 #   export AMAIL_DEPLOY_HOST="1.2.3.4"
@@ -42,14 +42,14 @@ SSH="ssh -p $PORT $SSH_OPTS ${USER}@${HOST}"
 SCP="scp -P $PORT $SSH_OPTS"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GATEWAY_BIN="${SCRIPT_DIR}/target/release/amail-gateway"
+GATEWAY_BIN="${SCRIPT_DIR}/target/release/aimail-gateway"
 REMOTE_DIR="/usr/local/bin"
 CONFIG="/etc/amail/config.toml"
 WORKDIR="/var/amail"
-SERVICE_NAME="amail-gateway"
+SERVICE_NAME="aimail-gateway"
 
 build() {
-    echo "Building amail-gateway (release)..."
+    echo "Building aimail-gateway (release)..."
     cd "$SCRIPT_DIR"
     cargo build --release
     [ -f "$GATEWAY_BIN" ] || { echo "ERROR: build failed"; exit 1; }
@@ -57,10 +57,10 @@ build() {
 }
 
 upload() {
-    echo "Uploading amail-gateway..."
+    echo "Uploading aimail-gateway..."
     [ -f "$GATEWAY_BIN" ] || { echo "ERROR: binary not found at $GATEWAY_BIN"; exit 1; }
-    $SCP "$GATEWAY_BIN" "${USER}@${HOST}:${REMOTE_DIR}/amail-gateway"
-    $SSH "chmod +x ${REMOTE_DIR}/amail-gateway"
+    $SCP "$GATEWAY_BIN" "${USER}@${HOST}:${REMOTE_DIR}/aimail-gateway"
+    $SSH "chmod +x ${REMOTE_DIR}/aimail-gateway"
     echo "OK ($(ls -lh "$GATEWAY_BIN" | awk '{print $5}'))"
 }
 
@@ -68,17 +68,17 @@ start() {
     $SSH "mkdir -p $WORKDIR && \
     systemctl cat ${SERVICE_NAME} >/dev/null 2>&1 && \
     systemctl start ${SERVICE_NAME} && echo 'started (systemd)' || \
-    nohup ${REMOTE_DIR}/amail-gateway --config $CONFIG \
-      > /var/log/amail-gateway.log 2>&1 & \
-    echo \$! > /var/run/amail-gateway.pid && \
+    nohup ${REMOTE_DIR}/aimail-gateway --config $CONFIG \
+      > /var/log/aimail-gateway.log 2>&1 & \
+    echo \$! > /var/run/aimail-gateway.pid && \
     echo 'started (background)'"
 }
 
 stop() {
     $SSH "systemctl stop ${SERVICE_NAME} 2>/dev/null || \
-    { [ -f /var/run/amail-gateway.pid ] && \
-      kill \$(cat /var/run/amail-gateway.pid) 2>/dev/null && \
-      rm -f /var/run/amail-gateway.pid && echo 'stopped'; }"
+    { [ -f /var/run/aimail-gateway.pid ] && \
+      kill \$(cat /var/run/aimail-gateway.pid) 2>/dev/null && \
+      rm -f /var/run/aimail-gateway.pid && echo 'stopped'; }"
 }
 
 restart() {
@@ -89,14 +89,14 @@ restart() {
 
 status() {
     $SSH "systemctl status ${SERVICE_NAME} 2>/dev/null || \
-    { [ -f /var/run/amail-gateway.pid ] && \
-      echo 'running (pid: '$(cat /var/run/amail-gateway.pid)')' || \
+    { [ -f /var/run/aimail-gateway.pid ] && \
+      echo 'running (pid: '$(cat /var/run/aimail-gateway.pid)')' || \
       echo 'not running'; }"
 }
 
 logs() {
     $SSH "journalctl -u ${SERVICE_NAME} --no-pager -n 50 2>/dev/null || \
-    tail -50 /var/log/amail-gateway.log 2>/dev/null || echo 'no logs'"
+    tail -50 /var/log/aimail-gateway.log 2>/dev/null || echo 'no logs'"
 }
 
 health() {
@@ -106,14 +106,14 @@ health() {
 setup_systemd() {
     $SSH "cat > /etc/systemd/system/${SERVICE_NAME}.service << 'SYSTEMD'
 [Unit]
-Description=amail-gateway
+Description=aimail-gateway
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=$WORKDIR
-ExecStart=${REMOTE_DIR}/amail-gateway --config $CONFIG
+ExecStart=${REMOTE_DIR}/aimail-gateway --config $CONFIG
 Restart=always
 RestartSec=5
 LimitNOFILE=65536

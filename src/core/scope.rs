@@ -19,7 +19,7 @@
 ///   Scoped to a single email address.
 ///
 /// bridge — relay-bridge operations (pending deliveries poll + ack only)
-///   Scoped to a single system. Minimal privilege for amail-bridge.
+///   Scoped to a single system. Minimal privilege for aimail-bridge.
 /// ```
 use serde::{Deserialize, Serialize};
 use std::fmt;

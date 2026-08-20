@@ -1,14 +1,14 @@
 [package]
-name = "amail-gateway"
+name = "aimail-gateway"
 version = "1.0.0"
 edition = "2021"
 description = "Lightweight SMTP ↔ HTTP bidirectional email gateway for hybrid human–agent group conversations."
 license = "MPL-2.0"
-repository = "https://github.com/metercai/amail-gateway"
+repository = "https://github.com/metercai/aimail-gateway"
 authors = ["metercai"]
 
 [[bin]]
-name = "amail-gateway"
+name = "aimail-gateway"
 path = "src/main.rs"
 
 [lib]

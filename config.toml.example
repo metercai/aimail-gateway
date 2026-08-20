@@ -1,4 +1,4 @@
-# amail-gateway example configuration (base edition, MPL-2.0)
+# aimail-gateway example configuration (base edition, MPL-2.0)
 # Copy to config.toml and edit for your environment:
 #
 #   cp config.toml.example config.toml
@@ -66,7 +66,7 @@ path = "./data"                           # data directory. DB → {path}/amail.
 
 [logging]
 # level = "info"                          # log level: trace | debug | info | warn | error (default info)
-# file = "/var/log/amail-gateway.log"     # log file path. Unset → stdout.
+# file = "/var/log/aimail-gateway.log"     # log file path. Unset → stdout.
 
 # ── Admin ───────────────────────────────────────────────────────────────
 

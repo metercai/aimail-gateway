@@ -15,9 +15,9 @@ RUN cargo build --release
 # ── Runtime stage (Chainguard — minimal glibc, no shell, CVE-scanned) ──
 FROM cgr.dev/chainguard/glibc-dynamic
 
-COPY --from=builder /build/target/release/amail-gateway /usr/local/bin/amail-gateway
+COPY --from=builder /build/target/release/aimail-gateway /usr/local/bin/aimail-gateway
 
 VOLUME ["/data"]
 EXPOSE 8080 25
 
-ENTRYPOINT ["amail-gateway"]
+ENTRYPOINT ["aimail-gateway"]

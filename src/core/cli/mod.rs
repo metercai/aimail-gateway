@@ -13,7 +13,7 @@ use crate::core::errors::AppResult;
 
 #[derive(Parser)]
 #[command(
-    name = "amail-gateway",
+    name = "aimail-gateway",
     version = env!("CARGO_PKG_VERSION"),
     about = "Self-hosted SMTP-to-HTTP mail relay",
     long_about = None

@@ -462,7 +462,7 @@ mod tests {
 
     fn test_text_body() -> String {
         // Path from workspace root: {repo}/agentmail/tests/original-plain.txt
-        // CARGO_MANIFEST_DIR = amail-gateway/
+        // CARGO_MANIFEST_DIR = aimail-gateway/
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap() // go up to workspace root

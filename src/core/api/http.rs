@@ -110,7 +110,7 @@ pub fn create_router(
         .route("/api/v1/whitelists/:id", delete(delete_whitelist))
         .route("/api/v1/whitelists", delete(delete_whitelist_by_params))
         .route("/api/v1/whitelists", put(update_whitelist_by_params))
-        // Admin: pending deliveries (pull-mode for amail-bridge)
+        // Admin: pending deliveries (pull-mode for aimail-bridge)
         .route("/api/v1/admin/pending", post(list_pending_deliveries))
         .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
         // Admin: check if domain exists globally (integrate.sh domain uniqueness)
@@ -2512,7 +2512,7 @@ fn merge_profile_json(old: &str, new: &str) -> String {
     base.to_string()
 }
 
-// ── Pending deliveries (pull-mode for amail-bridge) ──
+// ── Pending deliveries (pull-mode for aimail-bridge) ──
 
 #[derive(Deserialize)]
 struct PendingPollRequest {

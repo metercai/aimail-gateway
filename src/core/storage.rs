@@ -1430,7 +1430,7 @@ impl Database {
         .await
     }
 
-    // Pending deliveries (pull mode — amail-bridge long-poll)
+    // Pending deliveries (pull mode — aimail-bridge long-poll)
     pub async fn insert_pending_delivery(
         &self,
         system_id: &str,
