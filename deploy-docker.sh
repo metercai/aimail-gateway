@@ -33,7 +33,7 @@ IMAGE_TAG="${AMAIL_IMAGE_TAG:-$GIT_HASH}"
 IMAGE_NAME="aimail-gateway:${IMAGE_TAG}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_PATH="${AMAIL_CONFIG_PATH:-/etc/amail/config.toml}"
+CONFIG_PATH="${AMAIL_CONFIG_PATH:-/etc/aimail/config.toml}"
 DATA_VOLUME="${AMAIL_DATA_VOLUME:-amail-data}"
 HTTP_PORT="${AMAIL_HTTP_PORT:-8080}"
 SMTP_PORT="${AMAIL_SMTP_PORT:-25}"

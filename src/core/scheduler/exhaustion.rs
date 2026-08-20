@@ -171,7 +171,7 @@ pub(crate) async fn insert_exhaustion_notification(
 
     // Build human-readable markdown body
     let auto_reply_body = config.relay.auto_reply_body.as_deref().unwrap_or(
-        "This is an automated message from the amail system. \
+        "This is an automated message from the aimail system. \
          The delivery could not be completed after all retry attempts.",
     );
     let notification_body = format!(

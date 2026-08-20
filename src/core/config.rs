@@ -133,7 +133,7 @@ fn default_encryption_enabled() -> bool {
 
 impl StorageConfig {
     pub fn db_path(&self) -> PathBuf {
-        self.path.join("amail.db")
+        self.path.join("aimail.db")
     }
 
     pub fn attachments_dir(&self) -> PathBuf {
@@ -466,7 +466,7 @@ fn default_auto_reply_subject_prefix() -> String {
 
 fn default_auto_reply_body() -> Option<String> {
     Some(
-        "This is an automated message from the amail system. \
+        "This is an automated message from the aimail system. \
          The delivery could not be completed after all retry attempts. \
          For assistance, please contact your service administrator."
             .to_string(),

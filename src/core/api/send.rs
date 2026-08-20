@@ -967,7 +967,7 @@ async fn send_filtered_notification(
         .relay
         .auto_reply_body
         .as_deref()
-        .unwrap_or("This is an automated message from the amail system.");
+        .unwrap_or("This is an automated message from the aimail system.");
     let body = format!(
         "{}\n\n---\n\n\
          **Filtered Recipients** (not in whitelist or blocked by policy):\n\n\
@@ -1063,7 +1063,7 @@ async fn send_unregistered_notification(
          These addresses belong to your domain but have not been registered. \
          Please create them via the Agent integration or contact your administrator to register these addresses.",
         config.relay.auto_reply_body.as_deref().unwrap_or(
-            "This is an automated message from the amail system."
+            "This is an automated message from the aimail system."
         ),
         unregistered.iter().map(|a| format!("  • {}", a)).collect::<Vec<_>>().join("\n")
     );

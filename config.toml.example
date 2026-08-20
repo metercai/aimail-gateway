@@ -37,7 +37,7 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 # dns_server = "127.0.0.1:53"                  # custom DNS server for SPF/MX/DKIM queries (takes precedence over /etc/resolv.conf)
 # auto_reply_from = "noreply@yourdomain.com"   # From address for system auto-replies (NDR, notifications). Falls back to admin.email.
 # auto_reply_subject_prefix = "[Auto-Reply] "  # prefix prepended to all system-generated email subjects
-# auto_reply_body = "This is an automated message from the amail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
+# auto_reply_body = "This is an automated message from the aimail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
 # delivery_window_secs = 7200                  # NDR bounce correlation window in seconds (default 7200 = 2h)
 # mx_dns_override = { "example.com" = "127.0.0.1:25" }  # per-domain MX overrides for direct delivery mode
 
@@ -54,7 +54,7 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 # ── Storage ─────────────────────────────────────────────────────────────
 
 [storage]
-path = "./data"                           # data directory. DB → {path}/amail.db, attachments → {path}/attachments/ (default ./data)
+path = "./data"                           # data directory. DB → {path}/aimail.db, attachments → {path}/attachments/ (default ./data)
 # pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
 # encryption = false                      # SQLCipher page-level encryption (default false)
 # attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)

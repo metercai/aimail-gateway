@@ -44,8 +44,8 @@ SCP="scp -P $PORT $SSH_OPTS"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 GATEWAY_BIN="${SCRIPT_DIR}/target/release/aimail-gateway"
 REMOTE_DIR="/usr/local/bin"
-CONFIG="/etc/amail/config.toml"
-WORKDIR="/var/amail"
+CONFIG="/etc/aimail/config.toml"
+WORKDIR="/var/aimail"
 SERVICE_NAME="aimail-gateway"
 
 build() {

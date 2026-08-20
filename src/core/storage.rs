@@ -1565,8 +1565,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("amailgw-test-{}", ts));
         std::fs::create_dir_all(&dir).unwrap();
         // Database::open expects the SQLite FILE path (like main.rs passes
-        // config.storage.db_path() = <dir>/amail.db), not a directory.
-        let db = Database::open(&dir.join("amail.db"), 4, None).unwrap();
+        // config.storage.db_path() = <dir>/aimail.db), not a directory.
+        let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
         db.init_global();
         db
     }

@@ -34,7 +34,7 @@ pub struct Cli {
     #[arg(short = 'l', long)]
     pub log_level: Option<String>,
 
-    #[arg(long, default_value = "/tmp/amail-relay.pid")]
+    #[arg(long, default_value = "/tmp/aimail-gateway.pid")]
     pub pid_file: PathBuf,
 
     #[arg(short = 'd', long)]

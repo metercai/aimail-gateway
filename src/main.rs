@@ -81,7 +81,9 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     let key_path = format!("{}.admin_key", db_path.display());
 
     // Derive DB encryption key from admin key via HMAC-SHA256.
-    let db_key: Option<String> = if true {
+    // Only when SQLCipher is enabled (storage.encryption = true); base defaults
+    // to false, so the DB stays plaintext unless explicitly opted in.
+    let db_key: Option<String> = if config.storage.encryption {
         std::fs::read_to_string(&key_path)
             .ok()
             .filter(|k| !k.is_empty())
@@ -91,7 +93,7 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
                 type HmacSha256 = Hmac<Sha256>;
                 let mut mac =
                     HmacSha256::new_from_slice(k.as_bytes()).expect("HMAC-SHA256 key derivation");
-                mac.update(b"amail-relay:db:encryption:v1");
+                mac.update(b"aimail-gateway:db:encryption:v1");
                 hex::encode(mac.finalize().into_bytes())
             })
     } else {
