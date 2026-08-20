@@ -87,9 +87,9 @@ aimail-gateway needs to connect to the external mail network. Prepare a VPS with
 ```bash
 cp .env.example .env
 # Edit .env with:
-#   AMAIL_DEPLOY_HOST    — VPS IP address
-#   AMAIL_DEPLOY_USER    — SSH login user
-#   AMAIL_DEPLOY_KEY     — SSH private key path (optional)
+#   AIMAIL_DEPLOY_HOST    — VPS IP address
+#   AIMAIL_DEPLOY_USER    — SSH login user
+#   AIMAIL_DEPLOY_KEY     — SSH private key path (optional)
 ```
 
 ### Option A: Binary Deployment

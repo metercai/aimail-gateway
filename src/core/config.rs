@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 /// Full application configuration loaded via: Defaults → TOML → Env Override.
 ///
-/// Environment variables use the prefix `AMAILGW_` and map to nested fields
-/// using double underscores (e.g. `AMAILGW_HTTP_ADDR` → `http.addr`).
+/// Environment variables use the prefix `AIMAILGW_` and map to nested fields
+/// using double underscores (e.g. `AIMAILGW_HTTP_ADDR` → `http.addr`).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     /// File path this config was loaded from (for advanced features that
@@ -275,7 +275,7 @@ pub struct AdminConfig {
 
 // ── Load: Defaults → TOML → Env Override ─────────────────────────────
 
-/// Load configuration from a TOML file, then overlay `AMAILGW_*` env vars.
+/// Load configuration from a TOML file, then overlay `AIMAILGW_*` env vars.
 ///
 /// Precedence (lowest → highest): struct defaults → TOML file → environment variables.
 pub fn load(path: &str) -> Result<Config, crate::core::errors::AppError> {
@@ -287,7 +287,7 @@ pub fn load(path: &str) -> Result<Config, crate::core::errors::AppError> {
         crate::core::errors::AppError::Config(format!("failed to parse config {}: {}", path, e))
     })?;
 
-    // Apply environment variable overrides (AMAILGW_* prefix)
+    // Apply environment variable overrides (AIMAILGW_* prefix)
     apply_env_overrides(&mut config);
 
     // Record path for advanced features that need to re-read sections
@@ -359,53 +359,53 @@ impl Config {
     }
 }
 
-/// Apply `AMAILGW_*` environment variable overrides to the config.
+/// Apply `AIMAILGW_*` environment variable overrides to the config.
 ///
 /// Mapping convention:
-/// - `AMAILGW_HTTP_ADDR` → `http.addr`
-/// - `AMAILGW_SMTP_ADDR` → `smtp.addr` (alias: listen_addr)
+/// - `AIMAILGW_HTTP_ADDR` → `http.addr`
+/// - `AIMAILGW_SMTP_ADDR` → `smtp.addr` (alias: listen_addr)
 fn apply_env_overrides(config: &mut Config) {
     // ── Core external resources (bind address, upstream services) ──
     // HTTP
-    if let Ok(v) = std::env::var("AMAILGW_HTTP_ADDR") {
+    if let Ok(v) = std::env::var("AIMAILGW_HTTP_ADDR") {
         if !v.is_empty() {
             config.http.bind = v;
         }
     }
 
     // SMTP
-    if let Ok(v) = std::env::var("AMAILGW_SMTP_ADDR") {
+    if let Ok(v) = std::env::var("AIMAILGW_SMTP_ADDR") {
         if !v.is_empty() {
             config.smtp.bind = v;
         }
     }
 
     // Database
-    if let Ok(v) = std::env::var("AMAILGW_STORAGE_PATH") {
+    if let Ok(v) = std::env::var("AIMAILGW_STORAGE_PATH") {
         if !v.is_empty() {
             config.storage.path = PathBuf::from(v);
         }
     }
 
     // Relay (upstream SMTP)
-    if let Ok(v) = std::env::var("AMAILGW_RELAY_SMTP_SERVER") {
+    if let Ok(v) = std::env::var("AIMAILGW_RELAY_SMTP_SERVER") {
         if !v.is_empty() {
             config.relay.smtp_server = Some(v);
         }
     }
-    if let Ok(v) = std::env::var("AMAILGW_RELAY_USERNAME") {
+    if let Ok(v) = std::env::var("AIMAILGW_RELAY_USERNAME") {
         if !v.is_empty() {
             config.relay.username = Some(v);
         }
     }
-    if let Ok(v) = std::env::var("AMAILGW_RELAY_PASSWORD") {
+    if let Ok(v) = std::env::var("AIMAILGW_RELAY_PASSWORD") {
         if !v.is_empty() {
             config.relay.password = Some(v);
         }
     }
 
     // Logging
-    if let Ok(v) = std::env::var("AMAILGW_LOGGING_LEVEL") {
+    if let Ok(v) = std::env::var("AIMAILGW_LOGGING_LEVEL") {
         if !v.is_empty() {
             config.logging.level = v;
         }

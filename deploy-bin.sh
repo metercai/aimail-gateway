@@ -2,11 +2,11 @@
 # deploy.sh — Deploy aimail-gateway to remote host
 #
 # Usage:
-#   export AMAIL_DEPLOY_HOST="1.2.3.4"
-#   export AMAIL_DEPLOY_PORT="22"
-#   export AMAIL_DEPLOY_USER="root"
+#   export AIMAIL_DEPLOY_HOST="1.2.3.4"
+#   export AIMAIL_DEPLOY_PORT="22"
+#   export AIMAIL_DEPLOY_USER="root"
 #   # SSH key path (optional, default ~/.ssh/id_rsa)
-#   export AMAIL_DEPLOY_KEY="$HOME/.ssh/id_deploy"
+#   export AIMAIL_DEPLOY_KEY="$HOME/.ssh/id_deploy"
 #
 #   bash amail-bin.sh build        # Build binary
 #   bash amail-bin.sh upload       # Upload binary
@@ -27,10 +27,10 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-HOST="${AMAIL_DEPLOY_HOST:?AMAIL_DEPLOY_HOST not set}"
-PORT="${AMAIL_DEPLOY_PORT:-22}"
-USER="${AMAIL_DEPLOY_USER:-root}"
-KEY="${AMAIL_DEPLOY_KEY:-}"
+HOST="${AIMAIL_DEPLOY_HOST:?AIMAIL_DEPLOY_HOST not set}"
+PORT="${AIMAIL_DEPLOY_PORT:-22}"
+USER="${AIMAIL_DEPLOY_USER:-root}"
+KEY="${AIMAIL_DEPLOY_KEY:-}"
 # Auto-detect deploy SSH key (no passphrase)
 if [ -z "$KEY" ] && [ -f "$HOME/.ssh/id_deploy" ]; then
     KEY="$HOME/.ssh/id_deploy"

@@ -86,9 +86,9 @@ aimail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS�
 ```bash
 cp .env.example .env
 # 编辑 .env 填入：
-#   AMAIL_DEPLOY_HOST    — VPS IP 地址
-#   AMAIL_DEPLOY_USER    — SSH 登录用户
-#   AMAIL_DEPLOY_KEY     — SSH 私钥路径（可选）
+#   AIMAIL_DEPLOY_HOST    — VPS IP 地址
+#   AIMAIL_DEPLOY_USER    — SSH 登录用户
+#   AIMAIL_DEPLOY_KEY     — SSH 私钥路径（可选）
 ```
 
 ### 方式一：编译二进制部署

@@ -7,7 +7,7 @@ use crate::core::errors::{AppError, AppResult};
 /// Daemonize via self-exec (fork-free, works with tokio).
 /// Returns `true` if the parent process should exit after spawning.
 pub fn daemonize(cli: &super::Cli) -> AppResult<bool> {
-    if !cli.daemon || std::env::var("AMAILGW_DAEMONIZED").is_ok() {
+    if !cli.daemon || std::env::var("AIMAILGW_DAEMONIZED").is_ok() {
         return Ok(false);
     }
 
@@ -23,7 +23,7 @@ pub fn daemonize(cli: &super::Cli) -> AppResult<bool> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    child.env("AMAILGW_DAEMONIZED", "1");
+    child.env("AIMAILGW_DAEMONIZED", "1");
 
     let mut spawned = child
         .spawn()

@@ -3,7 +3,7 @@
 #
 #   cp config.toml.example config.toml
 #
-# Env var overrides (AMAILGW_*): HTTP_ADDR, SMTP_ADDR, STORAGE_PATH,
+# Env var overrides (AIMAILGW_*): HTTP_ADDR, SMTP_ADDR, STORAGE_PATH,
 # RELAY_SMTP_SERVER, RELAY_USERNAME, RELAY_PASSWORD, LOGGING_LEVEL.
 # Env vars take precedence over this file.
 
