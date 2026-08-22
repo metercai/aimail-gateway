@@ -5,27 +5,30 @@
 ![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
 
 
-**AI Agent 专属的双向邮件网关**——为每个 Agent 提供 SMTP 收信和 HTTP 发信的即时邮件通道，让 Agent 无缝接入全球邮件网络。
+**AI Agent 专属的双向邮件网关**——为每个 Agent 提供 SMTP 收信和 HTTP 发信的即时邮件通道，让 Agent 无缝接入全球邮件网络，可以自由进行邮件交流与协作。
 
 ---
 
 ## 1. 什么是 aimail-gateway
 
-aimail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解决了 Agent 收发邮件的核心问题：
+aimail-gateway 是一个轻量级、高性能的 Rust 邮件网关。它首先解决了 Agent 原生收发邮件的核心问题：
 
-- **收信：** 传统方案依赖 IMAP/POP3 轮询，延迟高、资源浪费。aimail-gateway 通过 Webhook 实时推送入站邮件，无需轮询。
-- **发信：** 提供标准 HTTP API，通过调用 toolset 即可发信。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发，高效快捷。
+- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，消息事件驱动，无需轮询，本地文件夹即inbox。
+- **发信：** aimail-gateway 提供 HTTP 协议的 send_mail API。 Agent 可以调用 toolset 即可完成发信任务。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发，高效快捷。
 
-此外，aimail-gateway 针对 Agent 在实际邮件场景的特点，做了专门的优化：
+其次，在原生收发邮件基础上，aimail-gateway 针对 Agent 的邮件场景特点做了专属优化，包括：
 
-- **安全：** Agent 不应暴露在开放的邮件网络中承受垃圾邮件和恶意攻击。aimail-gateway 默认白名单机制，即只能与已授权联系人互发邮件，非授权不能发，非授不能收，双向管控杜绝安全隐患。同时，为每个 Agent 配置安全员，对关键操作进行把关，对完全兜底。
-- **内容：** 传统LLM 处理原始 HTML/MIME 邮件效率低下、浪费Token严重。aimail-gateway 具有内容处理链，自动提取关键信息，剥离样式噪声，统一转换为 LLM 适用的 Markdown 干净文本。
-- **协作：** Agent 收发邮件的目的不仅仅是信息传递，更重要的是与外界进行类人的会话与协作。aimail-gateway 为此内置了多项能力：
-  - **联系人画像和会话记忆**，让多方会话清晰自然，对答如流。
-  - **陌生人 WHOAMI**，向公众展示自身定位，便于角色的发现和高效率的角色会话。
-  - **A2A 看板引擎**，基于邮件协议实现异构多 Agent 之间的自主协作。
+- **安全：** Agent 若完全暴露在开放的邮件网络中，将遭受垃圾邮件等各种恶意攻击。aimail-gateway 默认开启白名单控制，即每个 Agent 邮件地址都有双向可控的联系人地址簿。建立授信的安全边界，非授权不能发，非授权不能收，双向管控杜绝失控隐患。同时，系统还为每个 Agent 绑定人类安全员邮箱，可对关键操作进行把关。
+- **内容：** LLM 处理原始 HTML/MIME 邮件效率低下，也严重浪费Token。aimail-gateway 内置了内容处理链，自动提取邮件关键信息，剥离样式噪声，内容最终转换为 LLM 友好的 Markdown 干净文本。
 
-**aimail-gateway 是 AgentMail 的核心基础设施**，由 [AgentMail](https://github.com/metercai/agentmail) 的工具链完成不同 Agent 系统的集成，实现异构多 Agent 间的类人会话与协作。
+当 Agent 拥有全网唯一的邮件地址，就意味着拥有了全网唯一的身份。收发邮件不仅仅是信息传递，更是与外界进行持续的多方对话与 **协作** 。为此，aimail-gateway 也提供了团队协作（teamwork）所需的工具支撑：
+
+- **联系人画像**，持续沉淀每个联系人的特征属性和关注焦点，让对话更善解人意。
+- **会话记忆**，持续记录不同主题的会话摘要，让会话自然连贯，对答如流。
+- **陌生人 WHOAMI**，向公众展示自身定位，便于角色的发现和高效率的角色会话。
+- **A2A 看板引擎**，基于邮件协议实现异构多 Agent 之间的自主协作。
+
+**aimail-gateway 连接着传统邮件网络和各类 Agent 系统，是人与 Agent 混合互联网络的基础设施**，而 [AIMail](https://github.com/metercai/aimail) 则是命令行工具，负责不同 Agent 系统的接入和维护。它们共同构建了由人主导、异构 Agent 间可自由会话与协作的全新网络。
 
 ---
 
@@ -37,7 +40,7 @@ aimail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解�
 - Webhook 推送 — 实时 HTTP POST 到 Agent Webhook URL
 - 多地址聚合推送 — 多目标地址聚合一次性推送
 - Webhook 混合模式 — 同一封邮件支持混合(push/pull)模式推送
-- 派生地址兼容 — 兼容一个 Agent 主地址派生的多身份地址: `{role_name}.{agent_name}@{mx_domain}`
+- 派生地址兼容 — 兼容一个 Agent 主地址派生的多身份地址，比如 Hermes Agent 的 Persona: `{role_name}.{agent_name}@{mx_domain}`
 - 即时阻断无效入站 — 无效收件人/超大邮件/内地址发件人等即时拒绝，节省资源占用
 - 推送调度 — 异步队列推送，失败自动重试，过期资源自动回收
 
@@ -69,19 +72,19 @@ aimail-gateway 是一个轻量级、高性能的 Rust 邮件网关，重点解�
 - 原始快照 — 可选保存原始邮件，便于后续挖掘和审计回溯
 
 **协作：**
-- 联系人画像 — 为联系人建立动态画像，让回复更有针对性
-- 会话摘要 — 为联系人建立会话摘要，让交流井然有序 
+- 联系人画像 — 为联系人建立动态画像，让回复更善解人意
+- 会话摘要 — 记录会话的主题摘要，让会话自然连贯，井然有序 
 - 身份自述 — 对陌生人和联系人的分级 `[WHOAMI]` 指令邮件响应，利于角色发现
 - A2A 看板 — 流程视图 + 任务依赖 + 责任人追溯，一目了然
 - A2A 任务引擎 — 指令流 + 会话流 + 通知流，事件驱动自主协作
 - 角色可定义 — 角色与行为通过配置数据和prompt自定义，LLM 原生驱动的工作流引擎
-- 人类主控 — 人与 Agent 混合的工作流，目标和产出由人类主控
+- 人类主控 — 人与 Agent 混合的工作流，目标和产出由人类（Owner）主控
 
 ---
 
 ## 3. 快速开始
 
-aimail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS，防火墙打开配置的smtp和http端口。
+aimail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS，防火墙打开配置的smtp和http端口。如果没有VPS，可以到官方DEMO节点申请测试账号试用。如果需要生产性部署，可以到官方DEMO节点申请独立节点版本试用。
 
 ```bash
 cp .env.example .env
