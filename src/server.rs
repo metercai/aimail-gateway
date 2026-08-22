@@ -114,7 +114,16 @@ impl Server {
             http_state.clone(),
         ));
         let router_hook: Arc<dyn RouterHook> = base_hook;
-        let smtp_handle = amail_base::core::server::spawn_smtp(&http_state, cancel.clone())?;
+        // Base SMTP inbound handler: pure business logic, no security, no
+        // rate/quota, no TLS (the base edition stays free of those concerns).
+        let smtp_handler = amail_base::core::smtp::receiver::ConnectionHandler::new(
+            Arc::new(config.clone()),
+            http_state.factories.email.clone(),
+            http_state.factories.attachment.clone(),
+            http_state.trigger_tx.clone(),
+            http_state.metrics.clone(),
+        );
+        let smtp_handle = amail_base::core::server::spawn_smtp(&http_state, smtp_handler, cancel.clone())?;
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();

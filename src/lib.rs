@@ -6,4 +6,4 @@ pub mod core;
 
 // Re-export mailin types used by advanced edition,
 // so aimail-advanced doesn't need a direct mailin dependency.
-pub use mailin::{Action, Response, SessionBuilder};
+pub use mailin::{Action, Handler, Response, SessionBuilder};

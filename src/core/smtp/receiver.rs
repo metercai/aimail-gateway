@@ -16,39 +16,44 @@ use crate::core::email::factory::{AttachmentFactory, EmailFactory};
 use crate::core::email::storage::Recipients;
 use crate::core::email::utils::strip_persona;
 use crate::core::errors::AppResult;
-use crate::core::strategy::{InboundSecurity, QuotaChecker, RateLimitChecker};
 
 /// SMTP response helpers matching mailin 0.6 `Response::custom` API.
 /// SMTP codes: 250=OK, 451=local-error/temp-fail, 550=perm-fail/rejected.
 const OK: &str = "OK";
 
-fn ok() -> Response {
+pub fn ok() -> Response {
     Response::custom(250, OK.to_string())
 }
 
-fn perm_fail(msg: &str) -> Response {
+pub fn perm_fail(msg: &str) -> Response {
     Response::custom(550, msg.to_string())
 }
 
-fn temp_fail(msg: &str) -> Response {
+pub fn temp_fail(msg: &str) -> Response {
     Response::custom(451, msg.to_string())
 }
 
-/// SMTP receiver that processes inbound emails directly within handler callbacks.
+/// SMTP inbound handler (base edition): pure business logic, no security
+/// checks, no rate limiting, no quotas, no TLS.
 ///
 /// `ConnectionHandler` (impl `mailin::Handler`) is instantiated per connection
 /// and borrows shared `Config` and a scheduler `trigger_tx`.
+///
+/// The advanced edition wraps this in its own `AdvancedSmtpHandler`
+/// (`aimail-advanced`), which adds SPF/PTR/DKIM/DMARC/HELO/IP-blacklist
+/// checks, auth.local sender resolution, and per-system rate limiting by
+/// calling its own security components directly — the two editions keep
+/// independent SMTP inbound flows while sharing the business core here.
+/// `Clone` is derived so `spawn_smtp` can hand each accepted connection its
+/// own copy (session state starts at defaults, equivalent to a fresh `new`).
+#[derive(Clone)]
 pub struct ConnectionHandler {
     config: Arc<Config>,
     email_factory: Arc<EmailFactory>,
     attachment_factory: Arc<AttachmentFactory>,
-    inbound_security: Arc<dyn InboundSecurity>,
-    rate_limiter: Arc<dyn RateLimitChecker>,
-    quota_checker: Arc<dyn QuotaChecker>,
     trigger_tx: mpsc::Sender<String>,
     metrics: Arc<Metrics>,
     // ── per-SMTP-session state ────────────────────────────────────
-    peer_addr: Option<IpAddr>,
     sender: Option<String>,
     recipients: Vec<String>,
     message_data: Vec<u8>,
@@ -68,9 +73,6 @@ impl ConnectionHandler {
         config: Arc<Config>,
         email_factory: Arc<EmailFactory>,
         attachment_factory: Arc<AttachmentFactory>,
-        inbound_security: Arc<dyn InboundSecurity>,
-        rate_limiter: Arc<dyn RateLimitChecker>,
-        quota_checker: Arc<dyn QuotaChecker>,
         trigger_tx: mpsc::Sender<String>,
         metrics: Arc<Metrics>,
     ) -> Self {
@@ -78,12 +80,8 @@ impl ConnectionHandler {
             config,
             email_factory,
             attachment_factory,
-            inbound_security,
-            rate_limiter,
-            quota_checker,
             trigger_tx,
             metrics,
-            peer_addr: None,
             sender: None,
             recipients: Vec::new(),
             message_data: Vec::new(),
@@ -206,42 +204,28 @@ fn parse_bounce_dsn(raw: &[u8]) -> Option<BounceDsn> {
     })
 }
 
-// ── mailin::Handler implementation ──────────────────────────────────────
+// ── Shared business core (inherent methods) ─────────────────────────────
+// Edition-independent business bodies that the trait impls above — and the
+// advanced edition's `AdvancedSmtpHandler` — delegate to.
 
-impl Handler for ConnectionHandler {
-    fn mail(&mut self, ip: IpAddr, domain: &str, from: &str) -> Response {
-        // 1. IP blacklist check (highest priority — reject known bad IPs immediately)
-        let ip_str = ip.to_string();
-        if self.inbound_security.check_ip_blacklisted(&ip_str) {
-            self.metrics.inc_ip_blacklist_hits();
-            tracing::warn!(
-                operation="ip_blacklisted",
-                ip = %ip_str,
-                from = %from,
-                "Rejected inbound connection from blacklisted IP"
-            );
-            return perm_fail("IP address is blacklisted");
-        }
+impl ConnectionHandler {
+    /// Shared MAIL FROM business body.
+    ///
+    /// `from` is the raw envelope sender (used for the anti-loop domain
+    /// lookup); `effective_sender` is the sender stored on the session. The
+    /// base edition passes `from` as-is; the advanced edition passes an
+    /// auth.local-resolved sender (its own `mail` performs the IP-blacklist,
+    /// auth.local resolution, and SPF/PTR checks before delegating here).
+    pub fn mail_with_sender(
+        &mut self,
+        _ip: IpAddr,
+        _domain: &str,
+        from: &str,
+        effective_sender: &str,
+    ) -> Response {
+        self.sender = Some(effective_sender.to_string());
 
-        self.peer_addr = Some(ip);
-        self.sender = Some(from.to_string());
-
-        // 2. Resolve sender — advanced edition may decode auth address
-        if let Some(real) = self.inbound_security.resolve_sender(from) {
-            self.sender = Some(real.clone());
-            // Authenticated session: resolve_sender validated the key,
-            // and check_inbound (including SPF) is bypassed intentionally.
-        } else {
-            // Skip inbound security for null-sender (bounce/NDR, RFC 5321)
-            if !from.is_empty() {
-                if let Err(e) = self.inbound_security.check_inbound(ip, from, domain) {
-                    tracing::warn!(operation="inbound_rejected", ip=%ip_str, from=%from, reason=e, "Inbound check failed");
-                    return perm_fail(e);
-                }
-            }
-        }
-
-        // 3. Anti-loop detection — check if sender domain is registered
+        // Anti-loop detection — check if sender domain is registered
         let sender_domain = from.rsplit('@').next().unwrap_or(from);
         match self.block_on(
             self.email_factory
@@ -249,7 +233,7 @@ impl Handler for ConnectionHandler {
                 .lookup_domain_addr(sender_domain),
         ) {
             Ok(Some(_rec)) => {
-                tracing::warn!(operation="inbound_anti_loop", ip=%ip_str, sender=%from,
+                tracing::warn!(operation="inbound_anti_loop", from=%from,
                     "Internal sender address rejected on inbound path");
                 perm_fail("Internal sender address rejected on inbound path")
             }
@@ -259,6 +243,44 @@ impl Handler for ConnectionHandler {
             }
             Err(_) => temp_fail("Database error during domain lookup"),
         }
+    }
+
+    // ── Read-only accessors for the edition-specific wrapper handler ────
+    // The advanced edition's `AdvancedSmtpHandler` wraps this handler and
+    // needs the pending session data (sender / raw bytes / system id) to run
+    // its own rate-limit, DKIM/DMARC, and per-system attachment checks before
+    // delegating the business body.
+
+    /// Pending MAIL FROM sender (None before MAIL FROM).
+    pub fn pending_sender(&self) -> Option<&str> {
+        self.sender.as_deref()
+    }
+
+    /// Raw message bytes accumulated during DATA (before `data_end`).
+    pub fn pending_data(&self) -> &[u8] {
+        &self.message_data
+    }
+
+   /// Resolved system id(s) for the current recipients (None before RCPT).
+    pub fn pending_system_id(&self) -> Option<&str> {
+        self.system_id.as_deref()
+    }
+}
+
+// ── mailin::Handler implementation (cont.) ──────────────────────────────
+// rcpt / data_start / data / data_end are trait methods; they live in a
+// second impl block because the shared business core above sits between
+// `mail` and the rest.
+
+impl Handler for ConnectionHandler {
+    fn helo(&mut self, _ip: IpAddr, _domain: &str) -> Response {
+        // Base edition: no EHLO/HELO domain validation. The advanced edition
+        // performs HELO policy checks in its own handler.
+        ok()
+    }
+
+    fn mail(&mut self, ip: IpAddr, domain: &str, from: &str) -> Response {
+        self.mail_with_sender(ip, domain, from, from)
     }
 
     fn rcpt(&mut self, to: &str) -> Response {
@@ -388,6 +410,67 @@ impl Handler for ConnectionHandler {
     }
 
     fn data_end(&mut self) -> Response {
+        // Base edition: no mid-pipeline security (rate limit / DKIM / DMARC)
+        // and no per-system attachment overrides (None → global config limits)
+        // — those are enforced by the advanced edition's own handler.
+        if let Err(r) = self.check_deferred_whitelist() {
+            return r;
+        }
+        self.process_data_end_post(None, None)
+    }
+}
+
+// ── Shared DATA-phase business body ─────────────────────────────────────
+// Edition-independent. The advanced edition's `AdvancedSmtpHandler` runs its
+// own rate-limit, DKIM/DMARC, and per-system attachment checks first, then
+// delegates here with its per-system attachment limits.
+
+impl ConnectionHandler {
+    /// Deferred whitelist rejection check (does NOT consume session state).
+    ///
+    /// Senders not in any recipient's "from" whitelist were deferred from
+    /// `rcpt()`. Allow stranger commands ([WHOAMI] etc.) through; reject
+    /// everything else before wasting time on full MIME parse. Returns
+    /// `Err(response)` to reject, or `Ok(())` to continue.
+    ///
+    /// Split out so the advanced edition can run its mid-pipeline security
+    /// (rate limit / DKIM / DMARC) *after* this check and *before* the
+    /// business body — matching the original ordering exactly.
+    pub fn check_deferred_whitelist(&self) -> Result<(), Response> {
+        if !self.sender_whitelisted {
+            let is_stranger_cmd = match mailparse::parse_headers(&self.message_data) {
+                Ok((headers, _)) => {
+                    let subject = headers
+                        .iter()
+                        .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
+                        .map(|h| h.get_value())
+                        .unwrap_or_default();
+                    ["[WHOAMI]"]
+                        .iter()
+                        .any(|cmd| subject.to_uppercase().starts_with(cmd))
+                }
+                Err(_) => false,
+            };
+            if !is_stranger_cmd {
+                return Err(perm_fail("Sender not whitelisted"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Shared DATA-phase business body: state extraction, bounce
+    /// verification, MIME parse, attachment validation, recipient filtering,
+    /// board learning, DB insert, attachment save, and scheduler trigger.
+    ///
+    /// Called AFTER `check_deferred_whitelist` (and, for the advanced
+    /// edition, after its mid-pipeline security). `att_count` / `att_size`
+    /// are per-system attachment limits (advanced quota store); `None`
+    /// falls back to the global config limits.
+    pub fn process_data_end_post(
+        &mut self,
+        att_count: Option<usize>,
+        att_size: Option<usize>,
+    ) -> Response {
         let sender = match self.sender.take() {
             Some(s) => s,
             None => return temp_fail("No sender"),
@@ -405,77 +488,7 @@ impl Handler for ConnectionHandler {
             return temp_fail("No domain");
         }
 
-        // ── Deferred whitelist rejection ─────────────────────────
-        // Senders not in any recipient's "from" whitelist were deferred
-        // from rcpt().  Allow stranger commands ([WHOAMI] etc.) through;
-        // reject everything else before wasting time on full MIME parse.
-        if !self.sender_whitelisted {
-            let is_stranger_cmd = match mailparse::parse_headers(&self.message_data) {
-                Ok((headers, _)) => {
-                    let subject = headers
-                        .iter()
-                        .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
-                        .map(|h| h.get_value())
-                        .unwrap_or_default();
-                    ["[WHOAMI]"]
-                        .iter()
-                        .any(|cmd| subject.to_uppercase().starts_with(cmd))
-                }
-                Err(_) => false,
-            };
-            if !is_stranger_cmd {
-                return perm_fail("Sender not whitelisted");
-            }
-        }
-
-        // ── Rate limit check ──────────────────────────────────────
-        // Per-system inbound rate limiting.  When recipients span multiple
-        // systems (pipe-delimited system_id), check each individually.
-        let mut rate_limited_sid = None;
-        let mut rate_limited_wait = std::time::Duration::ZERO;
-        for sid in system_id.split('|') {
-            match self.rate_limiter.check(sid) {
-                Ok(()) => {}
-                Err(wait) => {
-                    if wait > rate_limited_wait {
-                        rate_limited_wait = wait;
-                        rate_limited_sid = Some(sid.to_string());
-                    }
-                }
-            }
-        }
-        if let Some(sid) = rate_limited_sid {
-            self.metrics.inc_rate_limited();
-            tracing::warn!(
-                operation = "smtp_rate_limited",
-                system_id = %sid,
-                wait_secs = rate_limited_wait.as_secs_f64(),
-                "SMTP rate limit exceeded"
-            );
-            return temp_fail(&format!(
-                "Rate limit exceeded for system {}. Retry after {:.0}s",
-                sid,
-                rate_limited_wait.as_secs_f64()
-            ));
-        }
-
         let raw_data = std::mem::take(&mut self.message_data);
-
-        // ── Post-DATA message security (DKIM/DMARC) ────────────────
-        // Base edition: no-op. Advanced edition verifies the full raw
-        // message per its dkim/dmarc policies. Null-sender (bounce) is
-        // exempted inside implementations (RFC 5321).
-        if !sender.is_empty() {
-            if let Err(e) = self.inbound_security.check_inbound_message(&sender, &raw_data) {
-                tracing::warn!(
-                    operation = "inbound_message_rejected",
-                    sender = %sender,
-                    reason = %e,
-                    "Inbound message security check failed"
-                );
-                return perm_fail(&e);
-            }
-        }
 
         // ── Bounce / NDR pre-verification ─────────────────────────
         // MAIL FROM:<> with an internal RCPT TO → potential bounce.
@@ -553,25 +566,12 @@ impl Handler for ConnectionHandler {
             };
 
         // ── Attachment limit enforcement ───────────────────────────
-        // Per-system limits from quota_checker override global config
-
-        let att_cfg = &self.config.storage;
-        let system_id_opt = self.system_id.as_deref();
-
-        let per_system_max_count = match system_id_opt {
-            Some(sid) => self.block_on(self.quota_checker.get_max_attachments(sid)),
-            None => None,
-        };
-        let per_system_max_size = match system_id_opt {
-            Some(sid) => self.block_on(self.quota_checker.get_max_attachment_size(sid)),
-            None => None,
-        };
-
+        // Per-system limits (advanced quota store) override global config.
         if let Err(e) = EmailFactory::validate_attachments(
-            att_cfg,
+            &self.config.storage,
             &attachments,
-            per_system_max_count,
-            per_system_max_size,
+            att_count,
+            att_size,
         ) {
             return perm_fail(&e.to_string());
         }
@@ -1090,43 +1090,25 @@ impl ConnectionHandler {
         }
     }
 }
-pub fn handle_smtp_session_blocking(
+/// Drive one inbound SMTP session with an edition-specific handler.
+///
+/// Generic over `H: mailin::Handler` so the base and advanced editions run
+/// independent handlers through the same transport loop:
+///   - base: `ConnectionHandler` (pure business logic, no TLS)
+///   - advanced: `AdvancedSmtpHandler` (business logic + its own security;
+///     TLS is added in a later phase by swapping this loop for its own)
+///
+/// `handler` is built by the caller from its edition-specific dependencies.
+pub fn handle_smtp_session_blocking<H: Handler>(
     mut stream: std::net::TcpStream,
     peer_addr: std::net::SocketAddr,
-    email_factory: Arc<EmailFactory>,
-    attachment_factory: Arc<AttachmentFactory>,
-    arc_config: Arc<Config>,
-    inbound_security: Arc<dyn InboundSecurity>,
-    trigger_tx: mpsc::Sender<String>,
-    metrics: Arc<Metrics>,
-    rate_limiter: Arc<dyn RateLimitChecker>,
-    quota_checker: Arc<dyn QuotaChecker>,
+    config: Arc<Config>,
+    handler: H,
 ) {
     use std::io::{BufRead, BufReader, Write};
 
-    // Keep original Arc references for potential TLS re-handshake;
-    // clone for the first ConnectionHandler.
-    let cfg_orig = arc_config;
-    let emf_orig = email_factory;
-    let af_orig = attachment_factory;
-    let r_orig = inbound_security;
-    let rl_orig = rate_limiter;
-    let qc_orig = quota_checker;
-    let tt_orig = trigger_tx;
-    let m_orig = metrics;
-
     let peer_ip = peer_addr.ip();
-    let handler = ConnectionHandler::new(
-        cfg_orig.clone(),
-        emf_orig.clone(),
-        af_orig.clone(),
-        r_orig.clone(),
-        rl_orig.clone(),
-        qc_orig.clone(),
-        tt_orig.clone(),
-        m_orig.clone(),
-    );
-    let banner_hostname = cfg_orig.smtp.hostname.as_deref().unwrap_or("amail-relay");
+    let banner_hostname = config.smtp.hostname.as_deref().unwrap_or("amail-relay");
     let session_builder = crate::SessionBuilder::new(banner_hostname);
     let mut session = session_builder.build(peer_ip, handler);
 
@@ -1156,7 +1138,7 @@ pub fn handle_smtp_session_blocking(
     let mut line = String::new();
     let mut in_data_phase = false;
     let mut data_bytes_total: usize = 0;
-    let max_msg_size = cfg_orig.smtp.max_message_size;
+    let max_msg_size = config.smtp.max_message_size;
     let mut declared_size: Option<u64> = None;
     loop {
         line.clear();
@@ -1260,18 +1242,21 @@ pub fn handle_smtp_session_blocking(
                         }
                     }
                     crate::Action::NoReply => {}
+                    // Defensive: Action::UpgradeTls is unreachable in the base
+                    // edition — the session never enables STARTTLS, so mailin
+                    // keeps TlsState::Unavailable and a client STARTTLS line
+                    // gets a 503 from the FSM before it ever produces this
+                    // action. This arm only guarantees a clean disconnect
+                    // (never a plaintext downgrade) should the variant ever
+                    // surface; the advanced edition's own copy of this loop
+                    // replaces it with the real rustls handshake.
                     crate::Action::UpgradeTls => {
-                        // STARTTLS not available in base edition — TLS migrated
-                        // to advanced. Respond 454 (TLS not available) and keep
-                        // the connection alive instead of dropping it
-                        // (AUDIT-1 P2-9: hard-close confused SMTP clients).
-                        let resp = crate::Response::custom(
-                            454,
-                            "TLS not available".to_string(),
+                        tracing::warn!(
+                            operation = "smtp_tls_unexpected",
+                            peer_addr = %peer_addr,
+                            "Unexpected TLS upgrade request — disconnecting"
                         );
-                        if write_response_blocking(&mut stream, &resp).is_err() {
-                            break;
-                        }
+                        break;
                     }
                 }
             }

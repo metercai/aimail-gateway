@@ -14,8 +14,9 @@ use crate::core::errors::{AppError, AppResult};
 use hex;
 use rand::Rng;
 
-pub fn spawn_smtp(
+pub fn spawn_smtp<H: mailin::Handler + Clone + Send + 'static>(
     http_state: &HttpState,
+    handler: H,
     cancel: CancellationToken,
 ) -> AppResult<JoinHandle<AppResult<()>>> {
     let listen_addr = http_state.config.smtp.bind.clone();
@@ -24,13 +25,7 @@ pub fn spawn_smtp(
     let metrics = http_state.metrics.clone();
 
     // Extract owned Arc values before entering async move
-    let email_factory = http_state.factories.email.clone();
-    let attachment_factory = http_state.factories.attachment.clone();
     let arc_config = Arc::new(http_state.config.clone());
-    let trigger_tx = http_state.trigger_tx.clone();
-    let inbound_security = http_state.extensions.inbound_security.clone();
-    let rate_limiter = http_state.extensions.rate_limiter.clone();
-    let quota_checker = http_state.extensions.quota_checker.clone();
 
     info!(
         operation = "smtp_max_connections",
@@ -64,18 +59,12 @@ pub fn spawn_smtp(
                                     continue;
                                 }
                             };
-                            let email_factory = email_factory.clone();
-                            let attachment_factory = attachment_factory.clone();
                             let arc_config = arc_config.clone();
-                            let trigger_tx = trigger_tx.clone();
-                            let inbound_security = inbound_security.clone();
-                            let metrics = metrics.clone();
-                            let rate_limiter = rate_limiter.clone();
-                            let quota_checker = quota_checker.clone();
+                            let handler = handler.clone();
                             // Convert tokio TcpStream → std TcpStream so we can run
                             // mailin (sync) on a blocking thread.  This avoids the
                             // "Cannot start a runtime from within a runtime" panic
-                            // when ConnectionHandler::block_on calls
+                            // when the handler calls
                             // Handle::current().block_on(...).
 
                             // Disable Nagle's algorithm so SMTP greeting and
@@ -114,7 +103,7 @@ pub fn spawn_smtp(
                             };
                             tokio::task::spawn_blocking(move || {
                                 let _permit = permit;
-                                crate::core::smtp::receiver::handle_smtp_session_blocking(std_stream, peer_addr, email_factory, attachment_factory, arc_config, inbound_security, trigger_tx, metrics, rate_limiter, quota_checker);
+                                crate::core::smtp::receiver::handle_smtp_session_blocking(std_stream, peer_addr, arc_config, handler);
                             });
                         }
                         Err(e) => {

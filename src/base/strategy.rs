@@ -9,19 +9,8 @@ use std::sync::Arc;
 
 use crate::board::quota::NoopBoardQuota;
 use crate::core::strategy::{
-    ExtensionProviders, InboundSecurity, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook,
-    SystemStore,
+    ExtensionProviders, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook, SystemStore,
 };
-
-// ── InboundSecurity ──
-
-pub struct BaseInboundSecurity;
-
-impl InboundSecurity for BaseInboundSecurity {
-    fn check_ip_blacklisted(&self, _ip: &str) -> bool {
-        false
-    }
-}
 
 // ── MessageSigner ──
 
@@ -110,7 +99,6 @@ impl ExtensionProviders {
             rate_limiter: Arc::new(BaseRateLimitChecker),
             quota_checker: Arc::new(BaseQuotaChecker),
             dkim_signer: Arc::new(BaseMessageSigner),
-            inbound_security: Arc::new(BaseInboundSecurity),
             board_quota: Arc::new(NoopBoardQuota),
         }
     }

@@ -6,41 +6,10 @@
 use crate::core::email::storage::EmailRecord;
 use crate::core::errors::AppResult;
 use async_trait::async_trait;
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::board::quota::BoardQuotaChecker;
 use crate::core::storage::Database;
-
-// ── InboundSecurity ───────────────────────────────────────────────────
-
-/// Inbound SMTP security checks called from the receiver pipeline.
-pub trait InboundSecurity: Send + Sync {
-    /// Check whether an IP is blacklisted.
-    fn check_ip_blacklisted(&self, ip: &str) -> bool;
-
-    /// Run SPF + PTR checks after HELO / MAIL FROM.
-    fn check_inbound(&self, _ip: IpAddr, _from: &str, _domain: &str) -> Result<(), &'static str> {
-        Ok(())
-    }
-
-    /// Resolve sender address before SPF check.
-    /// Base edition: returns None (no-op).
-    /// Advanced edition: decodes auth address like <b64_key=real_email@auth.local>
-    /// and returns the real sender, bypassing SPF for authenticated sessions.
-    fn resolve_sender(&self, _from: &str) -> Option<String> {
-        None
-    }
-
-    /// Post-DATA inbound message check (DKIM/DMARC verification), called at
-    /// data_end with the full raw message (headers + body).
-    /// Base edition: accept (no-op). Advanced edition verifies DKIM/DMARC
-    /// according to its policies. `sender` is the MAIL FROM envelope sender
-    /// (empty for null-sender bounce — implementations must exempt it).
-    fn check_inbound_message(&self, _sender: &str, _raw: &[u8]) -> Result<(), String> {
-        Ok(())
-    }
-}
 
 // ── MessageSigner ─────────────────────────────────────────────────────
 
@@ -150,6 +119,5 @@ pub struct ExtensionProviders {
     pub rate_limiter: Arc<dyn RateLimitChecker>,
     pub quota_checker: Arc<dyn QuotaChecker>,
     pub dkim_signer: Arc<dyn MessageSigner>,
-    pub inbound_security: Arc<dyn InboundSecurity>,
     pub board_quota: Arc<dyn BoardQuotaChecker>,
 }

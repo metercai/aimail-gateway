@@ -214,7 +214,7 @@ impl InboundInterceptor for A2aInterceptor {
                         completed_at: None,
                     };
                     // Board quota: check max_active_boards
-                    if let Err(e) = self.board_quota.check_active_boards(&orch_system) {
+                    if let Err(e) = self.board_quota.check_active_boards(&orch_system).await {
                         tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
                         return crate::core::strategy::InterceptorDecision::PassThrough;
                     }
@@ -516,7 +516,7 @@ impl InboundInterceptor for A2aInterceptor {
                         .flatten()
                         .map(|r| r.system_id)
                         .unwrap_or_default();
-                    if let Err(e) = self.board_quota.check_active_boards(&sys_id) {
+                    if let Err(e) = self.board_quota.check_active_boards(&sys_id).await {
                         tracing::warn!("[a2a_board] [A-flow] Board quota exceeded: {e:?}");
                         return crate::core::strategy::InterceptorDecision::PassThrough;
                     }
