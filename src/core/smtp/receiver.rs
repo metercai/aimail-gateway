@@ -1,7 +1,6 @@
 //! SMTP receiver — accepts inbound email via the mailin protocol.
 
 use std::net::IpAddr;
-use rusqlite::OptionalExtension;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{trace, warn};
@@ -292,7 +291,7 @@ impl Handler for ConnectionHandler {
         // record looked up so the owning system can be set for the shared
         // data phase). Non-members fall through to the deferred whitelist
         // check, same as regular recipients.
-        if to.contains(".a2a@") {
+        if crate::board::addr::is_board_address(to) {
             return self.rcpt_board_addr(to);
         }
 
@@ -437,94 +436,39 @@ impl ConnectionHandler {
     ///
     /// Board addresses are not registered in `system_domains` (the `a2a`
     /// local-part is reserved for boards — see the API-layer guard), so the
-    /// regular domain lookup would reject them. Instead: parse the address,
-    /// look up the board record (immutable open — never creates a file),
-    /// and set the owning system id so the shared data phase works.
+    /// regular domain lookup would reject them. Instead: parse the address
+    /// (form check), then do a **substantive check** against the board
+    /// registry — the in-memory cache of every board address this gateway
+    /// actually has. Miss = 550 "does not exist". The only creation entry
+    /// point is the Owner `[A2A] new` protocol (interceptor), which inserts
+    /// into the registry; RCPT never creates boards.
     fn rcpt_board_addr(&mut self, to: &str) -> Response {
-        let (short_id, board_id, domain) = match crate::board::models::parse_board_email(to) {
-            Some(r) => r,
-            None => return perm_fail("Invalid board address"),
-        };
+        use crate::board::addr::{resolve_board_recipient, BoardAddrError};
 
-        // Owning system, resolved from best to worst source:
-        //   1. boards.system_id (set at creation)
-        //   2. orchestrator member's registered system (legacy boards)
-        //   3. the sender's system (board DB absent — the data-phase
-        //      interceptor auto-creates the board and attributes the same
-        //      sender system, so the email lands under the right system)
-        let db_path = std::path::Path::new(&self.config.storage.path)
-            .join("a2a_board")
-            .join(format!("{board_id}.db"));
-        // Immutable: this is a lookup, never a write — a mistyped board
-        // address must not create an empty board DB on disk.
-        let conn = match rusqlite::Connection::open_with_flags(
-            &db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, // READ_ONLY never creates the file
-        ) {
-            Ok(c) => Some(c),
-            Err(_) => None, // no board record yet — deferred to data phase
-        };
-
-        let mut system_id: Option<String> = conn
-            .as_ref()
-            .and_then(|c| {
-                c.query_row(
-                    "SELECT system_id FROM boards WHERE id = ?1",
-                    rusqlite::params![&board_id],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .ok()
-                .flatten()
-                .filter(|s| !s.is_empty())
-            });
-        if system_id.is_none() {
-            if let Some(c) = conn.as_ref() {
-                if let Ok(Some(orch_email)) = c.query_row(
-                    "SELECT email FROM board_members WHERE board_id = ?1 AND role = 'orchestrator' LIMIT 1",
-                    rusqlite::params![&board_id],
-                    |r| r.get::<_, String>(0),
-                ).optional() {
-                    system_id = self
-                        .block_on(self.email_factory.env_factory.lookup_domain_addr(&orch_email))
-                        .ok()
-                        .flatten()
-                        .map(|r| r.system_id);
-                }
+        // Shared substantive resolution (form + registry + owning system) —
+        // identical rules to the HTTP send API.
+        let storage_path = self.config.storage.path.clone();
+        let env = &self.email_factory.env_factory;
+        let resolved = match self.block_on(resolve_board_recipient(env, &storage_path, to)) {
+            Ok(r) => r,
+            Err(BoardAddrError::Invalid) => return perm_fail("Invalid board address"),
+            Err(BoardAddrError::NotFound) => {
+                return perm_fail("Recipient does not exist");
             }
-        }
-        if system_id.is_none() {
-            // Board DB absent (or no system resolvable) — attribute to the
-            // sender's system. The A-flow interceptor's auto-create path
-            // resolves the same sender system for the board it creates.
-            if let Some(ref sender) = self.sender {
-                system_id = self
-                    .block_on(self.email_factory.env_factory.lookup_domain_addr(sender))
-                    .ok()
-                    .flatten()
-                    .map(|r| r.system_id);
-            }
-        }
-        let system_id = match system_id {
-            Some(s) if !s.is_empty() => s,
-            _ => {
-                tracing::warn!(
-                    operation = "rcpt_board_no_system",
-                    board_id = %board_id,
-                    "A2A board has no resolvable owning system"
-                );
+            Err(BoardAddrError::NoSystem) => {
                 return temp_fail("Board system not resolvable");
             }
         };
 
         tracing::debug!(
             operation = "rcpt_board_accepted",
-            board_id = %board_id,
-            short_id = %short_id,
-            "RCPT accepted a2a board address (command flow)"
+            board_id = %resolved.board_id,
+            short_id = %resolved.short_id,
+            "RCPT accepted a2a board address (command flow, substantive check passed)"
         );
 
-        self.system_id = Some(system_id);
-        self.domain = Some(domain);
+        self.system_id = Some(resolved.system_id);
+        self.domain = Some(resolved.domain);
 
         // Inbound whitelist — board-member bypass is handled inside
         // check_whitelisted (board_whitelists lookup on either side).
@@ -541,7 +485,7 @@ impl ConnectionHandler {
                     self.sender_whitelisted = false;
                     tracing::info!(
                         operation = "smtp_sender_not_whitelisted",
-                        board_id = %board_id,
+                        board_id = %resolved.board_id,
                         sender = %sender,
                         "Board sender not whitelisted — deferred to data_end"
                     );
@@ -580,9 +524,7 @@ impl ConnectionHandler {
                         .find(|h| h.get_key().eq_ignore_ascii_case("subject"))
                         .map(|h| h.get_value())
                         .unwrap_or_default();
-                    ["[WHOAMI]"]
-                        .iter()
-                        .any(|cmd| subject.to_uppercase().starts_with(cmd))
+                    crate::board::addr::is_stranger_command(&subject)
                 }
                 Err(_) => false,
             };
@@ -807,7 +749,7 @@ impl ConnectionHandler {
         // HTTP whitelist checks (no per-member whitelist storm). Learnt here,
         // at receive time, so both push (webhook) and pull (pending) modes
         // build the list.
-        if sender.contains(".a2a@") && subject.starts_with("[A2A]") {
+        if crate::board::addr::is_board_address(&sender) && subject.starts_with("[A2A]") {
             // S1 anchor: only learn from a well-formed board address.
             // parse_board_email validates the {short}[.{sys}].a2a@{domain}
             // layout — arbitrary forged ".a2a@" strings are rejected here,
@@ -936,9 +878,9 @@ impl ConnectionHandler {
             );
         }
         // ── Stranger detection: inject X-Mail-* headers for universal commands ──
-        let stranger_commands = ["[WHOAMI]"];
+        let stranger_commands = crate::board::addr::STRANGER_COMMANDS;
         let subject_upper = subject.to_uppercase();
-        for cmd in &stranger_commands {
+        for cmd in stranger_commands {
             if subject_upper.starts_with(cmd) {
                 if !self.sender_whitelisted {
                     headers_map.insert(

@@ -83,7 +83,7 @@ impl InboundInterceptor for A2aInterceptor {
         // Human sends to orchestrator to create a board
         if subject.starts_with("[A2A] new ") {
             // Distinguish: TO has .a2a@ → task creation; TO has no .a2a@ → board creation via [A2A] new
-            let is_board_addr = to_addr.contains(".a2a@");
+            let is_board_addr = crate::board::addr::is_board_address(&to_addr);
             if is_board_addr {
                 // Let normal [A2A] handling below process this as task creation
             } else {
@@ -148,6 +148,21 @@ impl InboundInterceptor for A2aInterceptor {
                         "[a2a_board] [A2A] new board rejected: recipient {} != orchestrator {}",
                         to_addr,
                         orch_email
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
+
+                // Creation threshold: the verifier must be notified — the
+                // verifier address must appear in TO or CC of the creation
+                // mail (orchestrator is already verified as a TO recipient
+                // above). Withholds creation from owner-driven boards that
+                // skip the verifier.
+                let to_arr = payload["to"].as_array();
+                let cc_arr = payload["cc"].as_array();
+                if !verifier_addressed(members, to_arr, cc_arr) {
+                    tracing::warn!(
+                        "[a2a_board] [A2A] new board rejected: verifier address missing from TO/CC (to={:?} cc={:?})",
+                        to_arr, cc_arr
                     );
                     return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
@@ -246,6 +261,13 @@ impl InboundInterceptor for A2aInterceptor {
                     };
                     db::create_board(&conn, &board).ok();
                     self.board_quota.invalidate_cache();
+                    // Register the new board address for the RCPT
+                    // substantive check — the only creation path in the
+                    // whole codebase.
+                    self.email_factory
+                        .env_factory
+                        .board_registry()
+                        .insert(&board_email, &board_id, board.system_id.clone());
                 }
 
                 // Register members and collect invite info
@@ -461,7 +483,7 @@ impl InboundInterceptor for A2aInterceptor {
         }
 
         // Try to resolve board from the 'to' address (existing flow)
-        let (short_id, board_id, _domain) = match self.resolve_board(&to_addr) {
+        let (_short_id, board_id, _domain) = match self.resolve_board(&to_addr) {
             Some(r) => r,
             None => return crate::core::strategy::InterceptorDecision::PassThrough,
         };
@@ -509,66 +531,20 @@ impl InboundInterceptor for A2aInterceptor {
                     b
                 }
                 Err(_) => {
-                    // Auto-create board record if not exists (for init command)
-                    // S3: quota enforcement on this fallback — resolve the
-                    // sender's system and refuse when the active-board quota
-                    // is exhausted (mirrors the [A2A] new path).
-                    let sys_id = self
-                        .email_factory
-                        .env_factory
-                        .lookup_domain_addr(&sender)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|r| r.system_id)
-                        .unwrap_or_default();
-                    if let Err(e) = self.board_quota.check_active_boards(&sys_id).await {
-                        tracing::warn!("[a2a_board] [A-flow] Board quota exceeded: {e:?}");
-                        return crate::core::strategy::InterceptorDecision::PassThrough;
-                    }
-                    let ts = chrono::Utc::now().to_rfc3339();
-                    // Reuse the local part of the address this command was
-                    // actually sent to — works for both layouts
-                    // (`{short}.a2a` and shared `{short}.{sys}.a2a`). The old
-                    // hard-coded `{short}.a2a@{domain}` form silently broke
-                    // shared-domain boards (their real address embeds the
-                    // system name), making the dynamic bind check (:494)
-                    // reject every subsequent command on the auto-created board.
-                    let board_domain = to_addr.split('@').nth(1).unwrap_or("");
-                    let local_part = to_addr.split('@').next().unwrap_or("");
-                    let board = Board {
-                        id: board_id.clone(),
-                        short_id: short_id.clone(),
-                        board_email: format!("{}@{}", local_part, board_domain),
-                        goal: None,
-                        status: BoardStatus::Active,
-                        output_task_id: None,
-                        plan_version: None,
-                        plan_text: None,
-                        plan_confirmed_at: None,
-                        criteria_version: None,
-                        criteria_text: None,
-                        criteria_confirmed_at: None,
-                        created_at: ts,
-                        completed_at: None,
-                        system_id: if sys_id.is_empty() {
-                            None
-                        } else {
-                            Some(sys_id.clone())
-                        },
-                    };
-                    let _ = db::create_board(&conn, &board);
-                    // Seed default role_permissions — without it
-                    // check_role_permission sees an empty table and opens
-                    // the board to every verb for every member.
-                    if let Err(e) = seed_default_role_permissions_conn(&conn) {
-                        tracing::warn!(
-                            "[a2a_board] [A-flow] role_permissions seed failed: {:?}",
-                            e
-                        );
-                    }
-                    self.board_quota.invalidate_cache();
-                    board
+                    // Board record not found — refuse the command. Since the
+                    // RCPT substantive check (board registry), every
+                    // deliverable `.a2a@` recipient is an existing board, so
+                    // reaching here means a stale registry entry or a board
+                    // file removed out-of-band. There is NO auto-create
+                    // fallback: the only creation entry point is the Owner
+                    // `[A2A] new` protocol (board-creation flow above).
+                    tracing::warn!(
+                        operation = "board_cmd_refused",
+                        board_id = %board_id,
+                        reason = "board record not found (no auto-create)",
+                        "Refusing command for unknown board — not delivered"
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
             };
 
@@ -841,6 +817,132 @@ mod tests {
     // interceptor new() tests removed — cannot construct without valid
     // EmailFactory/AttachmentFactory; unsafe zeroed() insta-crashes.
     // Covered by integration tests that exercise the full pipeline.
+
+    // ── verifier_addressed: [A2A] new creation threshold ──
+    fn mem(verifier: Option<&str>) -> Vec<Value> {
+        let mut arr = vec![
+            serde_json::json!({"email": "owner@example.com", "role": "owner"}),
+            serde_json::json!({"email": "orch@example.com", "role": "orchestrator"}),
+        ];
+        if let Some(v) = verifier {
+            arr.push(serde_json::json!({"email": v, "role": "verifier"}));
+        }
+        arr
+    }
+    fn addr(a: &[&str]) -> Vec<Value> {
+        a.iter().map(|s| Value::String(s.to_string())).collect()
+    }
+
+    #[test]
+    fn verifier_in_to_passes() {
+        let m = mem(Some("ver@example.com"));
+        // Verifier address present in TO (alongside the orchestrator).
+        assert!(verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com", "ver@example.com"])),
+            None
+        ));
+    }
+
+    #[test]
+    fn verifier_in_cc_passes() {
+        let m = mem(Some("ver@example.com"));
+        assert!(verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com"])),
+            Some(&addr(&["ver@example.com", "other@example.com"]))
+        ));
+    }
+
+    #[test]
+    fn verifier_absent_fails() {
+        let m = mem(Some("ver@example.com"));
+        assert!(!verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com"])),
+            Some(&addr(&["other@example.com"]))
+        ));
+        assert!(!verifier_addressed(Some(&m), Some(&addr(&["orch@example.com"])), None));
+    }
+
+    #[test]
+    fn verifier_no_members_fails() {
+        // No verifier declared — must not pass even if TO/CC look valid.
+        assert!(!verifier_addressed(None, Some(&addr(&["orch@example.com"])), None));
+        assert!(!verifier_addressed(Some(&Vec::new()), Some(&addr(&["x@y.z"])), None));
+    }
+
+    #[test]
+    fn verifier_case_insensitive() {
+        let m = mem(Some("Ver@Example.COM"));
+        assert!(verifier_addressed(
+            Some(&m),
+            Some(&addr(&["Orch@example.com"])),
+            Some(&addr(&["ver@example.com"]))
+        ));
+    }
+
+    #[test]
+    fn verifier_multiple_verifiers_any_matches() {
+        let m = vec![
+            serde_json::json!({"email": "v1@example.com", "role": "verifier"}),
+            serde_json::json!({"email": "v2@example.com", "role": "verifier"}),
+        ];
+        assert!(verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com"])),
+            Some(&addr(&["v2@example.com"]))
+        ));
+        assert!(!verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com"])),
+            Some(&addr(&["v3@example.com"]))
+        ));
+    }
+}
+
+/// Creation-threshold check: is at least one verifier member's address
+/// present in the creation mail's TO or CC? Pure function so the gate is
+/// unit-testable independent of the interceptor pipeline.
+///
+/// `members` is the parsed `members` array from the `[A2A] new` body;
+/// `to` / `cc` are the recipient address arrays from the delivery payload.
+/// Matching is case-insensitive and compares full email addresses.
+pub fn verifier_addressed(
+    members: Option<&Vec<Value>>,
+    to: Option<&Vec<Value>>,
+    cc: Option<&Vec<Value>>,
+) -> bool {
+    let verifier_emails: Vec<String> = members
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| m.get("role").and_then(|v| v.as_str()) == Some("verifier"))
+                .filter_map(|m| m.get("email").and_then(|v| v.as_str()))
+                .map(|s| s.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    if verifier_emails.is_empty() {
+        // No verifier declared — the earlier has_verifier gate already
+        // rejects; treat as not-addressed so this check can't pass it.
+        return false;
+    }
+    let mut addressed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(arr) = to {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                addressed.insert(s.to_lowercase());
+            }
+        }
+    }
+    if let Some(arr) = cc {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                addressed.insert(s.to_lowercase());
+            }
+        }
+    }
+    verifier_emails.iter().any(|ve| addressed.contains(ve.as_str()))
 }
 
 /// Register the A2A interceptor on the given email factory.

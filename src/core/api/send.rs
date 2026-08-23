@@ -191,10 +191,12 @@ pub async fn send_email(
         .map(|s| parse_one(s))
         .filter(|(_, e)| !e.is_empty())
         .map(|(name, email)| {
-            // Mode-dependent persona stripping (same rule as sender above):
-            // shared-domain 0/1-dot addresses are kept whole; only 2-dot
-            // forms strip the persona prefix.
-            let (base, persona) = if is_shared_sender {
+            // Board addresses (`{short}[.{sys}].a2a@{domain}`) must survive
+            // persona stripping intact — their local part legitimately
+            // contains dots, and stripping would destroy the address.
+            let (base, persona) = if crate::board::addr::is_board_address(&email) {
+                (email, String::new())
+            } else if is_shared_sender {
                 let elocal = email.split('@').next().unwrap_or("");
                 if elocal.matches('.').count() >= 2 {
                     strip_persona(&email)
@@ -218,7 +220,12 @@ pub async fn send_email(
         for addr in cc_list {
             let (name, raw_email) = parse_one(addr);
             if !raw_email.is_empty() {
-                let (base, persona) = if is_shared_sender {
+                // Board addresses keep their dot-separated local part (see
+                // TO parsing above) — stripping would break the address.
+                let (base, persona) =
+                    if crate::board::addr::is_board_address(&raw_email) {
+                        (raw_email, String::new())
+                    } else if is_shared_sender {
                     let elocal = raw_email.split('@').next().unwrap_or("");
                     if elocal.matches('.').count() >= 2 {
                         strip_persona(&raw_email)
@@ -372,10 +379,12 @@ pub async fn send_email(
     }
 
     // ── a2a_board: session flow detection (outbound) ──
-    // Check CC for board addresses; inject board identity headers if found
+    // Check CC for board addresses; inject board identity headers if found.
+    // Parse the raw (lowercased) address — board addresses are never
+    // persona-stripped, and stripping first would break the `.a2a` suffix.
     if let Some(ref cc_list) = req.cc {
         for cc_addr in cc_list {
-            let (cc_base, _) = strip_persona(cc_addr);
+            let cc_base = cc_addr.trim().to_lowercase();
             if let Some((_sid, board_id, _domain)) =
                 crate::board::models::parse_board_email(&cc_base)
             {
@@ -419,10 +428,21 @@ pub async fn send_email(
         merged_headers.insert("Message-ID".into(), msg_id);
     }
 
+    // Board addresses in the CC slot (session flow) are context markers —
+    // the board identity travels via X-Board-* headers (injected below),
+    // and the recognition scope is broader than the local registry (a
+    // board address propagated in a team-formation notification's headers
+    // need not exist on this gateway). They are therefore excluded from
+    // the delivery list: no substantive registry check, no bucketing, no
+    // MX delivery. Only TO-slot board addresses are command-flow
+    // recipients and go through the shared registry resolution below.
     let recipients: Vec<String> = to_set
         .iter()
         .cloned()
         .chain(cc_set.iter().cloned())
+        .filter(|e| {
+            to_set.contains(e) || !crate::board::addr::is_board_address(e)
+        })
         .collect();
 
     if recipients.is_empty() {
@@ -502,22 +522,33 @@ pub async fn send_email(
     }
 
     // ── 4. Outbound whitelist: filter recipients against sender's "to"/"all" rules ──
+    let subject = req.subject.as_deref().unwrap_or("");
     let mut filtered: Vec<String> = Vec::new();
     let mut valid_recipients: Vec<String> = Vec::new();
 
     for recipient in &recipients {
-        match state
+        let allowed = match state
             .factories
             .email
             .env_factory
             .check_whitelisted(sender, recipient, "to")
             .await
         {
-            Ok(true) => {
-                state.metrics.inc_whitelist_matches();
-                valid_recipients.push(recipient.clone());
+            Ok(true) => true,
+            Ok(false) => {
+                // Board recipients: universal stranger commands ([WHOAMI])
+                // bypass the whitelist — shared predicate with the SMTP
+                // deferred-whitelist stranger allowance.
+                crate::board::addr::is_board_address(recipient)
+                    && crate::board::addr::is_stranger_command(subject)
             }
-            _ => filtered.push(recipient.clone()),
+            Err(_) => false,
+        };
+        if allowed {
+            state.metrics.inc_whitelist_matches();
+            valid_recipients.push(recipient.clone());
+        } else {
+            filtered.push(recipient.clone());
         }
     }
 
@@ -526,9 +557,58 @@ pub async fn send_email(
     // (email, domain, webhook_url, webhook_secret)
     let mut external: Vec<String> = Vec::new();
     let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
+    // Owning system of a board recipient, if any (inbound records for
+    // command-flow delivery are attributed to the board's system, mirroring
+    // the SMTP RCPT behavior).
+    let mut board_system: Option<String> = None;
 
     for recipient in &valid_recipients {
         let env = &state.factories.email.env_factory;
+        // ── A2A board address (command flow) — always internal ──
+        // Board addresses are never external (MX) recipients: the registry
+        // already proved the board exists on this gateway, and delivery is
+        // an inbound record to the board's owning-domain webhook where the
+        // interceptor chain (entry-agnostic) executes [A2A] commands.
+        if crate::board::addr::is_board_address(recipient) {
+            match crate::board::addr::resolve_board_recipient(
+                env,
+                &state.config.storage.path,
+                recipient,
+            )
+            .await
+            {
+                Ok(b) => {
+                    // Endpoint via the board's owning domain (domain-level
+                    // webhook fallback), same resolution SMTP uses.
+                    let (webhook_url, webhook_secret) = match env.lookup_domain_addr(&b.domain).await
+                    {
+                        Ok(Some(r)) if r.is_active => {
+                            (r.webhook_url.clone(), r.webhook_secret.clone())
+                        }
+                        _ => (None, None),
+                    };
+                    if board_system.is_none() {
+                        board_system = Some(b.system_id.clone());
+                    }
+                    internal.push((
+                        recipient.clone(),
+                        b.domain,
+                        webhook_url,
+                        webhook_secret,
+                    ));
+                }
+                Err(e) => {
+                    tracing::info!(
+                        operation = "sendapi_board_filtered",
+                        recipient = %recipient,
+                        reason = %e,
+                        "Board recipient filtered at send API (no such board on this gateway)"
+                    );
+                    filtered.push(recipient.clone());
+                }
+            }
+            continue;
+        }
         // Type 1: exact match on full address. Shared-domain addresses are
         // delivered internally regardless of which system owns the record —
         // a same-domain cross-system recipient routes via its own webhook.
@@ -566,18 +646,27 @@ pub async fn send_email(
     // ── 6. Inbound whitelist: for internal recipients, verify sender against their "from"/"all" rules ──
     let mut final_internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
     for (recipient, domain, webhook_url, webhook_secret) in internal {
-        match state
+        let allowed = match state
             .factories
             .email
             .env_factory
             .check_whitelisted(&recipient, sender, "from")
             .await
         {
-            Ok(true) => {
-                state.metrics.inc_whitelist_matches();
-                final_internal.push((recipient, domain, webhook_url, webhook_secret));
+            Ok(true) => true,
+            Ok(false) => {
+                // Board recipient + stranger command: same allowance as the
+                // SMTP deferred-whitelist check (shared predicate).
+                crate::board::addr::is_board_address(&recipient)
+                    && crate::board::addr::is_stranger_command(subject)
             }
-            _ => filtered.push(recipient),
+            Err(_) => false,
+        };
+        if allowed {
+            state.metrics.inc_whitelist_matches();
+            final_internal.push((recipient, domain, webhook_url, webhook_secret));
+        } else {
+            filtered.push(recipient);
         }
     }
 
@@ -589,8 +678,6 @@ pub async fn send_email(
         .map(|a| serde_json::to_string(a).unwrap_or_default());
     let headers_json: Option<String> =
         Some(serde_json::to_string(&merged_headers).unwrap_or_default());
-
-    let subject = req.subject.as_deref().unwrap_or("");
 
     // ── Stranger detection for universal commands ──
     // For internal delivery, headers are read by StrangerInterceptor
@@ -816,7 +903,10 @@ pub async fn send_email(
             .email
             .create_inbound(
                 &email_id,
-                &api_key.system_id,
+                // Board recipients attribute the record to the board's owning
+                // system (mirrors SMTP RCPT, which sets self.system_id from
+                // the board resolution); otherwise the sender's system.
+                board_system.as_deref().unwrap_or(&api_key.system_id),
                 sender,
                 &recipients_json,
                 subject,

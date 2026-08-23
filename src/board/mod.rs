@@ -8,6 +8,7 @@
 //! - A2aInterceptor for inbound email processing
 
 
+pub mod addr;
 pub mod awareness;
 pub mod commands;
 pub mod db;
@@ -16,5 +17,6 @@ pub mod interceptor;
 pub mod models;
 pub mod notify;
 pub mod quota;
+pub mod registry;
 pub mod router;
 pub mod sweeper;

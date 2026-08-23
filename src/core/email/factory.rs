@@ -800,18 +800,26 @@ pub struct MailFactories {
 impl MailFactories {
     /// Create both factories from shared dependencies.
     /// `storage_path` is the base storage directory; attachments dir is derived internally.
+    /// Also loads the board address registry from `a2a_board/` and attaches it
+    /// to the env factory (RCPT substantive check for `.a2a@` addresses).
     pub fn new(
         db: Arc<Database>,
         storage_path: &std::path::Path,
         system_store: Arc<dyn SystemStore>,
     ) -> Self {
         let attachments_dir = storage_path.join("attachments");
+        let board_registry = Arc::new(crate::board::registry::BoardRegistry::new());
+        board_registry.load(&storage_path.to_string_lossy());
+        let mut email_factory = EmailFactory::new(
+            db.clone(),
+            attachments_dir.clone(),
+            system_store,
+        );
+        email_factory.env_factory = email_factory
+            .env_factory
+            .with_board_registry(board_registry);
         Self {
-            email: Arc::new(EmailFactory::new(
-                db.clone(),
-                attachments_dir.clone(),
-                system_store,
-            )),
+            email: Arc::new(email_factory),
             attachment: Arc::new(AttachmentFactory::new(db, attachments_dir)),
         }
     }

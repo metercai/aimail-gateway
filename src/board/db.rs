@@ -367,7 +367,7 @@ pub const KNOWN_ROLES: &[&str] = &["orchestrator", "verifier", "worker", "owner"
 /// Union of every role's seeded verb set — typos/unknown verbs are rejected
 /// instead of silently creating inert permission rows.
 pub const KNOWN_VERBS: &[&str] = &[
-    "init", "tasks", "create", "assign", "review", "block", "unblock",
+    "tasks", "create", "assign", "review", "block", "unblock",
     "cancel", "reassign", "edit", "deadline", "output", "notify", "members",
     "roles", "config", "arbitrate", "comment", "list", "show", "status",
     "heartbeat", "verify", "approve", "reject", "complete", "commit", "reopen",
@@ -384,7 +384,6 @@ pub fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
         (
             "orchestrator",
             &[
-                "init",
                 "tasks",
                 "create",
                 "assign",
@@ -1116,7 +1115,7 @@ mod tests {
         assert!(check_role_permission(&conn, "worker", "list").unwrap());
         assert!(check_role_permission(&conn, "worker", "heartbeat").unwrap());
         assert!(!check_role_permission(&conn, "worker", "arbitrate").unwrap());
-        assert!(check_role_permission(&conn, "orchestrator", "init").unwrap());
+        assert!(check_role_permission(&conn, "orchestrator", "tasks").unwrap());
         assert!(!check_role_permission(&conn, "orchestrator", "complete").unwrap());
     }
 }

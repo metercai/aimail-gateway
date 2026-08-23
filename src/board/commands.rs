@@ -46,8 +46,7 @@ pub fn execute_command(
         "status" => handle_board_status(conn, cmd, sender),
         "gateway-info" => handle_gateway_info(conn, cmd),
         "create" => handle_create(conn, notifier, cmd, sender),
-        "refresh" => handle_init(conn, notifier, cmd, sender),
-        "init" => handle_init(conn, notifier, cmd, sender),
+        "refresh" => handle_refresh(conn, notifier, cmd, sender),
         "arbitrate" => handle_arbitrate(conn, notifier, cmd, sender),
         _ => Ok(CommandResponse {
             status: "error".to_string(),
@@ -804,7 +803,7 @@ fn handle_create(
     Ok(ok_response(None))
 }
 
-fn handle_init(
+fn handle_refresh(
     conn: &Connection,
     notifier: &Notifier,
     cmd: &A2aCommand,
@@ -814,10 +813,10 @@ fn handle_init(
     let short_id = &notifier.board_short_id;
     let ts = now();
 
-    // Hardcoded: only human (owner) can init/refresh a board — checked
-    // BEFORE any board-record or member mutation (S4: the upsert used to
-    // run first, so a non-owner could flip status/goal before being
-    // rejected; member set is never touched by non-owners).
+    // Hardcoded: only the owner can refresh a board — checked BEFORE any
+    // board-record or member mutation (S4: the upsert used to run first,
+    // so a non-owner could flip status/goal before being rejected; member
+    // set is never touched by non-owners).
     let sender_member = db::get_member(conn, board_id, sender)?;
     match sender_member {
         Some(m) if m.role == "owner" => {}
@@ -828,49 +827,26 @@ fn handle_init(
         }
     }
 
+    // refresh is the owner's update verb for an EXISTING board. Board
+    // creation is the Owner `[A2A] new` protocol only — the RCPT
+    // substantive check (board registry) rejects unknown board addresses
+    // at the SMTP layer, so this path can never create a board.
+    let mut updated = db::get_board(conn, board_id).map_err(|_| {
+        crate::core::errors::AppError::NotFound(format!(
+            "board {board_id} not found — refresh requires an existing board (use [A2A] new to create)"
+        ))
+    })?;
     // refresh keeps the existing goal when none is provided
-    // (INSERT OR REPLACE would otherwise overwrite it with NULL).
-    let existing_goal = db::get_board(conn, board_id).ok().and_then(|b| b.goal);
     let description = cmd
         .params
         .as_ref()
         .and_then(|p| p.get("description"))
         .and_then(|v| v.as_str())
         .map(String::from)
-        .or(existing_goal);
-    let board = Board {
-        id: board_id.clone(),
-        short_id: short_id.clone(),
-        board_email: notifier.board_email.clone(),
-        goal: description,
-        status: BoardStatus::Active,
-        output_task_id: None,
-        plan_version: None,
-        plan_text: None,
-        plan_confirmed_at: None,
-        criteria_version: None,
-        criteria_text: None,
-        criteria_confirmed_at: None,
-        created_at: ts.clone(),
-        completed_at: None,
-        system_id: None,
-    };
-    // Idempotent upsert: first-time init creates the board record;
-    // refresh on an existing board (auto-created by the interceptor)
-    // must not fail — create_board refuses duplicates (903facc A2).
-    match db::get_board(conn, board_id) {
-        Ok(existing) => {
-            let mut updated = existing;
-            if board.goal.is_some() {
-                updated.goal = board.goal.clone();
-            }
-            updated.status = BoardStatus::Active;
-            db::update_board(conn, &updated)?;
-        }
-        Err(_) => {
-            db::create_board(conn, &board)?;
-        }
-    }
+        .or(updated.goal.clone());
+    updated.goal = description;
+    updated.status = BoardStatus::Active;
+    db::update_board(conn, &updated)?;
 
     // Add members (required)
     let members_arr = cmd
@@ -1523,7 +1499,7 @@ mod tests {
         assert!(db::check_role_permission(&conn, "orchestrator", "output").unwrap());
         assert!(db::check_role_permission(&conn, "orchestrator", "create").unwrap());
         assert!(db::check_role_permission(&conn, "orchestrator", "status").unwrap());
-        assert!(db::check_role_permission(&conn, "orchestrator", "init").unwrap());
+        assert!(db::check_role_permission(&conn, "orchestrator", "tasks").unwrap());
         assert!(db::check_role_permission(&conn, "owner", "reopen").unwrap());
     }
 
@@ -1590,14 +1566,13 @@ mod tests {
         assert_eq!(resp.status, "error");
     }
 
-    // ── init/refresh idempotency (903facc A2 regression) ──────────
+    // ── refresh semantics (903facc A2 regression) ─────────────────
     #[test]
     fn test_init_on_existing_board_succeeds() {
-        // handle_init must not fail when the board record already exists
-        // (interceptor auto-creates it before dispatching the command).
+        // handle_refresh must not fail when the board record already exists.
         let (conn, board_id, notifier) = setup();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [
@@ -1619,7 +1594,7 @@ mod tests {
         // Only an owner member may refresh the member set.
         let (conn, _board_id, notifier) = setup();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [
@@ -1628,16 +1603,16 @@ mod tests {
             })),
         );
         let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io");
-        assert!(resp.is_err(), "non-owner init must be rejected");
+        assert!(resp.is_err(), "non-owner refresh must be rejected");
     }
 
-    // ── S4: init gate precedes board-record mutation ───────────────
+    // ── S4: refresh gate precedes board-record mutation ─────────────
     #[test]
     fn test_init_non_owner_does_not_mutate_board() {
         let (conn, board_id, notifier) = setup();
         let before = db::get_board(&conn, &board_id).unwrap();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [{"email": "orch@t.io", "role": "orchestrator"}],
@@ -1645,11 +1620,11 @@ mod tests {
             })),
         );
         let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io");
-        assert!(resp.is_err(), "non-owner init must be rejected");
+        assert!(resp.is_err(), "non-owner refresh must be rejected");
         let after = db::get_board(&conn, &board_id).unwrap();
         assert_eq!(
             after.goal, before.goal,
-            "S4: non-owner init must not change the goal"
+            "S4: non-owner refresh must not change the goal"
         );
         assert_eq!(after.status, before.status, "S4: status must stay untouched");
     }
@@ -1659,7 +1634,7 @@ mod tests {
     fn test_init_rejects_unknown_member_role() {
         let (conn, board_id, notifier) = setup();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [{"email": "ghost@t.io", "role": "admin"}],
@@ -1677,7 +1652,7 @@ mod tests {
     fn test_init_rejects_unknown_role_permission_role() {
         let (conn, _board_id, notifier) = setup();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [{"email": "orch@t.io", "role": "orchestrator"}],
@@ -1692,7 +1667,7 @@ mod tests {
     fn test_init_rejects_unknown_role_permission_verb() {
         let (conn, _board_id, notifier) = setup();
         let cmd = make_cmd(
-            "init",
+            "refresh",
             None,
             Some(serde_json::json!({
                 "members": [{"email": "orch@t.io", "role": "orchestrator"}],

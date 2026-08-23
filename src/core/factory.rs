@@ -17,6 +17,11 @@ pub struct EnvFactory {
     system_store: Arc<dyn SystemStore>,
     domain_resolver: Arc<dyn WhitelistKeyResolver>,
     interceptors: Arc<RwLock<Vec<Arc<dyn crate::core::strategy::InboundInterceptor>>>>,
+    /// Board address cache for RCPT substantive checks. Built empty;
+    /// production wiring calls `with_board_registry` (loaded from disk)
+    /// after construction. Test factories that never see `.a2a@`
+    /// recipients can leave it empty.
+    board_registry: Arc<crate::board::registry::BoardRegistry>,
 }
 
 impl EnvFactory {
@@ -30,7 +35,23 @@ impl EnvFactory {
             system_store,
             domain_resolver,
             interceptors: Arc::new(RwLock::new(Vec::new())),
+            board_registry: Arc::new(crate::board::registry::BoardRegistry::new()),
         }
+    }
+
+    /// Attach the shared board registry (production path: load from disk
+    /// once, then share across SMTP handlers and interceptors).
+    pub fn with_board_registry(
+        mut self,
+        registry: Arc<crate::board::registry::BoardRegistry>,
+    ) -> Self {
+        self.board_registry = registry;
+        self
+    }
+
+    /// Access the board registry (RCPT substantive check).
+    pub fn board_registry(&self) -> &Arc<crate::board::registry::BoardRegistry> {
+        &self.board_registry
     }
 
     /// Resolve a system_id from a domain name by looking up the system_domains table.
@@ -366,6 +387,12 @@ impl EnvFactory {
         value: &str,
         direction: &str,
     ) -> AppResult<bool> {
+        // A2A board address (`.a2a@`) is NOT a registered domain record —
+        // the domain resolver would fail on it (reserved local part). Board
+        // members auto-pass via the board group whitelist instead.
+        if crate::board::addr::is_board_address(domain_addr) {
+            return Ok(self.db.is_board_member(domain_addr, value).await?);
+        }
         let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
         for (system_id, lookup_key) in &keys {
             if self
@@ -376,14 +403,9 @@ impl EnvFactory {
                 return Ok(true);
             }
         }
-        // Board group whitelist: when either side of the exchange is a
-        // board address, board members auto-pass (no per-member whitelist
-        // storm). The list is built from member invite/change notifications
-        // (X-Board-Members header) — see board interceptor.
-        if domain_addr.contains(".a2a@") && self.db.is_board_member(domain_addr, value).await? {
-            return Ok(true);
-        }
-        if value.contains(".a2a@") && self.db.is_board_member(value, domain_addr).await? {
+        // Board group whitelist: when the *value* (sender) is a board
+        // address, board members auto-pass (no per-member whitelist storm).
+        if crate::board::addr::is_board_address(value) && self.db.is_board_member(value, domain_addr).await? {
             return Ok(true);
         }
         Ok(false)
