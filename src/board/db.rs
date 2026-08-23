@@ -33,24 +33,33 @@ pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection
 }
 
 pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS boards (
-            id TEXT PRIMARY KEY,
-            short_id TEXT UNIQUE NOT NULL,
-            board_email TEXT NOT NULL,
-            goal TEXT,
-            status TEXT DEFAULT 'active',
-            output_task_id TEXT,
-            plan_version TEXT,
-            plan_text TEXT,
-            plan_confirmed_at TEXT,
-            criteria_version TEXT,
-            criteria_text TEXT,
-            criteria_confirmed_at TEXT,
-            created_at TEXT,
-            completed_at TEXT
-        );
-        CREATE TABLE IF NOT EXISTS board_members (
+      conn.execute_batch(
+          "CREATE TABLE IF NOT EXISTS boards (
+              id TEXT PRIMARY KEY,
+              short_id TEXT UNIQUE NOT NULL,
+              board_email TEXT NOT NULL,
+              goal TEXT,
+              status TEXT DEFAULT 'active',
+              output_task_id TEXT,
+              plan_version TEXT,
+              plan_text TEXT,
+              plan_confirmed_at TEXT,
+              criteria_version TEXT,
+              criteria_text TEXT,
+              criteria_confirmed_at TEXT,
+              created_at TEXT,
+              completed_at TEXT
+          );",
+      )?;
+      // Migration: add system_id for legacy boards (pre-Frozen-state).
+      // The column is nullable — legacy rows keep NULL.
+      let _ = conn.execute(
+          "ALTER TABLE boards ADD COLUMN system_id TEXT",
+          [],
+      );
+      // Remaining schema (unchanged from the original single batch).
+      conn.execute_batch(
+          "CREATE TABLE IF NOT EXISTS board_members (
             email TEXT PRIMARY KEY,
             role TEXT NOT NULL,
             display_name TEXT NOT NULL,
@@ -121,8 +130,8 @@ pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
         )));
     }
     conn.execute(
-        "INSERT INTO boards (id, short_id, board_email, goal, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO boards (id, short_id, board_email, goal, status, created_at, system_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             board.id,
             board.short_id,
@@ -130,6 +139,7 @@ pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
             board.goal,
             board.status.to_string(),
             board.created_at,
+            board.system_id,
         ],
     )?;
     Ok(())
@@ -144,10 +154,109 @@ pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Set a board's status (advanced lifecycle: freeze / thaw).
+/// Returns true if a board row was updated.
+pub fn set_board_status(conn: &Connection, board_id: &str, status: &str) -> AppResult<bool> {
+    let n = conn.execute(
+        "UPDATE boards SET status = ?1 WHERE id = ?2",
+        rusqlite::params![status, board_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Summary of one board row (used by the advanced expiry sweep to
+/// reconcile board status with system expiry state).
+#[derive(Debug, Clone)]
+pub struct BoardRef {
+    pub id: String,
+    pub board_email: String,
+    pub status: BoardStatus,
+    pub system_id: Option<String>,
+}
+
+/// List every board by scanning the a2a_board directory.
+/// Read-only: never creates files. Boards whose db cannot be opened
+/// (corrupt) are skipped with a warning.
+pub fn list_boards(storage_path: &str) -> AppResult<Vec<BoardRef>> {
+    let dir = std::path::Path::new(storage_path).join("a2a_board");
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(&dir).map_err(|e| {
+        crate::core::errors::AppError::Internal(format!("list a2a_board dir: {e}"))
+    })? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Single-file layout: {board_id}.db
+        let Some(board_id) = name.strip_suffix(".db") else {
+            continue;
+        };
+        let db_path = entry.path();
+        let conn = match rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(board_id = %board_id, error = %e, "skip unreadable board db");
+                continue;
+            }
+        };
+        let row: Option<(String, String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, board_email, status, system_id FROM boards LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| crate::core::errors::AppError::Internal(format!("read board row: {e}")))
+            .ok()
+            .flatten();
+        if let Some((id, email, status, system_id)) = row {
+            out.push(BoardRef {
+                id,
+                board_email: email,
+                status: parse_board_status(&status),
+                system_id,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Delete a board's data file (and its WAL/SHM sidecars).
+/// Used by the advanced release path — clears a board's occupied resources.
+pub fn delete_board_file(storage_path: &str, board_id: &str) -> AppResult<()> {
+    let dir = std::path::Path::new(storage_path).join("a2a_board");
+    let db_path = dir.join(format!("{board_id}.db"));
+    for suffix in ["", "-wal", "-shm"] {
+        let p = if suffix.is_empty() {
+            db_path.clone()
+        } else {
+            dir.join(format!("{board_id}.db{suffix}"))
+        };
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
     conn.query_row(
         "SELECT id, short_id, board_email, goal, status, output_task_id, plan_version,
-                plan_text, plan_confirmed_at, criteria_version, criteria_text, criteria_confirmed_at, created_at, completed_at
+                plan_text, plan_confirmed_at, criteria_version, criteria_text, criteria_confirmed_at, created_at, completed_at, system_id
          FROM boards WHERE id = ?1",
         params![board_id],
         |row| {
@@ -156,12 +265,7 @@ pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
                 short_id: row.get(1)?,
                 board_email: row.get(2)?,
                 goal: row.get(3)?,
-                status: match row.get::<_, String>(4)?.as_str() {
-                    "archived" => BoardStatus::Archived,
-                    "awaiting_owner" => BoardStatus::AwaitingOwner,
-                    "completed" => BoardStatus::Completed,
-                    _ => BoardStatus::Active,
-                },
+                status: crate::board::models::parse_board_status(&row.get::<_, String>(4)?),
                 output_task_id: row.get(5)?,
                 plan_version: row.get(6)?,
                 plan_text: row.get(7)?,
@@ -171,6 +275,7 @@ pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
                 criteria_confirmed_at: row.get(11)?,
                 created_at: row.get(12)?,
                 completed_at: row.get(13)?,
+                system_id: row.get(14).ok(),
             })
         },
     )
@@ -181,8 +286,8 @@ pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
     conn.execute(
         "UPDATE boards SET status=?1, output_task_id=?2, plan_version=?3, plan_text=?4,
          plan_confirmed_at=?5, criteria_version=?6, criteria_text=?7,
-         criteria_confirmed_at=?8, completed_at=?9, goal=?10
-         WHERE id=?11",
+         criteria_confirmed_at=?8, completed_at=?9, goal=?10, system_id=?11
+         WHERE id=?12",
         params![
             board.status.to_string(),
             board.output_task_id,
@@ -194,6 +299,7 @@ pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
             board.criteria_confirmed_at,
             board.completed_at,
             board.goal,
+            board.system_id,
             board.id,
         ],
     )?;
@@ -753,6 +859,7 @@ mod tests {
             criteria_confirmed_at: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             completed_at: None,
+            system_id: None,
         };
         create_board(&conn, &board).unwrap();
 
@@ -841,6 +948,7 @@ mod tests {
             criteria_confirmed_at: None,
             created_at: "2026-07-02T00:00:00Z".to_string(),
             completed_at: None,
+            system_id: None,
         };
         assert!(
             create_board(&conn, &dup).is_err(),

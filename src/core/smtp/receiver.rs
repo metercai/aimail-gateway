@@ -1,6 +1,7 @@
 //! SMTP receiver — accepts inbound email via the mailin protocol.
 
 use std::net::IpAddr;
+use rusqlite::OptionalExtension;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{trace, warn};
@@ -284,6 +285,17 @@ impl Handler for ConnectionHandler {
     }
 
     fn rcpt(&mut self, to: &str) -> Response {
+        // ── A2A board address (command flow) ──────────────────────────
+        // Board addresses (`{short}[.{sys}].a2a@{domain}`) are not system
+        // domain entries — they are resolved against the board's own DB.
+        // Existence is validated here (lazy: format checked at RCPT, board
+        // record looked up so the owning system can be set for the shared
+        // data phase). Non-members fall through to the deferred whitelist
+        // check, same as regular recipients.
+        if to.contains(".a2a@") {
+            return self.rcpt_board_addr(to);
+        }
+
         // ── Resolve system / domain from recipient address ────────────
         // Try exact match first (shared domain: ql-biopharm.tow@amail.token.tm
         // IS the domain record).  Fall back to persona-stripped base address
@@ -418,6 +430,129 @@ impl Handler for ConnectionHandler {
         }
         self.process_data_end_post(None, None)
     }
+}
+
+impl ConnectionHandler {
+    /// Resolve an A2A board recipient address against the board's own DB.
+    ///
+    /// Board addresses are not registered in `system_domains` (the `a2a`
+    /// local-part is reserved for boards — see the API-layer guard), so the
+    /// regular domain lookup would reject them. Instead: parse the address,
+    /// look up the board record (immutable open — never creates a file),
+    /// and set the owning system id so the shared data phase works.
+    fn rcpt_board_addr(&mut self, to: &str) -> Response {
+        let (short_id, board_id, domain) = match crate::board::models::parse_board_email(to) {
+            Some(r) => r,
+            None => return perm_fail("Invalid board address"),
+        };
+
+        // Owning system, resolved from best to worst source:
+        //   1. boards.system_id (set at creation)
+        //   2. orchestrator member's registered system (legacy boards)
+        //   3. the sender's system (board DB absent — the data-phase
+        //      interceptor auto-creates the board and attributes the same
+        //      sender system, so the email lands under the right system)
+        let db_path = std::path::Path::new(&self.config.storage.path)
+            .join("a2a_board")
+            .join(format!("{board_id}.db"));
+        // Immutable: this is a lookup, never a write — a mistyped board
+        // address must not create an empty board DB on disk.
+        let conn = match rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, // READ_ONLY never creates the file
+        ) {
+            Ok(c) => Some(c),
+            Err(_) => None, // no board record yet — deferred to data phase
+        };
+
+        let mut system_id: Option<String> = conn
+            .as_ref()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT system_id FROM boards WHERE id = ?1",
+                    rusqlite::params![&board_id],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten()
+                .filter(|s| !s.is_empty())
+            });
+        if system_id.is_none() {
+            if let Some(c) = conn.as_ref() {
+                if let Ok(Some(orch_email)) = c.query_row(
+                    "SELECT email FROM board_members WHERE board_id = ?1 AND role = 'orchestrator' LIMIT 1",
+                    rusqlite::params![&board_id],
+                    |r| r.get::<_, String>(0),
+                ).optional() {
+                    system_id = self
+                        .block_on(self.email_factory.env_factory.lookup_domain_addr(&orch_email))
+                        .ok()
+                        .flatten()
+                        .map(|r| r.system_id);
+                }
+            }
+        }
+        if system_id.is_none() {
+            // Board DB absent (or no system resolvable) — attribute to the
+            // sender's system. The A-flow interceptor's auto-create path
+            // resolves the same sender system for the board it creates.
+            if let Some(ref sender) = self.sender {
+                system_id = self
+                    .block_on(self.email_factory.env_factory.lookup_domain_addr(sender))
+                    .ok()
+                    .flatten()
+                    .map(|r| r.system_id);
+            }
+        }
+        let system_id = match system_id {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                tracing::warn!(
+                    operation = "rcpt_board_no_system",
+                    board_id = %board_id,
+                    "A2A board has no resolvable owning system"
+                );
+                return temp_fail("Board system not resolvable");
+            }
+        };
+
+        tracing::debug!(
+            operation = "rcpt_board_accepted",
+            board_id = %board_id,
+            short_id = %short_id,
+            "RCPT accepted a2a board address (command flow)"
+        );
+
+        self.system_id = Some(system_id);
+        self.domain = Some(domain);
+
+        // Inbound whitelist — board-member bypass is handled inside
+        // check_whitelisted (board_whitelists lookup on either side).
+        if let Some(ref sender) = self.sender {
+            let allowed = self.block_on(self.email_factory.env_factory.check_whitelisted(
+                to, sender, "from",
+            ));
+            match allowed {
+                Ok(true) => {
+                    self.sender_whitelisted = true;
+                    self.metrics.inc_whitelist_matches();
+                }
+                Ok(false) => {
+                    self.sender_whitelisted = false;
+                    tracing::info!(
+                        operation = "smtp_sender_not_whitelisted",
+                        board_id = %board_id,
+                        sender = %sender,
+                        "Board sender not whitelisted — deferred to data_end"
+                    );
+                }
+                Err(_) => return temp_fail("Whitelist check failed"),
+            }
+        }
+        self.recipients.push(to.to_lowercase());
+        ok()
+    }
+
 }
 
 // ── Shared DATA-phase business body ─────────────────────────────────────

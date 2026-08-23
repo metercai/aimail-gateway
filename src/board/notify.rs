@@ -436,6 +436,7 @@ mod tests {
             criteria_confirmed_at: None,
             created_at: "2026-07-01T00:00:00Z".to_string(),
             completed_at: None,
+            system_id: None,
         }
     }
 

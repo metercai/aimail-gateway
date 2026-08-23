@@ -7,7 +7,7 @@
 //! - toolset HTTP API (4 endpoints)
 //! - A2aInterceptor for inbound email processing
 
-pub mod archiver;
+
 pub mod awareness;
 pub mod commands;
 pub mod db;

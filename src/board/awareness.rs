@@ -174,6 +174,7 @@ mod tests {
             criteria_confirmed_at: None,
             created_at: now(),
             completed_at: None,
+            system_id: None,
         };
         db::create_board(&conn, &board).unwrap();
         // Create members (tasks.assignee has FK to board_members.email)

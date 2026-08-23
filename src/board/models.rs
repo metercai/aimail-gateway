@@ -18,6 +18,10 @@ pub struct Board {
     pub criteria_confirmed_at: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
+    /// Owning system id (orchestrator's system at creation). Legacy boards
+    /// have NULL. Advanced uses this to freeze/unfreeze/clear a system's
+    /// boards on product-expiry transitions.
+    pub system_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -30,6 +34,11 @@ pub enum BoardStatus {
     Completed,
     #[serde(rename = "archived")]
     Archived,
+    /// Service frozen (advanced edition only — product validity expired).
+    /// Frozen boards reject commands; they thaw back to Active on renewal.
+    /// Base edition never creates or checks this state.
+    #[serde(rename = "frozen")]
+    Frozen,
 }
 
 impl std::fmt::Display for BoardStatus {
@@ -39,7 +48,19 @@ impl std::fmt::Display for BoardStatus {
             BoardStatus::AwaitingOwner => write!(f, "awaiting_owner"),
             BoardStatus::Completed => write!(f, "completed"),
             BoardStatus::Archived => write!(f, "archived"),
+            BoardStatus::Frozen => write!(f, "frozen"),
         }
+    }
+}
+
+/// Parse a status string from the database (legacy boards predate `frozen`).
+pub fn parse_board_status(s: &str) -> BoardStatus {
+    match s {
+        "awaiting_owner" => BoardStatus::AwaitingOwner,
+        "completed" => BoardStatus::Completed,
+        "archived" => BoardStatus::Archived,
+        "frozen" => BoardStatus::Frozen,
+        _ => BoardStatus::Active,
     }
 }
 

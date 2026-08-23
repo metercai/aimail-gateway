@@ -853,6 +853,7 @@ fn handle_init(
         criteria_confirmed_at: None,
         created_at: ts.clone(),
         completed_at: None,
+        system_id: None,
     };
     // Idempotent upsert: first-time init creates the board record;
     // refresh on an existing board (auto-created by the interceptor)
@@ -1171,6 +1172,7 @@ mod tests {
             criteria_confirmed_at: None,
             created_at: now(),
             completed_at: None,
+            system_id: None,
         };
         db::create_board(&conn, &board).unwrap();
 

@@ -191,8 +191,34 @@ impl InboundInterceptor for A2aInterceptor {
                     }
                 };
 
-                // Create board if not exists
+                // Create board if not exists.
+                // Validate: sender must be declared as the owner member
+                // BEFORE any side effect (board row, members, tokens) —
+                // a non-owner sender must never create junk boards or
+                // consume board quota or mint member tokens.
+                let sender_is_owner = members
+                    .map(|arr| {
+                        arr.iter().any(|m| {
+                            m.get("role").and_then(|v| v.as_str()) == Some("owner")
+                                && m.get("email").and_then(|v| v.as_str()) == Some(sender.as_str())
+                        })
+                    })
+                    .unwrap_or(false);
+                if !sender_is_owner {
+                    tracing::warn!(
+                        "[a2a_board] [A2A] new rejected: sender {} is not declared owner",
+                        sender
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
+
                 if db::get_board(&conn, &board_id).is_err() {
+                    // Board quota: check max_active_boards (only after the
+                    // owner gate — a rejected command must not consume quota).
+                    if let Err(e) = self.board_quota.check_active_boards(&orch_system).await {
+                        tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
+                        return crate::core::strategy::InterceptorDecision::PassThrough;
+                    }
                     let board = Board {
                         id: board_id.clone(),
                         short_id: short_id.clone(),
@@ -212,34 +238,14 @@ impl InboundInterceptor for A2aInterceptor {
                         criteria_confirmed_at: None,
                         created_at: chrono::Utc::now().to_rfc3339(),
                         completed_at: None,
+                        system_id: if orch_system.is_empty() {
+                            None
+                        } else {
+                            Some(orch_system.clone())
+                        },
                     };
-                    // Board quota: check max_active_boards
-                    if let Err(e) = self.board_quota.check_active_boards(&orch_system).await {
-                        tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
-                        return crate::core::strategy::InterceptorDecision::PassThrough;
-                    }
                     db::create_board(&conn, &board).ok();
                     self.board_quota.invalidate_cache();
-                }
-
-                // Validate: sender must be declared as the owner member
-                // BEFORE any side effect (board row, members, tokens) —
-                // a non-owner sender must never create junk boards or
-                // mint member tokens.
-                let sender_is_owner = members
-                    .map(|arr| {
-                        arr.iter().any(|m| {
-                            m.get("role").and_then(|v| v.as_str()) == Some("owner")
-                                && m.get("email").and_then(|v| v.as_str()) == Some(sender.as_str())
-                        })
-                    })
-                    .unwrap_or(false);
-                if !sender_is_owner {
-                    tracing::warn!(
-                        "[a2a_board] [A2A] new rejected: sender {} is not declared owner",
-                        sender
-                    );
-                    return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
 
                 // Register members and collect invite info
@@ -521,11 +527,19 @@ impl InboundInterceptor for A2aInterceptor {
                         return crate::core::strategy::InterceptorDecision::PassThrough;
                     }
                     let ts = chrono::Utc::now().to_rfc3339();
+                    // Reuse the local part of the address this command was
+                    // actually sent to — works for both layouts
+                    // (`{short}.a2a` and shared `{short}.{sys}.a2a`). The old
+                    // hard-coded `{short}.a2a@{domain}` form silently broke
+                    // shared-domain boards (their real address embeds the
+                    // system name), making the dynamic bind check (:494)
+                    // reject every subsequent command on the auto-created board.
                     let board_domain = to_addr.split('@').nth(1).unwrap_or("");
+                    let local_part = to_addr.split('@').next().unwrap_or("");
                     let board = Board {
                         id: board_id.clone(),
                         short_id: short_id.clone(),
-                        board_email: format!("{}.a2a@{}", short_id, board_domain),
+                        board_email: format!("{}@{}", local_part, board_domain),
                         goal: None,
                         status: BoardStatus::Active,
                         output_task_id: None,
@@ -537,6 +551,11 @@ impl InboundInterceptor for A2aInterceptor {
                         criteria_confirmed_at: None,
                         created_at: ts,
                         completed_at: None,
+                        system_id: if sys_id.is_empty() {
+                            None
+                        } else {
+                            Some(sys_id.clone())
+                        },
                     };
                     let _ = db::create_board(&conn, &board);
                     // Seed default role_permissions — without it
@@ -552,6 +571,39 @@ impl InboundInterceptor for A2aInterceptor {
                     board
                 }
             };
+
+            // ── Lifecycle gate (D): archived / frozen boards stop here ──
+            // Base lifecycle: active → archived (terminal, no clear).
+            // Advanced adds frozen (system expired) / thawed on renewal.
+            // Commands to a board past its active life are refused with a
+            // log — the mail is not delivered (PassThrough) and no verb is
+            // processed. Completed boards stay open (their verbs finish the
+            // work); only terminal states block.
+            match board.status {
+                BoardStatus::Archived => {
+                    tracing::info!(
+                        operation = "board_cmd_refused",
+                        board_id = %board_id,
+                        status = "archived",
+                        verb = %verb,
+                        sender = %sender,
+                        "refused: board archived (lifecycle ended)",
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
+                BoardStatus::Frozen => {
+                    tracing::info!(
+                        operation = "board_cmd_refused",
+                        board_id = %board_id,
+                        status = "frozen",
+                        verb = %verb,
+                        sender = %sender,
+                        "refused: board frozen (system expired; thaws on renewal)",
+                    );
+                    return crate::core::strategy::InterceptorDecision::PassThrough;
+                }
+                _ => {}
+            }
 
             let board_domain = board.board_email.split('@').nth(1).unwrap_or("");
 
