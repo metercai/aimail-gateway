@@ -67,15 +67,6 @@ impl HttpConfig {
         }
         (&self.bind, 80)
     }
-
-    /// True when dual-port mode (80 + 443) should be enabled.
-    ///
-    /// Conditions: addr port == 80 AND hostname is set.
-    /// This is checked by the advanced-edition server binding.
-    pub fn is_dual_port(&self) -> bool {
-        let (_, port) = self.parsed_bind();
-        port == 80 && self.hostname.is_some()
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
