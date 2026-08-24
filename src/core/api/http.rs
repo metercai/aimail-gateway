@@ -38,6 +38,7 @@ pub fn create_router(
     router_hook: Arc<dyn RouterHook>,
     domain_handler: Option<axum::routing::MethodRouter<HttpState>>,
     list_domain_handler: Option<axum::routing::MethodRouter<HttpState>>,
+    send_handler: Option<axum::routing::MethodRouter<HttpState>>,
 ) -> Router {
     // Health check: no IP restriction — open access
     let health = Router::new()
@@ -55,7 +56,10 @@ pub fn create_router(
         .route("/api/v1/admin/api-keys/:id", put(update_api_key))
         .route("/api/v1/admin/api-keys/:id", delete(delete_api_key))
         // Outbound send
-        .route("/api/v1/send", post(send_email))
+        .route(
+            "/api/v1/send",
+            send_handler.unwrap_or_else(|| post(send_email)),
+        )
         .route("/api/v1/system/welcome", post(send_welcome))
         // Whoami
         .route("/api/v1/whoami", get(whoami))

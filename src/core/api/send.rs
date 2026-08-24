@@ -15,6 +15,8 @@ use crate::core::email::utils::strip_persona;
 use crate::core::storage::ApiKeyRecord;
 
 /// POST /api/v1/send — Create an outbound email record via API.
+/// Base edition: scope + bare-domain check only; the advanced wrapper
+/// layers system/quota/rate prechecks before the shared core.
 pub async fn send_email(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
@@ -39,70 +41,22 @@ pub async fn send_email(
         ));
     }
 
-    // ── 1b. Daily email quota (emails_per_day from system plans) ──
-    {
-        let system_id = api_key.system_id.as_str();
-        match state.factories.email.env_factory.resolve_system(system_id).await {
-            Ok(Some(_)) => { /* system exists, proceed to quota check */ }
-            Ok(None) => {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorResponse {
-                        error: "System not found".to_string(),
-                        detail: None,
-                    }),
-                ));
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                ));
-            }
-        };
-        // Delegate quota check to QuotaChecker trait
-        state
-            .extensions
-            .quota_checker
-            .check_send_quota(system_id)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: "rate_limited".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                )
-            })?;
-    }
+    send_email_core(state, api_key, req).await
+}
 
-    // ── 1a. Per-system rate limit ──
-    {
-        let system_id = api_key.system_id.as_str();
-        match state.extensions.rate_limiter.check(system_id) {
-            Ok(()) => { /* allowed */ }
-            Err(wait) => {
-                state.metrics.inc_rate_limited();
-                return Err((
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Json(ErrorResponse {
-                        error: "Rate limit exceeded".to_string(),
-                        detail: Some(format!(
-                            "Too many requests for system '{}'. Retry after {:.0}s",
-                            system_id,
-                            wait.as_secs_f64()
-                        )),
-                    }),
-                ));
-            }
-        }
-    }
+/// Shared send core (no edition strategy gates).
+/// Base routes to it directly; the advanced wrapper does system/quota/rate
+/// prechecks first then calls this.
+pub async fn send_email_core(
+    state: State<HttpState>,
+    api_key: Extension<ApiKeyRecord>,
+    req: SendEmailRequest,
+) -> Result<(StatusCode, Json<SendEmailResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Note: scope + bare-domain checks are done by the caller (base
+    // `send_email` or the advanced wrapper) before reaching this core.
 
     // ── 2. Validate sender matches API key (persona-aware) ──
+
     let sender_raw = req.sender.as_deref().unwrap_or(&api_key.email_address);
     // Persona stripping is mode-dependent. Non-shared: "support.alice@agent.com"
     // → base "alice@agent.com" (persona prefix). Shared-domain addresses use

@@ -159,7 +159,7 @@ pub fn spawn_http_single_port(
 ) -> JoinHandle<AppResult<()>> {
     let http_cfg = config.http.clone();
     tokio::spawn(async move {
-        // ── Plain HTTP (TLS migrated to advanced edition) ──
+        // ── Plain HTTP (the advanced edition fronts this with its own TLS) ──
         let listener = bind_with_reuseaddr(&http_cfg.bind)
             .await
             .unwrap_or_else(|e| panic!("HTTP bind failed on {}: {}", http_cfg.bind, e));
