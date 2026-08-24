@@ -371,13 +371,12 @@ pub async fn send_email_core(
         && !merged_headers.contains_key("message-id")
         && !merged_headers.contains_key("message_id")
     {
-        let domain = state
-            .config
-            .smtp
-            .hostname
-            .as_deref()
-            .or_else(|| state.config.http.hostname.as_deref())
-            .unwrap_or("amail.local");
+        // 域解析链(精确 → 宽泛)见 resolve_fallback_domain()
+        let domain = resolve_fallback_domain(
+            sender,
+            state.config.smtp.hostname.as_deref(),
+            state.config.http.hostname.as_deref(),
+        );
         let msg_id = format!("<{}@{}>", Uuid::new_v4(), domain);
         merged_headers.insert("Message-ID".into(), msg_id);
     }
@@ -1017,6 +1016,32 @@ pub async fn send_email_core(
     ))
 }
 
+/// Resolve the domain used when auto-generating a missing Message-ID.
+///
+/// 域解析链(精确 → 宽泛):
+///   ① sender 域 — = API key email 的域(调用前已精确匹配, 权威且与发件人一致)。
+///      共享 gateway 部署下 ② 是 relay 域, sender 域可让 Message-ID 与发件人域
+///      保持一致(仅影响未自带 Message-ID 的兜底调用方)。
+///   ② smtp.hostname — 必填(validate 缺失直接报错)
+///   ③ http.hostname — 可选
+///   ④ "amail.local" — 死回退, 因 ② 必填实际不可达
+fn resolve_fallback_domain(
+    sender: &str,
+    smtp_hostname: Option<&str>,
+    http_hostname: Option<&str>,
+) -> String {
+    if let Some(at) = sender.rfind('@') {
+        let d = &sender[at + 1..];
+        if !d.is_empty() {
+            return d.to_string();
+        }
+    }
+    smtp_hostname
+        .or(http_hostname)
+        .unwrap_or("amail.local")
+        .to_string()
+}
+
 /// Log filtered recipients and insert notification for the sender.
 /// Uses auto_reply_* config fields for consistent system messaging.
 async fn send_filtered_notification(
@@ -1175,5 +1200,39 @@ async fn send_unregistered_notification(
             warn!(operation="trigger_full_unregistered_notif", error=%e,
                   email_id=%email_id, "Trigger channel full for unregistered notification");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_fallback_domain;
+
+    #[test]
+    fn fallback_domain_prefers_sender_domain() {
+        // ① sender 域优先于 smtp/http hostname
+        assert_eq!(
+            resolve_fallback_domain("alice@agent.com", Some("relay.example"), Some("http.example")),
+            "agent.com"
+        );
+        // shared-domain persona (2-dot local) 同样取其域
+        assert_eq!(
+            resolve_fallback_domain("persona.profile.system@shared.example", Some("relay.example"), None),
+            "shared.example"
+        );
+    }
+
+    #[test]
+    fn fallback_domain_without_sender_uses_hostname_chain() {
+        // 无 sender 域 → ② smtp.hostname
+        assert_eq!(
+            resolve_fallback_domain("", Some("relay.example"), Some("http.example")),
+            "relay.example"
+        );
+        // ② 缺 → ③ http.hostname
+        assert_eq!(resolve_fallback_domain("", None, Some("http.example")), "http.example");
+        // ③ 缺 → ④ amail.local
+        assert_eq!(resolve_fallback_domain("", None, None), "amail.local");
+        // sender 带 @ 但域为空 → 回退 hostname 链
+        assert_eq!(resolve_fallback_domain("alice@", Some("relay.example"), None), "relay.example");
     }
 }
