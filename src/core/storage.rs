@@ -861,14 +861,17 @@ impl Database {
         let description = description.map(String::from);
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.call(move |conn| {
-            conn.execute(
-                // AUDIT-1 P2-7: on conflict keep the ORIGINAL direction —
-                // re-inserting the same (system, domain, value) with a
-                // different direction must not silently overwrite the
-                // existing rule (previously direction=excluded.direction).
-                "INSERT INTO whitelists (system_id, domain_addr, direction, value, description, is_active, created_at, category, api_key_id) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8) ON CONFLICT(system_id, domain_addr, value) DO UPDATE SET is_active=1, description=CASE WHEN excluded.description IS NOT NULL THEN excluded.description ELSE description END",
-                params![system_id, domain_addr, direction, value, description, now, category, api_key_id],
-            )?;
+             conn.execute(
+                 // Recreate = overwrite: direction is a one-of-three choice
+                 // (to/from/all) per (system_id, domain_addr, value), so a
+                 // later create with a different direction replaces the
+                 // existing rule (last write wins). AUDIT-1 P2-7 originally
+                 // froze direction on conflict, but that made a second
+                 // direction un-persistable (4.3c: 'to' row existed, 'from'
+                 // create hit the conflict and silently kept 'to').
+                 "INSERT INTO whitelists (system_id, domain_addr, direction, value, description, is_active, created_at, category, api_key_id) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8) ON CONFLICT(system_id, domain_addr, value) DO UPDATE SET direction=excluded.direction, is_active=1, description=CASE WHEN excluded.description IS NOT NULL THEN excluded.description ELSE description END",
+                 params![system_id, domain_addr, direction, value, description, now, category, api_key_id],
+             )?;
             let id = conn.last_insert_rowid();
             Ok(WhitelistRecord {
                 id, system_id, domain_addr, direction, value, description, is_active: true, created_at: now,
@@ -1632,9 +1635,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn whitelist_conflict_keeps_original_direction() {
-        // AUDIT-1 P2-7: re-inserting (system, domain, value) with a different
-        // direction must not overwrite the existing direction.
+    async fn whitelist_conflict_overwrites_direction() {
+        // Recreate = overwrite: direction is one of (to/from/all) per
+        // (system_id, domain_addr, value); a later create with a different
+        // direction replaces the existing rule (last write wins). This is
+        // what makes the to→from→all sequence (category-4 4.3a/4.3c/4.3d)
+        // work — previously the frozen-direction behavior (AUDIT-1 P2-7)
+        // made a second direction un-persistable.
         let db = temp_db();
         db.insert_whitelist("sys1", "a@x.com", "from", "v@y.com", "system", None, None)
             .await
@@ -1647,6 +1654,18 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(rec.direction, "from", "original direction preserved");
+        assert_eq!(rec.direction, "to", "later create overwrites direction");
+        // Single row, not two.
+        let n: i64 = db
+            .call(|conn| {
+                Ok(conn.query_row(
+                    "SELECT count(*) FROM whitelists WHERE system_id='sys1' AND domain_addr='a@x.com' AND value='v@y.com'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "one row per (system_id, domain_addr, value)");
     }
 }
