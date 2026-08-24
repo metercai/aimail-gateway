@@ -679,6 +679,30 @@ pub async fn send_email(
     let headers_json: Option<String> =
         Some(serde_json::to_string(&merged_headers).unwrap_or_default());
 
+    // ── Full post-filter recipient list (external ∪ internal) ──────────
+    // Identical across both direction records: this is what the final
+    // recipient sees in the To/Cc headers. Reconstructed from the two
+    // post-filter buckets (NOT from to_set, which still holds filtered /
+    // unrequested addresses), each address kept in its original to/cc slot
+    // and re-expanded to persona form for display.
+    let mut full_bases: Vec<String> = Vec::new();
+    let mut full_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in external.iter().chain(final_internal.iter().map(|t| &t.0)) {
+        if full_seen.insert(e.clone()) {
+            full_bases.push(e.clone());
+        }
+    }
+    let full_to: Vec<String> = full_bases
+        .iter()
+        .filter(|e| to_set.contains(*e))
+        .map(|e| full_addr(e))
+        .collect();
+    let full_cc: Vec<String> = full_bases
+        .iter()
+        .filter(|e| cc_set.contains(*e))
+        .map(|e| full_addr(e))
+        .collect();
+
     // ── Stranger detection for universal commands ──
     // For internal delivery, headers are read by StrangerInterceptor
     {
@@ -706,7 +730,7 @@ pub async fn send_email(
         let new_id = Uuid::new_v4().to_string();
         let new_sender = external[0].clone();
         let new_recipient = sender.to_string();
-        let new_recipients_json = serde_json::json!({"to": [new_recipient], "cc": []}).to_string();
+        let new_recipients_json = serde_json::json!({"to": [new_recipient], "cc": [], "rcpt": [new_recipient]}).to_string();
 
         info!(
             operation = "pong_intercepted",
@@ -768,19 +792,14 @@ pub async fn send_email(
     // 7a. Outbound: one record for all external recipients
     if !external.is_empty() {
         let email_id = Uuid::new_v4().to_string();
-        let external_to: Vec<String> = external
-            .iter()
-            .filter(|e| to_set.contains(*e))
-            .map(|e| full_addr(e))
-            .collect();
-        let external_cc: Vec<String> = external
-            .iter()
-            .filter(|e| cc_set.contains(*e))
-            .map(|e| full_addr(e))
-            .collect();
+        // to/cc = full post-filter list (external ∪ internal), so the final
+        // recipient sees every address; rcpt = external only (what this
+        // record actually MX-delivers to).
+        let external_rcpt: Vec<String> = external.iter().map(|e| full_addr(e)).collect();
         let recipients_json = Recipients {
-            to: external_to,
-            cc: external_cc,
+            to: full_to.clone(),
+            cc: full_cc.clone(),
+            rcpt: external_rcpt,
         }
         .to_json();
 
@@ -870,19 +889,19 @@ pub async fn send_email(
             .iter()
             .map(|(email, _, _, _)| email.clone())
             .collect();
-        let internal_to: Vec<String> = internal_emails
+        // to/cc = full post-filter list (external ∪ internal); rcpt =
+        // internal delivery targets. Board addresses are command-flow
+        // triggers (handled by the A2A interceptor), not final agent
+        // deliveries, so they stay in to/cc but are excluded from rcpt.
+        let internal_rcpt: Vec<String> = internal_emails
             .iter()
-            .filter(|e| to_set.contains(*e))
-            .cloned()
-            .collect();
-        let internal_cc: Vec<String> = internal_emails
-            .iter()
-            .filter(|e| cc_set.contains(*e))
+            .filter(|a| !crate::board::addr::is_board_address(a))
             .cloned()
             .collect();
         let recipients_json = Recipients {
-            to: internal_to,
-            cc: internal_cc,
+            to: full_to.clone(),
+            cc: full_cc.clone(),
+            rcpt: internal_rcpt,
         }
         .to_json();
 
@@ -1085,6 +1104,7 @@ async fn send_filtered_notification(
     let recipients_json = crate::core::email::storage::Recipients {
         to: vec![sender.to_string()],
         cc: vec![],
+        rcpt: vec![sender.to_string()],
     }
     .to_json();
 
@@ -1168,6 +1188,7 @@ async fn send_unregistered_notification(
     let recipients_json = crate::core::email::storage::Recipients {
         to: vec![sender.to_string()],
         cc: vec![],
+        rcpt: vec![sender.to_string()],
     }
     .to_json();
 

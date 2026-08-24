@@ -56,6 +56,8 @@ impl MxDelivererImpl {
         dkim_signer: &Option<Arc<dyn MessageSigner>>,
         from_addr: &Address,
         recipients: &[Address],
+        header_to: &[Address],
+        header_cc: &[Address],
         email_body: &MultiPart,
         record: &EmailRecord,
         email_factory: &EmailFactory,
@@ -88,7 +90,8 @@ impl MxDelivererImpl {
         let raw_to_send = build_mx_message(
             dkim_signer,
             from_addr,
-            recipients,
+            header_to,
+            header_cc,
             email_body,
             record,
         )
@@ -198,7 +201,8 @@ impl MxDelivererImpl {
 async fn build_mx_message(
     dkim_signer: &Option<Arc<dyn MessageSigner>>,
     from_addr: &Address,
-    recipients: &[Address],
+    header_to: &[Address],
+    header_cc: &[Address],
     email_body: &MultiPart,
     record: &EmailRecord,
 ) -> AppResult<Vec<u8>> {
@@ -225,11 +229,17 @@ async fn build_mx_message(
     let mut builder = lettre::Message::builder()
         .from(lettre::message::Mailbox::new(from_name, from_addr.clone()))
         .subject(subject);
-    for addr in recipients {
+    for addr in header_to {
         let display = name_map
             .get(&addr.to_string().to_lowercase())
             .cloned();
         builder = builder.to(lettre::message::Mailbox::new(display, addr.clone()));
+    }
+    for addr in header_cc {
+        let display = name_map
+            .get(&addr.to_string().to_lowercase())
+            .cloned();
+        builder = builder.cc(lettre::message::Mailbox::new(display, addr.clone()));
     }
     if let Some(v) = headers_val.get("message_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
         builder = builder.header(lettre::message::header::MessageId::from(v.to_string()));

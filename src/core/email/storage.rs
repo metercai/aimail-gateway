@@ -267,39 +267,49 @@ impl Database {
     }
 }
 
-/// Structured recipients with to/cc distinction.
+/// Structured recipients with to/cc/rcpt distinction.
+///
+/// - `to` / `cc`: the complete post-filter recipient list (union of the
+///   external and internal directions). This is what final recipients should
+///   see in the To/Cc headers; both direction records carry identical values.
+/// - `rcpt`: the addresses this specific record actually delivers to
+///   (outbound record → MX targets; inbound internal record → webhook
+///   targets). Board addresses may appear in to/cc without being in rcpt,
+///   since they are not final delivery targets.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Recipients {
     pub to: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rcpt: Vec<String>,
 }
 
 impl Recipients {
-    /// All recipients as a flat iterator of email strings.
+    /// Full recipient list (to + cc) — display/metadata semantics.
     pub fn all(&self) -> impl Iterator<Item = &str> {
         self.to.iter().chain(self.cc.iter()).map(|s| s.as_str())
     }
 
+    /// Actual delivery targets of this record: `rcpt` when present,
+    /// falling back to to + cc for records written before `rcpt` existed.
+    pub fn delivery(&self) -> Box<dyn Iterator<Item = &str> + Send + '_> {
+        if self.rcpt.is_empty() {
+            Box::new(self.to.iter().chain(self.cc.iter()).map(|s| s.as_str()))
+        } else {
+            Box::new(self.rcpt.iter().map(|s| s.as_str()))
+        }
+    }
+
     /// Parse from a JSON string stored in the emails.recipients column.
-    /// Accepts both `{"to":[...],"cc":[...]}` and `["addr1","addr2"]` formats.
+    /// Format: `{"to":[...],"cc":[...],"rcpt":[...]}` (cc/rcpt optional).
     pub fn from_json(json: &str) -> Self {
-        // First try structured format
-        if let Ok(r) = serde_json::from_str::<Recipients>(json) {
-            return r;
-        }
-        // Fallback: treat as flat array → all go to "to"
-        if let Ok(arr) = serde_json::from_str::<Vec<String>>(json) {
-            return Recipients {
-                to: arr,
+        serde_json::from_str::<Recipients>(json)
+            .unwrap_or_else(|_| Recipients {
+                to: vec![json.to_string()],
                 cc: vec![],
-            };
-        }
-        // Last resort: single bare string
-        Recipients {
-            to: vec![json.to_string()],
-            cc: vec![],
-        }
+                rcpt: vec![],
+            })
     }
 
     pub fn to_json(&self) -> String {

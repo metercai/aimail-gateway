@@ -112,9 +112,11 @@ impl SmtpRelay {
         };
 
         let recipients = record.recipients_parsed();
-        let external_recipients = self.filter_external_recipients(&recipients).await?;
+        // Envelope (RCPT TO) = external recipients only — internal
+        // recipients are delivered via webhook, never over SMTP.
+        let external = self.filter_external_recipients(&recipients).await?;
 
-        if external_recipients.is_empty() {
+        if external.is_empty() {
             info!(
                 operation = "loopback_all",
                 email_id = %record.id,
@@ -123,12 +125,35 @@ impl SmtpRelay {
             return Ok(());
         }
 
+        // To/Cc headers = the full post-filter recipient list (external ∪
+        // internal) so the final recipient sees every address, with the
+        // to/cc slot distinction preserved.
+        let header_to: Vec<Address> = recipients
+            .to
+            .iter()
+            .filter_map(|r| parse_address(r).ok())
+            .collect();
+        let header_cc: Vec<Address> = recipients
+            .cc
+            .iter()
+            .filter_map(|r| parse_address(r).ok())
+            .collect();
+        // If everything landed in Cc, the message still needs a To header —
+        // fall back to the external set so the mail is well-formed.
+        let header_to: Vec<Address> = if header_to.is_empty() {
+            external.clone()
+        } else {
+            header_to
+        };
+
         match &self.transport {
             SmtpTransportMode::Relay(transport) => {
                 self.send_via_relay(
                     transport,
                     &from_addr,
-                    &external_recipients,
+                    &external,
+                    &header_to,
+                    &header_cc,
                     &email_body,
                     record,
                 )
@@ -139,7 +164,9 @@ impl SmtpRelay {
                     .deliver_via_mx(
                         &self.dkim_signer,
                         &from_addr,
-                        &external_recipients,
+                        &external,
+                        &header_to,
+                        &header_cc,
                         &email_body,
                         record,
                         &self.email_factory.as_ref(),
@@ -183,14 +210,16 @@ impl SmtpRelay {
         &self,
         transport: &lettre::AsyncSmtpTransport<Tokio1Executor>,
         from_addr: &Address,
-        recipients: &[Address],
+        envelope: &[Address],
+        header_to: &[Address],
+        header_cc: &[Address],
         email_body: &MultiPart,
         record: &EmailRecord,
     ) -> AppResult<()> {
         let subject = if record.subject.is_empty() {
-            "(no subject)"
+            "(no subject)".to_string()
         } else {
-            record.subject.as_str()
+            record.subject.clone()
         };
         let headers_val = record.headers_parsed();
         let name_map = Self::name_map_from_headers(&serde_json::Value::Object(headers_val.clone()));
@@ -215,9 +244,13 @@ impl SmtpRelay {
         let mut builder = Message::builder()
             .from(Mailbox::new(from_name, from_addr.clone()))
             .subject(subject);
-        for addr in recipients {
+        for addr in header_to {
             let display = name_map.get(&addr.to_string().to_lowercase()).cloned();
             builder = builder.to(Mailbox::new(display, addr.clone()));
+        }
+        for addr in header_cc {
+            let display = name_map.get(&addr.to_string().to_lowercase()).cloned();
+            builder = builder.cc(Mailbox::new(display, addr.clone()));
         }
         if let Some(v) = headers_val
             .get("message_id")
@@ -256,10 +289,12 @@ impl SmtpRelay {
                 });
             }
         }
-        let envelope = Envelope::new(Some(from_addr.clone()), recipients.to_vec())
+        // Envelope (RCPT TO) carries external recipients only; the To/Cc
+        // headers above carry the full post-filter list.
+        let envelope_obj = Envelope::new(Some(from_addr.clone()), envelope.to_vec())
             .map_err(|e| AppError::Smtp(format!("failed to build envelope: {}", e)))?;
         let email = builder
-            .envelope(envelope.clone())
+            .envelope(envelope_obj.clone())
             .multipart(email_body.clone())
             .map_err(|e| AppError::Smtp(format!("failed to build MIME message: {}", e)))?;
         let raw = email.formatted();
@@ -268,7 +303,7 @@ impl SmtpRelay {
             None => std::borrow::Cow::Borrowed(raw.as_slice()),
         };
 
-        match transport.send_raw(&envelope, &*raw_to_send).await {
+        match transport.send_raw(&envelope_obj, &*raw_to_send).await {
             Ok(response) => {
                 info!(operation="smtp_delivery_success", email_id = %record.id, sender = %record.sender, subject = %record.subject, status_code = %response.code(), "SMTP delivery successful");
                 Ok(())

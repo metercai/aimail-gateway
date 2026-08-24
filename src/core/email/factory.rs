@@ -283,11 +283,6 @@ impl EmailFactory {
         Recipients::from_json(json)
     }
 
-    /// Build a Recipients struct from to/cc vectors.
-    pub fn build_recipients(to: Vec<String>, cc: Vec<String>) -> Recipients {
-        Recipients { to, cc }
-    }
-
     /// Serialize Recipients to JSON string.
     pub fn recipients_to_json(recipients: &Recipients) -> String {
         recipients.to_json()

@@ -72,10 +72,16 @@ impl InboundInterceptor for A2aInterceptor {
         let raw_attachments_json: Option<String> = payload
             .get("attachments")
             .and_then(|v| serde_json::to_string(v).ok());
-        let to_addr = payload["to"]
-            .as_array()
-            .and_then(|a| a.first())
+        let to_arr = payload["to"].as_array().cloned().unwrap_or_default();
+        // The recipient field now carries the full post-filter list
+        // (external ∪ internal), so the board address (a `.a2a@` command-flow
+        // recipient) may sit at any position — not index 0. Scan for the
+        // board address; fall back to the first To entry (non-board flow).
+        let to_addr = to_arr
+            .iter()
+            .find(|v| v.as_str().map(crate::board::addr::is_board_address).unwrap_or(false))
             .and_then(|v| v.as_str())
+            .or_else(|| to_arr.first().and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
 

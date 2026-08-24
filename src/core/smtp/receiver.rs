@@ -813,11 +813,20 @@ impl ConnectionHandler {
 
         // ── Build JSON payloads for insert_email ───────────────────
 
-        // Build recipients JSON with to/cc distinction — order is
-        // inherited from the MIME headers, which the sender authored.
+        // Build recipients JSON: to/cc keep the post-filter MIME values (order
+        // inherited from the sender-authored headers; may include board
+        // addresses), while rcpt holds the actual webhook delivery targets
+        // — board addresses are command-flow triggers handled by the A2A
+        // interceptor, not final agent deliveries, so they are excluded.
+        let rcpt: Vec<String> = filtered_recipients
+            .iter()
+            .filter(|a| !crate::board::addr::is_board_address(a))
+            .cloned()
+            .collect();
         let recipients_json = Recipients {
             to: filtered_to,
             cc: filtered_cc,
+            rcpt,
         }
         .to_json();
 
@@ -1119,6 +1128,7 @@ impl ConnectionHandler {
         let recipients = Recipients {
             to: vec![bounce_recipient.to_string()],
             cc: vec![],
+            rcpt: vec![bounce_recipient.to_string()],
         };
         let recipients_json = recipients.to_json();
 

@@ -68,10 +68,11 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         .to_string(),
     };
 
-    // Build proper recipients JSON: {"to":[sender],"cc":[]}
+    // Build proper recipients JSON: {"to":[sender],"cc":[],"rcpt":[sender]}
     let recipients_json = crate::core::email::storage::Recipients {
         to: vec![record.sender.clone()],
         cc: vec![],
+        rcpt: vec![record.sender.clone()],
     }
     .to_json();
 
@@ -205,6 +206,7 @@ pub(crate) async fn insert_exhaustion_notification(
     let recipients_json = crate::core::email::storage::Recipients {
         to: vec![record.sender.clone()],
         cc: vec![],
+        rcpt: vec![record.sender.clone()],
     }
     .to_json();
 

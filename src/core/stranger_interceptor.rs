@@ -56,6 +56,7 @@ impl StrangerInterceptor {
         let recipients_json = crate::core::email::storage::Recipients {
             to: vec![to.to_string()],
             cc: vec![],
+            rcpt: vec![to.to_string()],
         }
         .to_json();
         if let Err(e) = self

@@ -123,10 +123,10 @@ pub async fn process_email_webhook(
     let recipients = record.recipients_parsed();
 
     // ── 0b. Pre-populate agent_state for thread metadata ──────────
-    // For EACH recipient (to + cc), resolve persona-prefixed address
+    // For EACH delivery target (rcpt), resolve persona-prefixed address
     // and write msg:{message_id} → agent_state. This lets every agent
     // read thread info without calling back to the gateway.
-    for addr in recipients.to.iter().chain(recipients.cc.iter()) {
+    for addr in recipients.delivery() {
         if let Ok(Some(meta)) = env_factory.resolve_domain_addr_meta(addr).await {
             let agent_addr = if !meta.agent_persona.is_empty() {
                 if let Some((base, domain)) = addr.split_once('@') {
@@ -214,7 +214,10 @@ pub async fn process_email_webhook(
 
     // Inject my_role from the target agent's persona (from domain_addr_meta)
     {
-        let target_addr = recipients.to.first().or(recipients.cc.first());
+        // The delivery target is rcpt[0] (the address this record actually
+        // webhooks to) — to[0] is now the full post-filter list and would
+        // pick the wrong persona when the record fans out to several agents.
+        let target_addr = recipients.delivery().next();
         if let Some(addr) = target_addr {
             match env_factory.resolve_domain_addr_meta(addr).await {
                 Ok(Some(meta)) => {
@@ -258,7 +261,9 @@ pub async fn process_email_webhook(
     let mut pull_domains: std::collections::HashSet<String> = std::collections::HashSet::new();
     let payload_json = String::from_utf8(payload_bytes.clone()).unwrap_or_default();
     {
-        for addr in recipients.to.iter().chain(recipients.cc.iter()) {
+        // Delivery targets only (rcpt) — to/cc is now the full post-filter
+        // list and may include external (MX) addresses that have no webhook.
+        for addr in recipients.delivery() {
             // Resolve address with domain-level fallback (Type 3)
             let d = env_factory
                 .resolve_domain_from_address(addr)
