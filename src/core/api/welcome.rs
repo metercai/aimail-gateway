@@ -1,20 +1,27 @@
 //! System welcome mail endpoint (POST /api/v1/system/welcome).
 //!
-//! Sends a welcome mail on behalf of the FIXED system sender
-//! (`postman@{smtp.hostname}`) to a registered agent address, cc'ing the
-//! agent's manager/admin address (external). System-generated mail — like
-//! unregistered/filtered/bounce notifications — bypasses the whitelist:
-//! the system sender is not a registered mailbox and owns no whitelist
-//! rules.
+//! Single parameter: `to` (agent address). Everything else is fixed in
+//! code:
+//!   from     = postman@{smtp.hostname} (system sender, fixed)
+//!   subject  = "Welcome to AIMail world!"
+//!   body     = fixed text (reply-all instructions + project homepage)
+//!   cc       = reverse-looked-up from the agent's manager_address
+//!
+//! cc reverse lookup + auto routing (no forced path):
+//!   manager empty                                        -> no cc
+//!   manager's domain not registered on this gateway      -> cc, external MX
+//!   manager's domain registered, address registered+active -> cc, internal webhook
+//!   manager's domain registered, address NOT registered  -> invalid address,
+//!                                                         excluded from cc
 //!
 //! Recipient semantics (rcpt/to/cc model):
-//!   to   = agent address(es) — must be registered + active (internal)
-//!   cc   = manager/admin address(es) — external (MX delivery)
+//!   to   = agent address(es) — must be registered + active, else 400
+//!   cc   = resolved manager address(es)
 //!   rcpt = actual delivery targets per direction record
 //!
-//! The agent is expected to reply-all, so the manager receives both the
-//! original welcome (as cc) and the agent's reply (cc'd on the reply) —
-//! two threaded mails, less abrupt than a lone reply.
+//! The agent is expected to reply-all (body instruction), so the manager
+//! receives both the original welcome (as cc) and the agent's reply — two
+//! threaded mails.
 //!
 //! Storm safety: replies addressed back to the system sender (postman@)
 //! are absorbed by the system-sink bucket in `send.rs` — no
@@ -36,17 +43,8 @@ use crate::core::storage::ApiKeyRecord;
 
 #[derive(Debug, Deserialize)]
 pub struct WelcomeRequest {
-    /// Registered agent address(es) to welcome (internal delivery).
+    /// Registered agent address(es) to welcome. The ONLY parameter.
     pub to: Vec<String>,
-    /// Manager/admin address(es) to cc (external MX delivery).
-    #[serde(default)]
-    pub cc: Vec<String>,
-    /// Optional subject override.
-    #[serde(default)]
-    pub subject: Option<String>,
-    /// Optional markdown body override.
-    #[serde(default)]
-    pub body: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -54,19 +52,33 @@ pub struct WelcomeResponse {
     pub email_id: String,
     pub message_id: String,
     pub status: String,
+    /// cc resolved from the agent's manager_address (reverse lookup).
+    /// Empty when no manager is configured or it was invalid.
+    pub cc: Vec<String>,
 }
 
-const DEFAULT_SUBJECT: &str = "Welcome to AgentMail";
+const WELCOME_SUBJECT: &str = "Welcome to AIMail world!";
 
-const DEFAULT_BODY: &str = r#"Welcome! Your AgentMail address has been set up and is now active.
+/// Fixed welcome body template. Placeholders:
+///   {domain}    — gateway domain (system sender's domain)
+///   {timestamp} — server time at send (UTC RFC3339)
+const WELCOME_BODY: &str = r#"Welcome to the AIMail world!
 
-This is a system message from your mail relay — it is sent by the fixed
-system sender `postman@` and is not a registered mailbox.
+Your AIMail address has been activated. This is the first welcome email
+automatically sent by the system, to confirm that your address is now active.
 
-To confirm your mailbox is fully operational (inbound delivery, LLM
-processing, and outbound reply), please **reply-all** to this email with a
-short confirmation (e.g. your server's current time). Keep all original
-recipients in the reply (To + Cc).
+To verify that the full delivery path is working end to end, please
+**reply-all** to this email and include:
+- Your current status
+- The current server time
+
+Thank you for joining the AIMail world. For the latest updates, visit the
+project homepage:
+https://github.com/metercai/aimail
+
+Best regards,
+Postman@{domain}
+{timestamp}
 "#;
 
 /// POST /api/v1/system/welcome — send a system welcome mail (from postman@).
@@ -78,8 +90,9 @@ pub async fn send_welcome(
     // ── 1. Scope: system-level admin only ──
     require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
 
-    // ── 2. Validate recipients ──
     let env = &state.factories.email.env_factory;
+
+    // ── 2. Validate `to`: registered, active agent address(es) ──
     if req.to.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -89,8 +102,6 @@ pub async fn send_welcome(
             }),
         ));
     }
-
-    // Each `to` must be a registered, active address (internal delivery).
     let mut internal: Vec<(String, String)> = Vec::new(); // (email, system_id)
     for addr in &req.to {
         let a = addr.trim().to_lowercase();
@@ -123,15 +134,69 @@ pub async fn send_welcome(
         ));
     }
 
-    // `cc` entries: external delivery (MX). No registration required.
-    let external: Vec<String> = req
-        .cc
-        .iter()
-        .map(|c| c.trim().to_lowercase())
-        .filter(|c| !c.is_empty())
-        .collect();
+    // ── 3. cc: reverse-lookup manager_address, auto-route internal/external ──
+    let mut ext_cc: Vec<String> = Vec::new();   // external (MX)
+    let mut int_cc: Vec<String> = Vec::new();   // internal (webhook)
+    for (agent, _) in &internal {
+        if let Ok(Some(meta)) = env.db.get_domain_addr_meta(agent).await {
+            let m = meta.manager_address.trim().to_lowercase();
+            if m.is_empty() {
+                continue;
+            }
+            let m_domain = match m.rsplit('@').next() {
+                Some(d) if !d.is_empty() => d.to_string(),
+                _ => continue,
+            };
+            // Exact-address match (no domain fallback): registered+active
+            // agent address on this gateway — aligned with send.rs Type 1
+            // internal routing (address row active, domain row is the
+            // registration anchor).
+            let (addr_res, domain_res) = (
+                env.db.get_system_domain_by_domain(&m).await,
+                env.db.get_system_domain_by_domain(&m_domain).await,
+            );
+            let (addr_rec, domain_rec) = match (addr_res, domain_res) {
+                (Ok(a), Ok(d)) => (a, d),
+                (Err(e), _) | (_, Err(e)) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Manager lookup failed".to_string(),
+                            detail: Some(e.to_string()),
+                        }),
+                    ));
+                }
+            };
+            match (addr_rec, domain_rec) {
+                (Some(a), _) if a.is_active && a.domain == m => {
+                    // Address registered + active → internal webhook.
+                    if !int_cc.contains(&m) {
+                        int_cc.push(m);
+                    }
+                }
+                (_, Some(_)) => {
+                    // Domain registered but address not registered (or
+                    // inactive) → invalid address: excluded from cc
+                    // (user rule, 2026-08-24).
+                    info!(
+                        operation = "welcome_cc_invalid",
+                        agent = %agent,
+                        manager = %m,
+                        "Manager address on a registered domain but not registered — excluded from cc"
+                    );
+                }
+                _ => {
+                    // Domain not registered on this gateway → external MX.
+                    if !ext_cc.contains(&m) {
+                        ext_cc.push(m);
+                    }
+                }
+            }
+        }
+    }
+    let full_cc: Vec<String> = int_cc.iter().cloned().chain(ext_cc.iter().cloned()).collect();
 
-    // ── 3. Headers: welcome marker + Message-ID (thread root) ──
+    // ── 4. Headers: welcome marker + Message-ID (thread root) ──
     let from = state.config.system_sender();
     let domain = state
         .config
@@ -141,36 +206,36 @@ pub async fn send_welcome(
         .or_else(|| state.config.http.hostname.as_deref())
         .unwrap_or("amail-relay");
     let message_id = format!("<{}@{}>", Uuid::new_v4(), domain);
+    let timestamp = chrono::Utc::now().to_rfc3339();
     let mut headers: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     headers.insert("Message-ID".into(), message_id.clone());
     headers.insert("X-AMMail-Welcome".into(), "1".into());
     let headers_json = serde_json::to_string(&headers).unwrap_or_default();
 
-    let subject = req.subject.as_deref().unwrap_or(DEFAULT_SUBJECT);
-    let body = req.body.as_deref().unwrap_or(DEFAULT_BODY);
+    let subject = WELCOME_SUBJECT;
+    let body = WELCOME_BODY
+        .replace("{domain}", domain)
+        .replace("{timestamp}", &timestamp);
 
-    // ── 4. Build full display lists (to/cc = what recipients see) ──
+    // ── 5. Records (rcpt/to/cc model) ──
     let full_to: Vec<String> = internal.iter().map(|(e, _)| e.clone()).collect();
-    let full_cc: Vec<String> = external.iter().cloned().collect();
-
     let attachments_json: Option<String> = None;
     let max_attempts = state.config.retry.max_attempts as i32;
     let mut created_ids: Vec<String> = Vec::new();
 
-    // 4a. Outbound record for external cc targets (MX delivery).
-    //     rcpt = external only; to/cc = full lists.
-    if !external.is_empty() {
+    // 5a. Outbound record for external cc targets (MX delivery).
+    if !ext_cc.is_empty() {
         let email_id = Uuid::new_v4().to_string();
         let recipients_json = Recipients {
             to: full_to.clone(),
             cc: full_cc.clone(),
-            rcpt: external.clone(),
+            rcpt: ext_cc.clone(),
         }
         .to_json();
 
         let mut eps = serde_json::Map::new();
-        for addr in &external {
+        for addr in &ext_cc {
             eps.insert(
                 addr.to_lowercase(),
                 serde_json::json!({"status": "pending", "protocol": "mx"}),
@@ -187,7 +252,7 @@ pub async fn send_welcome(
                 &from,
                 &recipients_json,
                 subject,
-                body,
+                &body,
                 Some(&endpoints_str),
                 attachments_json.as_deref(),
                 Some(&headers_json),
@@ -201,7 +266,7 @@ pub async fn send_welcome(
                     operation = "welcome_queued",
                     email_id = %record.id,
                     sender = %from,
-                    external_cc = external.len(),
+                    external_cc = ext_cc.len(),
                     "Welcome mail queued for external cc recipients"
                 );
                 created_ids.push(record.id.clone());
@@ -226,22 +291,31 @@ pub async fn send_welcome(
         }
     }
 
-    // 4b. Inbound record for the agent target(s) (webhook delivery).
-    //     rcpt = internal targets; to/cc = full lists.
+    // 5b. Inbound record(s) for internal targets (webhook delivery).
+    //     agent targets are always internal (validated in step 2); internal
+    //     cc targets join the same record when present.
     {
+        let internal_targets: Vec<String> = {
+            let mut v: Vec<String> = internal.iter().map(|(e, _)| e.clone()).collect();
+            for c in &int_cc {
+                if !v.contains(c) {
+                    v.push(c.clone());
+                }
+            }
+            v
+        };
         let email_id = Uuid::new_v4().to_string();
-        let internal_emails: Vec<String> = internal.iter().map(|(e, _)| e.clone()).collect();
         let recipients_json = Recipients {
             to: full_to.clone(),
             cc: full_cc.clone(),
-            rcpt: internal_emails.clone(),
+            rcpt: internal_targets.clone(),
         }
         .to_json();
 
         let endpoints_str = state
             .factories
             .email
-            .build_endpoints_for_recipients(&internal_emails)
+            .build_endpoints_for_recipients(&internal_targets)
             .await;
         let endpoints = if endpoints_str == "{}" || endpoints_str.is_empty() {
             None
@@ -262,7 +336,7 @@ pub async fn send_welcome(
                 &from,
                 &recipients_json,
                 subject,
-                body,
+                &body,
                 endpoints.as_deref(),
                 attachments_json.as_deref(),
                 Some(&headers_json),
@@ -275,8 +349,8 @@ pub async fn send_welcome(
                     operation = "welcome_queued",
                     email_id = %record.id,
                     sender = %from,
-                    agent_count = internal_emails.len(),
-                    "Welcome mail record created for agent delivery"
+                    internal_targets = internal_targets.len(),
+                    "Welcome mail record created for internal delivery"
                 );
                 created_ids.push(record.id.clone());
             }
@@ -284,7 +358,7 @@ pub async fn send_welcome(
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: "Failed to queue welcome agent record".to_string(),
+                        error: "Failed to queue welcome internal record".to_string(),
                         detail: Some(e.to_string()),
                     }),
                 ));
@@ -308,6 +382,7 @@ pub async fn send_welcome(
             email_id: created_ids[0].clone(),
             message_id,
             status: "welcome_queued".to_string(),
+            cc: full_cc,
         }),
     ))
 }
