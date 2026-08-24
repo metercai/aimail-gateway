@@ -338,13 +338,6 @@ pub struct ContactsByNameQuery {
     pub name: String,
 }
 
-// ── Thread Summary ────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct ThreadSummaryRequest {
-    pub summary: String,
-}
-
 // ── Probe Webhook ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

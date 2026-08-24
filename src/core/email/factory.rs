@@ -751,30 +751,6 @@ impl EmailFactory {
             })
             .collect()
     }
-
-    /// Write message metadata (`msg:{mid}`) to agent_state before webhook delivery.
-    /// This lets the Python side read thread info without calling back to the gateway.
-    pub async fn put_msg_metadata(&self, record: &EmailRecord, agent_addr: &str) -> AppResult<()> {
-        let msg_id = record.message_id_from_headers().unwrap_or_default();
-        if msg_id.is_empty() {
-            return Ok(());
-        }
-        let refs = record.references_from_headers().unwrap_or_default();
-        let thread_id = refs
-            .split_whitespace()
-            .next()
-            .unwrap_or(&msg_id)
-            .to_string();
-        let value = serde_json::json!({
-            "references": refs.split_whitespace().map(String::from).collect::<Vec<_>>(),
-            "thread_id": thread_id,
-            "my_amail_addr": agent_addr,
-        })
-        .to_string();
-        self.db
-            .agent_state_put(agent_addr, &format!("msg:{}", msg_id), &value)
-            .await
-    }
 }
 
 /// Factory for attachment CRUD and permission operations.

@@ -99,15 +99,6 @@ pub fn create_router(
         .route("/api/v1/contacts/:address", put(put_contact_profile))
         .route("/api/v1/contacts/:address", get(get_contact_profile))
         .route("/api/v1/contacts", get(get_contacts_by_name))
-        // Admin: thread summary (auto-resolve thread_id from message_id)
-        .route(
-            "/api/v1/thread-summary/:message_id",
-            put(put_thread_summary),
-        )
-        .route(
-            "/api/v1/thread-summary/:message_id",
-            get(get_thread_summary),
-        )
         // Admin: whitelist CRUD
         .route("/api/v1/whitelists", post(create_whitelist))
         .route("/api/v1/whitelists", get(list_whitelists))
@@ -2336,121 +2327,6 @@ async fn get_contacts_by_name(
     };
 
     Ok(Json(serde_json::json!({"results": results})))
-}
-
-// ── Thread Summary handler ────────────────────────────────────────
-
-/// PUT /api/v1/thread-summary/:message_id — resolve thread_id + write summary
-async fn put_thread_summary(
-    state: axum::extract::State<HttpState>,
-    Path(message_id): Path<String>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    Json(body): Json<ThreadSummaryRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["agent", "agent_admin", "system", "platform"])?;
-    let agent_addr = &api_key.email_address;
-    if agent_addr.is_empty() {
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-            error: "thread summary requires a non-empty email_address — system-level keys must use an agent-scoped key for this endpoint".to_string(),
-            detail: None,
-        })));
-    }
-    let db = &state.factories.email.env_factory.db;
-
-    // Resolve thread_id from message metadata
-    let thread_id = match db
-        .agent_state_get(agent_addr, &format!("msg:{}", message_id))
-        .await
-    {
-        Ok(Some((_, meta))) => serde_json::from_str::<serde_json::Value>(&meta)
-            .ok()
-            .and_then(|v| {
-                v.get("thread_id")
-                    .and_then(|t| t.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or(message_id.clone()),
-        _ => message_id.clone(),
-    };
-
-    if body.summary.trim().is_empty() {
-        let _ = db
-            .agent_state_delete(agent_addr, &format!("thread:{}", thread_id))
-            .await;
-    } else {
-        if let Err(e) = db
-            .agent_state_put(agent_addr, &format!("thread:{}", thread_id), &body.summary)
-            .await
-        {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "database error".to_string(),
-                    detail: Some(e.to_string()),
-                }),
-            ));
-        }
-    }
-
-    Ok(Json(
-        serde_json::json!({"success": true, "thread_id": thread_id}),
-    ))
-}
-
-/// GET /api/v1/thread-summary/:message_id — resolve thread_id + read summary
-async fn get_thread_summary(
-    state: axum::extract::State<HttpState>,
-    Path(message_id): Path<String>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["agent", "agent_admin", "system", "platform"])?;
-    let agent_addr = &api_key.email_address;
-    if agent_addr.is_empty() {
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-            error: "thread summary requires a non-empty email_address — system-level keys must use an agent-scoped key for this endpoint".to_string(),
-            detail: None,
-        })));
-    }
-    let db = &state.factories.email.env_factory.db;
-
-    // Resolve thread_id from message metadata
-    let thread_id = match db
-        .agent_state_get(agent_addr, &format!("msg:{}", message_id))
-        .await
-    {
-        Ok(Some((_, meta))) => serde_json::from_str::<serde_json::Value>(&meta)
-            .ok()
-            .and_then(|v| {
-                v.get("thread_id")
-                    .and_then(|t| t.as_str())
-                    .map(String::from)
-            })
-            .unwrap_or(message_id.clone()),
-        _ => message_id.clone(),
-    };
-
-    match db
-        .agent_state_get(agent_addr, &format!("thread:{}", thread_id))
-        .await
-    {
-        Ok(Some((_, summary))) => Ok(Json(serde_json::json!({
-            "thread_id": thread_id, "summary": summary
-        }))),
-        Ok(None) => Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "thread summary not found".to_string(),
-                detail: None,
-            }),
-        )),
-        Err(_) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "database error".to_string(),
-                detail: None,
-            }),
-        )),
-    }
 }
 
 // ── Name index helpers ────────────────────────────────────────────

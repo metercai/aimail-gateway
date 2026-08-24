@@ -122,27 +122,6 @@ pub async fn process_email_webhook(
     // Parse recipients once — used by enrichment, pull block, and my_role injection
     let recipients = record.recipients_parsed();
 
-    // ── 0b. Pre-populate agent_state for thread metadata ──────────
-    // For EACH delivery target (rcpt), resolve persona-prefixed address
-    // and write msg:{message_id} → agent_state. This lets every agent
-    // read thread info without calling back to the gateway.
-    for addr in recipients.delivery() {
-        if let Ok(Some(meta)) = env_factory.resolve_domain_addr_meta(addr).await {
-            let agent_addr = if !meta.agent_persona.is_empty() {
-                if let Some((base, domain)) = addr.split_once('@') {
-                    format!("{}.{}@{}", meta.agent_persona, base, domain)
-                } else {
-                    addr.to_string()
-                }
-            } else {
-                addr.to_string()
-            };
-            let _ = email_factory.put_msg_metadata(record, &agent_addr).await;
-        } else {
-            let _ = email_factory.put_msg_metadata(record, addr).await;
-        }
-    }
-
     // ── 1. Parse endpoints ──────────────────────────────────────────
     let endpoints_map: serde_json::Map<String, serde_json::Value> =
         record.endpoints_parsed().unwrap_or_default();
