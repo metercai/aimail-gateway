@@ -78,7 +78,9 @@ pub trait InboundInterceptor: Send + Sync {
     /// Interceptor name for logging.
     fn name(&self) -> &str;
 
-    /// Priority (lower runs first). 10=manager, 20=a2a, 30=ping-pong.
+    /// Priority (lower runs first). 5=suspend/stranger, 20=a2a.
+    /// Manager commands are NOT an interceptor — they run as step 0 in
+    /// `process_email_webhook` (webhook.rs) before the chain.
     fn priority(&self) -> u32;
 
     /// Intercept an inbound email. Return Handled to skip webhook delivery.
@@ -102,9 +104,7 @@ pub trait SystemStore: Send + Sync {
 }
 
 /// Resolves a sender/receiver address into whitelist lookup keys.
-///
-/// Base edition (`ExactKeyResolver`): one exact match on the address.
-/// Advanced edition (`FallbackKeyResolver`): exact match → bare-domain fallback.
+/// Both editions use `ExactKeyResolver` (exact address match).
 #[async_trait]
 pub trait WhitelistKeyResolver: Send + Sync {
     async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>>;
