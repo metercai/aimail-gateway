@@ -35,7 +35,6 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 # username = "relay@example.com"               # SMTP auth username
 # password = "your-password"                   # SMTP auth password
 # dns_server = "127.0.0.1:53"                  # custom DNS server for SPF/MX/DKIM queries (takes precedence over /etc/resolv.conf)
-# auto_reply_from = "noreply@yourdomain.com"   # From address for system auto-replies (NDR, notifications). Falls back to admin.email.
 # auto_reply_subject_prefix = "[Auto-Reply] "  # prefix prepended to all system-generated email subjects
 # auto_reply_body = "This is an automated message from the aimail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
 # delivery_window_secs = 7200                  # NDR bounce correlation window in seconds (default 7200 = 2h)

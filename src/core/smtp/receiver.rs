@@ -1093,14 +1093,8 @@ impl ConnectionHandler {
     ) -> Option<String> {
         let notif_id = format!("bn-{}", Uuid::new_v4());
 
-        // Determine system FROM address (auto_reply_from → admin.email → noreply@localhost)
-        let auto_reply_from = self
-            .config
-            .relay
-            .auto_reply_from
-            .as_deref()
-            .or(self.config.admin.email.as_deref())
-            .unwrap_or("noreply@localhost");
+        // System FROM address (fixed: postman@{smtp.hostname})
+        let auto_reply_from = self.config.system_sender();
 
         let body_prefix = self
             .config
@@ -1153,7 +1147,7 @@ impl ConnectionHandler {
             .create_inbound(
                 &notif_id,
                 system_id,
-                auto_reply_from,
+                auto_reply_from.as_str(),
                 &recipients_json,
                 "Mail delivery failed",
                 &notification_body,

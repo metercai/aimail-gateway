@@ -34,17 +34,8 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         return;
     }
 
-    let auto_reply_from = config
-        .relay
-        .auto_reply_from
-        .as_deref()
-        .or(config.admin.email.as_deref())
-        .unwrap_or("noreply@localhost");
-
-    if auto_reply_from.is_empty() {
-        warn!(operation="auto_reply_from_empty", email_id = %record.id, "auto_reply_from is empty — skipping auto-reply record");
-        return;
-    }
+    // System FROM address (fixed: postman@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
 
     let auto_reply_id = format!("ar-{}", uuid::Uuid::new_v4());
     let auto_reply_body = config.relay.auto_reply_body.as_deref().unwrap_or(
@@ -80,7 +71,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         .create_outbound(
             &auto_reply_id,
             &record.system_id,
-            auto_reply_from,
+            auto_reply_from.as_str(),
             &recipients_json,
             &auto_reply_subject,
             auto_reply_body,
@@ -102,7 +93,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
 /// Guards against recursive cascade (system-generated records don't create more notifications).
 ///
 /// Semantics: the system notifies the agent that their outbound email delivery exhausted.
-///   FROM: system (auto_reply_from → admin.email → "noreply@localhost")
+///   FROM: system (fixed: postman@{smtp.hostname} via config.system_sender())
 ///   TO:   agent (record.sender)
 ///   Subject: {auto_reply_subject_prefix}[Overlimit] {original_subject}
 ///   Body: markdown (auto_reply_body + detail + original body + attachment filenames)
@@ -123,18 +114,8 @@ pub(crate) async fn insert_exhaustion_notification(
         return;
     }
 
-    // Determine system FROM address
-    let auto_reply_from = config
-        .relay
-        .auto_reply_from
-        .as_deref()
-        .or(config.admin.email.as_deref())
-        .unwrap_or("noreply@localhost");
-
-    if auto_reply_from.is_empty() {
-        warn!(email_id = %record.id, "auto_reply_from and admin.email both empty — skipping notification");
-        return;
-    }
+    // System FROM address (fixed: postman@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
 
     let webhook_url = resolve_webhook_url(email_factory, &record.sender).await;
     let Some(url) = webhook_url else {
@@ -230,7 +211,7 @@ pub(crate) async fn insert_exhaustion_notification(
         .create_inbound(
             &notification_id,
             &record.system_id,
-            auto_reply_from,
+            auto_reply_from.as_str(),
             &recipients_json,
             &auto_reply_subject,
             &notification_body,

@@ -148,13 +148,14 @@ pub async fn process_email_webhook(
         record.endpoints_parsed().unwrap_or_default();
 
     // ── 2. Build payload once (same for all endpoints) ──────────────
-    // Forwarder address: use relay.username if set, otherwise auto_reply_from,
-    // falling back to a sensible default.
+    // Forwarder address: use relay.username if set (the mailbox that
+    // actually relays outbound mail), otherwise a fixed local placeholder.
+    // (The system auto-reply sender is postman@{domain} via
+    // config.system_sender(); it is not a relay identity.)
     let forwarder = config
         .relay
         .username
         .as_deref()
-        .or(config.relay.auto_reply_from.as_deref())
         .unwrap_or("relay@amail-relay.local");
 
     let mut payload =

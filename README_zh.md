@@ -151,7 +151,6 @@ bind = "0.0.0.0:25"
 # username = "relay@example.com"
 # password = "your-password"
 # dns_server = "127.0.0.1:53"
-# auto_reply_from = "noreply@yourdomain.com"
 # auto_reply_subject_prefix = "[Auto-Reply] "
 # delivery_window_secs = 7200
 # mx_dns_override = { "example.com" = "127.0.0.1:25" }

@@ -1058,18 +1058,8 @@ async fn send_filtered_notification(
         "Some recipients were filtered by whitelist"
     );
 
-    // Determine system FROM address
-    let auto_reply_from = config
-        .relay
-        .auto_reply_from
-        .as_deref()
-        .or(config.admin.email.as_deref())
-        .unwrap_or("noreply@localhost");
-
-    if auto_reply_from.is_empty() {
-        warn!(sender = %sender, "auto_reply_from and admin.email both empty — skipping filtered notification");
-        return;
-    }
+    // System FROM address (fixed: postman@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
 
     // Build markdown body
     let auto_reply_body = config
@@ -1112,7 +1102,7 @@ async fn send_filtered_notification(
         .create_outbound(
             &email_id,
             system_id,
-            auto_reply_from,
+            auto_reply_from.as_str(),
             &recipients_json,
             &subject,
             &body,
@@ -1154,17 +1144,8 @@ async fn send_unregistered_notification(
         "Recipients matched domain but address not registered — auto-reply sent"
     );
 
-    let auto_reply_from = config
-        .relay
-        .auto_reply_from
-        .as_deref()
-        .or(config.admin.email.as_deref())
-        .unwrap_or("noreply@localhost");
-
-    if auto_reply_from.is_empty() {
-        warn!(sender = %sender, "auto_reply_from and admin.email both empty — skipping unregistered notification");
-        return;
-    }
+    // System FROM address (fixed: postman@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
 
     let body = format!(
         "{}\n\n---\n\n\
@@ -1196,7 +1177,7 @@ async fn send_unregistered_notification(
         .create_outbound(
             &email_id,
             system_id,
-            auto_reply_from,
+            auto_reply_from.as_str(),
             &recipients_json,
             &subject,
             &body,

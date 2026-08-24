@@ -216,8 +216,6 @@ pub struct RelayConfig {
     /// Override precedence: mx_dns_override > dns_server > resolv.conf
     #[serde(default)]
     pub dns_server: Option<String>,
-    #[serde(default = "default_auto_reply_from")]
-    pub auto_reply_from: Option<String>,
     #[serde(default = "default_auto_reply_subject_prefix")]
     pub auto_reply_subject_prefix: String,
     #[serde(default = "default_auto_reply_body")]
@@ -239,7 +237,6 @@ impl Default for RelayConfig {
             username: None,
             password: None,
             dns_server: None,
-            auto_reply_from: default_auto_reply_from(),
             auto_reply_subject_prefix: default_auto_reply_subject_prefix(),
             auto_reply_body: default_auto_reply_body(),
             delivery_window_secs: default_delivery_window(),
@@ -357,6 +354,28 @@ impl Config {
 
         Ok(())
     }
+
+    /// Fixed system auto-reply / system-mail sender identity:
+    /// `postman@{smtp.hostname}`.
+    ///
+    /// This is NOT a registered mailbox — it is the sender used for all
+    /// system-generated mail (welcome, unregistered-addr notice, filtered
+    /// notice, exhaustion auto-reply/notice, bounce notice). Fixed by
+    /// design (not configurable): a stable, non-user sender that agents
+    /// recognize as system mail and must not reply-loop on.
+    ///
+    /// `smtp.hostname` is a required field (enforced in `validate`), so the
+    /// fallback to `postman@amail-relay` only exists for pre-validation
+    /// test configs.
+    pub fn system_sender(&self) -> String {
+        let domain = self
+            .smtp
+            .hostname
+            .as_deref()
+            .filter(|h| !h.trim().is_empty())
+            .unwrap_or("amail-relay");
+        format!("postman@{}", domain)
+    }
 }
 
 /// Apply `AIMAILGW_*` environment variable overrides to the config.
@@ -471,10 +490,6 @@ fn default_auto_reply_body() -> Option<String> {
          For assistance, please contact your service administrator."
             .to_string(),
     )
-}
-
-fn default_auto_reply_from() -> Option<String> {
-    None
 }
 
 fn default_log_level() -> String {
