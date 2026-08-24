@@ -15,15 +15,17 @@ use crate::core::strategy::MessageSigner;
 
 /// Custom headers that must be forwarded verbatim onto outbound SMTP mail.
 /// These are consumed by the receiving side from the raw message:
-///   - X-Agentmail-Agent: agent platform/version identity (agent-side tools)
-///   - X-Board-Members:   board member set for cross-gateway whitelist sync
-///   - X-AMRelay-AutoReply: system-generated auto-reply marker
+///   - X-AIMail-Agent: agent platform/version identity (agent-side tools)
+///     X-Agentmail-Agent: 旧名, 过渡保留(agent 工具升级前仍在发)
+///   - X-Board-Members:  board member set for cross-gateway whitelist sync
+///   - X-AIMail-AutoReply: system-generated auto-reply marker
 /// Everything else in the record headers is internal (webhook-only) and
 /// must NOT leak into external mail.
 pub const OUTBOUND_PASSTHROUGH_HEADERS: &[&str] = &[
-    "X-Agentmail-Agent",
+    "X-AIMail-Agent",     // agent identity (new name)
+    "X-Agentmail-Agent",  // legacy name (transition; removed in cleanup)
     "X-Board-Members",
-    "X-AMRelay-AutoReply",
+    "X-AIMail-AutoReply",
 ];
 
 /// MX direct deliverer — resolves MX per domain and delivers directly.
@@ -251,8 +253,8 @@ async fn build_mx_message(
         builder = builder.header(lettre::message::header::References::from(v.to_string()));
     }
     // ── Custom header passthrough (outbound-only whitelist) ──────────
-    // X-Agentmail-Agent / X-Board-Members / X-AMRelay-AutoReply are
-    // forwarded verbatim. All other record headers are internal
+    // X-AIMail-Agent / X-Agentmail-Agent / X-Board-Members / X-AIMail-AutoReply
+    // are forwarded verbatim. All other record headers are internal
     // (webhook-only) and must not leak into external mail.
     for hname in OUTBOUND_PASSTHROUGH_HEADERS {
         if let Some(v) = headers_val.get(*hname).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {

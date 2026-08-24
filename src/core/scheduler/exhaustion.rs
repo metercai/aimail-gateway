@@ -50,11 +50,11 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         Some(ref mid) => serde_json::json!({
             "In-Reply-To": mid,
             "References": mid,
-            "X-AMRelay-AutoReply": "1"
+            "X-AIMail-AutoReply": "1"
         })
         .to_string(),
         None => serde_json::json!({
-            "X-AMRelay-AutoReply": "1"
+            "X-AIMail-AutoReply": "1"
         })
         .to_string(),
     };
@@ -197,11 +197,11 @@ pub(crate) async fn insert_exhaustion_notification(
         Some(ref mid) => serde_json::json!({
             "In-Reply-To": mid,
             "References": mid,
-            "X-AMRelay-AutoReply": "1"
+            "X-AIMail-AutoReply": "1"
         })
         .to_string(),
         None => serde_json::json!({
-            "X-AMRelay-AutoReply": "1"
+            "X-AIMail-AutoReply": "1"
         })
         .to_string(),
     };

@@ -282,8 +282,8 @@ impl SmtpRelay {
             builder = builder.header(lettre::message::header::References::from(v.to_string()));
         }
         // ── Custom header passthrough (outbound-only whitelist) ──────────
-        // X-Agentmail-Agent / X-Board-Members / X-AMRelay-AutoReply are
-        // forwarded verbatim (same whitelist as mx_deliverer). All other
+        // X-AIMail-Agent / X-Agentmail-Agent / X-Board-Members / X-AIMail-AutoReply
+        // are forwarded verbatim (same whitelist as mx_deliverer). All other
         // record headers are internal (webhook-only).
         for hname in crate::core::smtp::mx_deliverer::OUTBOUND_PASSTHROUGH_HEADERS {
             if let Some(v) = headers_val

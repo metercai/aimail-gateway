@@ -210,7 +210,7 @@ pub async fn send_welcome(
     let mut headers: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     headers.insert("Message-ID".into(), message_id.clone());
-    headers.insert("X-AMMail-Welcome".into(), "1".into());
+    headers.insert("X-AIMail-Welcome".into(), "1".into());
     let headers_json = serde_json::to_string(&headers).unwrap_or_default();
 
     let subject = WELCOME_SUBJECT;

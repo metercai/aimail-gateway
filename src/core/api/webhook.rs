@@ -7,7 +7,7 @@ use crate::core::email::utils::sign_payload;
 
 /// Send a single webhook POST request.
 ///
-/// Headers: X-MailRelay-Signature, X-MailRelay-Timestamp.
+/// Headers: X-Webhook-Signature, X-AIMail-Timestamp.
 async fn send_webhook(
     client: &reqwest::Client,
     url: &str,
@@ -22,9 +22,9 @@ async fn send_webhook(
         .post(url)
         .body(axum::body::Bytes::copy_from_slice(payload_bytes))
         .header("content-type", "application/json")
-        .header("X-Amail-Email", email)
+        .header("X-AIMail-Email", email)
         .header("X-Webhook-Signature", &signature)
-        .header("X-Mailrelay-Timestamp", timestamp_ms.to_string())
+        .header("X-AIMail-Timestamp", timestamp_ms.to_string())
         .timeout(std::time::Duration::from_secs(timeout_secs));
 
     match request_builder.send().await {
@@ -65,7 +65,7 @@ async fn send_batch_webhook(
         serde_json::json!({
             "email": email,
             "signature": sig_val["X-Webhook-Signature"],
-            "timestamp": sig_val["X-Mailrelay-Timestamp"],
+            "timestamp": sig_val["X-AIMail-Timestamp"],
         })
     }).collect();
 
@@ -289,7 +289,7 @@ pub async fn process_email_webhook(
                         let (signature, ts_ms) = sign_payload(secret.as_bytes(), &payload_bytes);
                         serde_json::json!({
                             "X-Webhook-Signature": signature,
-                            "X-Mailrelay-Timestamp": ts_ms.to_string(),
+                            "X-AIMail-Timestamp": ts_ms.to_string(),
                         })
                     } else {
                         warn!(email_id = %record.id, domain = %d.domain,
@@ -299,9 +299,9 @@ pub async fn process_email_webhook(
                         })
                     };
                     let headers_json = serde_json::to_string(&serde_json::json!({
-                        "X-Amail-Email": addr,
+                        "X-AIMail-Email": addr,
                         "X-Webhook-Signature": sig["X-Webhook-Signature"],
-                        "X-Mailrelay-Timestamp": sig["X-Mailrelay-Timestamp"],
+                        "X-AIMail-Timestamp": sig["X-AIMail-Timestamp"],
                         "content-type": "application/json",
                     }))
                     .unwrap_or_default();
@@ -445,12 +445,12 @@ pub async fn process_email_webhook(
                 .iter()
                 .map(|(_domain, secret, email)| {
                     let sig = if secret.is_empty() {
-                        serde_json::json!({"X-Webhook-Signature": "", "X-Mailrelay-Timestamp": ""})
+                        serde_json::json!({"X-Webhook-Signature": "", "X-AIMail-Timestamp": ""})
                     } else {
                         let (signature, ts_ms) = sign_payload(secret.as_bytes(), &payload_bytes);
                         serde_json::json!({
                             "X-Webhook-Signature": signature,
-                            "X-Mailrelay-Timestamp": ts_ms.to_string(),
+                            "X-AIMail-Timestamp": ts_ms.to_string(),
                         })
                     };
                     (email.clone(), sig.to_string())
