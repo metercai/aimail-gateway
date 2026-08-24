@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::board::quota::NoopBoardQuota;
 use crate::core::strategy::{
-    ExtensionProviders, MessageSigner, QuotaChecker, RateLimitChecker, RouterHook, SystemStore,
+    ExtensionProviders, MessageSigner, QuotaChecker, RouterHook, SystemStore,
 };
 
 // ── MessageSigner ──
@@ -20,16 +20,6 @@ pub struct BaseMessageSigner;
 impl MessageSigner for BaseMessageSigner {
     async fn sign(&self, _raw: &[u8], _email_id: &str) -> Option<Vec<u8>> {
         None
-    }
-}
-
-// ── RateLimitChecker ──
-
-pub struct BaseRateLimitChecker;
-
-impl RateLimitChecker for BaseRateLimitChecker {
-    fn check(&self, _system_id: &str) -> Result<(), std::time::Duration> {
-        Ok(())
     }
 }
 
@@ -96,7 +86,6 @@ impl ExtensionProviders {
     /// Create providers with Base (no-op) implementations.
     pub fn base() -> Self {
         Self {
-            rate_limiter: Arc::new(BaseRateLimitChecker),
             quota_checker: Arc::new(BaseQuotaChecker),
             dkim_signer: Arc::new(BaseMessageSigner),
             board_quota: Arc::new(NoopBoardQuota),

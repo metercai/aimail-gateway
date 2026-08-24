@@ -28,14 +28,6 @@ pub trait MessageSigner: Send + Sync {
     }
 }
 
-/// Delivers email via direct MX resolution instead of a relay.
-// ── RateLimitChecker ──────────────────────────────────────────────────
-
-/// Per-system rate limiter for the send-email endpoint.
-pub trait RateLimitChecker: Send + Sync {
-    fn check(&self, system_id: &str) -> Result<(), std::time::Duration>;
-}
-
 // ── QuotaChecker ──────────────────────────────────────────────────────
 
 /// Per-system quota checks for emails, domains, and API keys.
@@ -116,7 +108,6 @@ pub trait WhitelistKeyResolver: Send + Sync {
 /// Base edition: all fields default to no-op implementations.
 /// Advanced edition: each field can be replaced individually.
 pub struct ExtensionProviders {
-    pub rate_limiter: Arc<dyn RateLimitChecker>,
     pub quota_checker: Arc<dyn QuotaChecker>,
     pub dkim_signer: Arc<dyn MessageSigner>,
     pub board_quota: Arc<dyn BoardQuotaChecker>,
