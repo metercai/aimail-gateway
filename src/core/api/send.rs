@@ -526,23 +526,35 @@ pub async fn send_email(
     let mut filtered: Vec<String> = Vec::new();
     let mut valid_recipients: Vec<String> = Vec::new();
 
+    // Fixed system auto-reply sender (postman@{domain}). When it appears as a
+    // RECIPIENT (e.g. an agent reply-all to a welcome mail), it is a system
+    // sink — not a deliverable mailbox — so it is never whitelist-checked and
+    // never triggers an unregistered-address notification (a reply-storm
+    // vector). It is kept only in the to/cc display list (section 7).
+    let system_sender = state.config.system_sender();
+
     for recipient in &recipients {
-        let allowed = match state
-            .factories
-            .email
-            .env_factory
-            .check_whitelisted(sender, recipient, "to")
-            .await
-        {
-            Ok(true) => true,
-            Ok(false) => {
-                // Board recipients: universal stranger commands ([WHOAMI])
-                // bypass the whitelist — shared predicate with the SMTP
-                // deferred-whitelist stranger allowance.
-                crate::board::addr::is_board_address(recipient)
-                    && crate::board::addr::is_stranger_command(subject)
+        let is_system_sink = recipient.to_lowercase() == system_sender;
+        let allowed = if is_system_sink {
+            true
+        } else {
+            match state
+                .factories
+                .email
+                .env_factory
+                .check_whitelisted(sender, recipient, "to")
+                .await
+            {
+                Ok(true) => true,
+                Ok(false) => {
+                    // Board recipients: universal stranger commands ([WHOAMI])
+                    // bypass the whitelist — shared predicate with the SMTP
+                    // deferred-whitelist stranger allowance.
+                    crate::board::addr::is_board_address(recipient)
+                        && crate::board::addr::is_stranger_command(subject)
+                }
+                Err(_) => false,
             }
-            Err(_) => false,
         };
         if allowed {
             state.metrics.inc_whitelist_matches();
@@ -557,6 +569,10 @@ pub async fn send_email(
     // (email, domain, webhook_url, webhook_secret)
     let mut external: Vec<String> = Vec::new();
     let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
+    // System sink: the fixed auto-reply sender (postman@{domain}) appearing
+    // as a recipient. Never delivered (no MX, no webhook, no notification) —
+    // recorded in the to/cc display list only (section 7).
+    let mut system_sink: Vec<String> = Vec::new();
     // Owning system of a board recipient, if any (inbound records for
     // command-flow delivery are attributed to the board's system, mirroring
     // the SMTP RCPT behavior).
@@ -564,6 +580,13 @@ pub async fn send_email(
 
     for recipient in &valid_recipients {
         let env = &state.factories.email.env_factory;
+        // ── System sink (postman@{domain} as recipient) — not deliverable ──
+        // Reply-all to a welcome mail lands here: absorbed silently, so the
+        // unregistered-address auto-reply (the storm seed) is never sent.
+        if recipient.to_lowercase() == system_sender {
+            system_sink.push(recipient.clone());
+            continue;
+        }
         // ── A2A board address (command flow) — always internal ──
         // Board addresses are never external (MX) recipients: the registry
         // already proved the board exists on this gateway, and delivery is
@@ -687,7 +710,11 @@ pub async fn send_email(
     // and re-expanded to persona form for display.
     let mut full_bases: Vec<String> = Vec::new();
     let mut full_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for e in external.iter().chain(final_internal.iter().map(|t| &t.0)) {
+    for e in external
+        .iter()
+        .chain(final_internal.iter().map(|t| &t.0))
+        .chain(system_sink.iter())
+    {
         if full_seen.insert(e.clone()) {
             full_bases.push(e.clone());
         }

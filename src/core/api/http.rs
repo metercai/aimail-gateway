@@ -27,6 +27,7 @@ use crate::core::api::keys::{
 };
 use crate::core::api::monitor::health_check;
 use crate::core::api::send::send_email;
+use crate::core::api::welcome::send_welcome;
 use crate::core::api::types::*;
 use crate::core::api::whoami::whoami;
 use crate::core::storage::{ApiKeyRecord, Database};
@@ -55,6 +56,7 @@ pub fn create_router(
         .route("/api/v1/admin/api-keys/:id", delete(delete_api_key))
         // Outbound send
         .route("/api/v1/send", post(send_email))
+        .route("/api/v1/system/welcome", post(send_welcome))
         // Whoami
         .route("/api/v1/whoami", get(whoami))
         // Attachments

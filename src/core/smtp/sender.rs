@@ -27,6 +27,13 @@ pub struct SmtpRelay {
     transport: SmtpTransportMode,
     email_factory: Arc<EmailFactory>,
     dkim_signer: Option<Arc<dyn MessageSigner>>,
+    /// Fixed system auto-reply sender (postman@{gateway domain}). The system
+    /// sender is never a deliverable mailbox — if it ever appears as a
+    /// recipient (e.g. a reply-all to a welcome mail), it is excluded from
+    /// SMTP envelope delivery unconditionally: when the gateway domain's MX
+    /// points back at this gateway, envelope-delivering to it would bounce
+    /// the mail straight back in (a storm vector).
+    system_sender: String,
 }
 
 /// Resolve the effective sender address, preferring the persona-aware
@@ -78,6 +85,7 @@ impl SmtpRelay {
             transport,
             email_factory,
             dkim_signer,
+            system_sender: format!("postman@{}", hostname.unwrap_or("amail-relay")),
         })
     }
 
@@ -324,7 +332,15 @@ impl SmtpRelay {
         let mut seen = std::collections::HashSet::new();
         for r in recipients.to.iter().chain(recipients.cc.iter()) {
             let lower = r.to_lowercase();
-            if !seen.insert(lower) {
+            if !seen.insert(lower.clone()) {
+                continue;
+            }
+            // System sender (postman@{domain}) as a recipient is a sink,
+            // never deliverable — exclude from the envelope unconditionally
+            // (see `system_sender` field docs for the storm rationale).
+            if lower == self.system_sender {
+                info!(operation="system_sender_sink", recipient = %r,
+                      "System sender as recipient — excluded from SMTP envelope");
                 continue;
             }
             let addr = match parse_address(r) {
