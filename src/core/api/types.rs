@@ -335,7 +335,12 @@ pub struct ContactProfileRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ContactsByNameQuery {
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Comma-separated address list for batch profile lookup
+    /// (e.g. `?addresses=alice@x.com,bob@x.com`).
+    #[serde(default)]
+    pub addresses: Option<String>,
 }
 
 // ── Probe Webhook ─────────────────────────────────────────────

@@ -39,15 +39,17 @@ impl StrangerInterceptor {
         headers.as_object()?.get(key)?.as_str()
     }
 
-    async fn get_public_whoami(&self, agent_addr: &str) -> Option<String> {
+    /// The agent's persona is the single source of truth for WHOAMI replies —
+    /// set via the manager's "approve persona" command (domain_addr_meta).
+    async fn get_whoami_reply(&self, agent_addr: &str) -> Option<String> {
         self.email_factory
             .env_factory
-            .db
-            .agent_state_get(agent_addr, "public_whoami")
+            .resolve_domain_addr_meta(agent_addr)
             .await
             .ok()
             .flatten()
-            .map(|(_, v)| v)
+            .map(|m| m.agent_persona)
+            .filter(|p| !p.is_empty())
     }
 
     async fn send_auto_reply(&self, from: &str, to: &str, subject: &str, body: &str) {
@@ -125,7 +127,7 @@ impl InboundInterceptor for StrangerInterceptor {
         match command.as_str() {
             "whoami" => {
                 let body = self
-                    .get_public_whoami(recipient)
+                    .get_whoami_reply(recipient)
                     .await
                     .unwrap_or_else(|| "Agent not configured yet.".to_string());
 

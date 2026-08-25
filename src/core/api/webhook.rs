@@ -119,7 +119,7 @@ pub async fn process_email_webhook(
         return true; // Email processed by command, don't deliver
     }
 
-    // Parse recipients once — used by enrichment, pull block, and my_role injection
+    // Parse recipients once — used by the pull block below
     let recipients = record.recipients_parsed();
 
     // ── 1. Parse endpoints ──────────────────────────────────────────
@@ -184,29 +184,6 @@ pub async fn process_email_webhook(
                 error = %e,
                 "Failed to persist cleaned body/signature — will re-process on retry"
             );
-        }
-    }
-
-    // Enrich with contact info from whitelist
-    if let Err(e) = record.enrich_with_contacts(&mut payload, env_factory).await {
-        warn!(operation="enrich_contacts_failed", error = %e, "Failed to enrich contacts");
-    }
-
-    // Inject my_role from the target agent's persona (from domain_addr_meta)
-    {
-        // The delivery target is rcpt[0] (the address this record actually
-        // webhooks to) — to[0] is now the full post-filter list and would
-        // pick the wrong persona when the record fans out to several agents.
-        let target_addr = recipients.delivery().next();
-        if let Some(addr) = target_addr {
-            match env_factory.resolve_domain_addr_meta(addr).await {
-                Ok(Some(meta)) => {
-                    if !meta.agent_persona.is_empty() {
-                        payload["my_role"] = serde_json::json!(meta.agent_persona);
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
@@ -542,51 +519,56 @@ pub async fn process_email_webhook(
 
 /// Manager commands parsed from manager's email.
 enum ManagerCommand {
-    SignatureUpdate(String),
-    RoleUpdate(String),
+    /// Composite approval: updates persona and/or signature in one upsert.
+    PersonaApproval { persona: String, signature: String },
     AddContact(String, Option<String>), // email to add, optional description
     RemoveContact(String),              // email to remove
+}
+
+/// Parse the `persona:` / `signature:` sections of an approval email.
+/// Both sections are optional (at least one required); a section's text
+/// may span multiple lines, ending at the next section marker.
+fn parse_persona_approval(body: &str) -> Option<(String, String)> {
+    let mut persona = String::new();
+    let mut signature = String::new();
+    let mut section = 0usize; // 0 = preamble, 1 = persona, 2 = signature
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("persona:") {
+            section = 1;
+            persona = rest.trim().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix("signature:") {
+            section = 2;
+            signature = rest.trim().to_string();
+        } else if section == 1 && !trimmed.is_empty() {
+            if !persona.is_empty() {
+                persona.push('\n');
+            }
+            persona.push_str(trimmed);
+        } else if section == 2 && !trimmed.is_empty() {
+            if !signature.is_empty() {
+                signature.push('\n');
+            }
+            signature.push_str(trimmed);
+        }
+    }
+    if persona.is_empty() && signature.is_empty() {
+        None
+    } else {
+        Some((persona, signature))
+    }
 }
 
 /// Parse email body for manager commands.
 fn parse_manager_command(body: &str) -> Option<ManagerCommand> {
     let lower = body.to_lowercase();
 
-    // Signature update
-    for prefix in &[
-        "set signature to",
-        "change signature to",
-        "update signature to",
-        "set signature as",
-        "change signature as",
-        "set my signature to",
-        "set your signature to",
-        "签名设为",
-        "署名设为",
-    ] {
-        if let Some(pos) = lower.find(prefix) {
-            let val = body[pos + prefix.len()..].trim().to_string();
-            if !val.is_empty() {
-                return Some(ManagerCommand::SignatureUpdate(val));
-            }
-        }
-    }
-
-    // Role/Persona update
-    for prefix in &[
-        "set my role to",
-        "update my role to",
-        "change my role to",
-        "set your role to",
-        "update your role to",
-        "change your role to",
-        "角色设为",
-        "职责设为",
-    ] {
-        if let Some(pos) = lower.find(prefix) {
-            let val = body[pos + prefix.len()..].trim().to_string();
-            if !val.is_empty() {
-                return Some(ManagerCommand::RoleUpdate(val));
+    // Persona approval (composite) — checked first so its body text
+    // cannot be misparsed as a contact command.
+    for trigger in &["approve persona", "批准角色"] {
+        if lower.find(trigger).is_some() {
+            if let Some((persona, signature)) = parse_persona_approval(body) {
+                return Some(ManagerCommand::PersonaApproval { persona, signature });
             }
         }
     }
@@ -653,9 +635,12 @@ async fn handle_manager_commands(
         None => return false,
     };
 
-    // Find matching domain by recipient address, verify sender is manager
+    // Find matching agent address, verify sender is manager.
+    // Use delivery targets (rcpt, base addresses) — recipients.to holds the
+    // full persona addresses, which would miss the base-keyed meta lookup
+    // when the manager addresses a persona-prefixed recipient.
     let recipients = record.recipients_parsed();
-    for to_addr in &recipients.to {
+    for to_addr in recipients.delivery() {
         let agent_meta = match env_factory.resolve_domain_addr_meta(to_addr).await {
             Ok(Some(m)) => m,
             _ => continue,
@@ -665,38 +650,21 @@ async fn handle_manager_commands(
         }
 
         match &cmd {
-            ManagerCommand::SignatureUpdate(sig) => {
+            ManagerCommand::PersonaApproval { persona, signature } => {
                 if let Err(e) = env_factory
                     .upsert_domain_addr_meta(
                         to_addr,
                         &agent_meta.system_id,
                         Some(&agent_meta.manager_address),
-                        Some(sig),
-                        Some(&agent_meta.agent_persona),
+                        Some(signature),
+                        Some(persona),
                     )
                     .await
                 {
-                    warn!(operation="manager_signature_update_failed", error = %e, "Failed to update signature");
+                    warn!(operation="manager_persona_approval_failed", error = %e, "Failed to apply persona approval");
                     return false;
                 }
-                info!(operation="manager_signature_updated", agent = %to_addr, "Manager command: signature updated");
-                return true;
-            }
-            ManagerCommand::RoleUpdate(role) => {
-                if let Err(e) = env_factory
-                    .upsert_domain_addr_meta(
-                        to_addr,
-                        &agent_meta.system_id,
-                        Some(&agent_meta.manager_address),
-                        Some(&agent_meta.agent_signature),
-                        Some(role),
-                    )
-                    .await
-                {
-                    warn!(operation="manager_role_update_failed", error = %e, "Failed to update persona");
-                    return false;
-                }
-                info!(operation="manager_role_updated", agent = %to_addr, "Manager command: role updated");
+                info!(operation="manager_persona_approved", agent = %to_addr, "Manager command: persona and/or signature approved");
                 return true;
             }
             ManagerCommand::AddContact(email, description) => {
@@ -752,6 +720,91 @@ mod tests {
     use crate::core::config::Config;
     use crate::core::email::utils::sign_payload;
     use crate::core::email::utils::{html_to_markdown, parse_headers};
+
+    // ─── manager command parsing tests ───
+
+    #[test]
+    fn test_parse_persona_approval_both_sections() {
+        let body = "approve persona\npersona: I am an email assistant.\nsignature: Best regards\nBob";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "I am an email assistant.");
+                assert_eq!(signature, "Best regards\nBob");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_multiline_persona() {
+        let body = "approve persona\npersona: Line one\nLine two\nsignature: sig";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "Line one\nLine two");
+                assert_eq!(signature, "sig");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_chinese_trigger() {
+        let body = "批准角色\npersona: 我是助手\nsignature: 此致敬礼";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "我是助手");
+                assert_eq!(signature, "此致敬礼");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_only_signature() {
+        let body = "approve persona\nsignature: New sig";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert!(persona.is_empty());
+                assert_eq!(signature, "New sig");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_trigger_without_sections_is_not_command() {
+        // Trigger present but no sections → not a command (falls through).
+        assert!(super::parse_manager_command("approve persona, please see attached").is_none());
+    }
+
+    #[test]
+    fn test_legacy_role_signature_triggers_are_dead() {
+        // Removed triggers must no longer parse as commands.
+        assert!(super::parse_manager_command("set my role to assistant").is_none());
+        assert!(super::parse_manager_command("set signature to bye").is_none());
+        assert!(super::parse_manager_command("签名设为 再见").is_none());
+    }
+
+    #[test]
+    fn test_parse_add_contact_still_works() {
+        let body = "please add bob@example.com to my contacts\ndescription: Bob";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::AddContact(email, desc)) => {
+                assert_eq!(email, "bob@example.com");
+                assert_eq!(desc.as_deref(), Some("Bob"));
+            }
+            _ => panic!("expected AddContact"),
+        }
+    }
+
+    #[test]
+    fn test_parse_remove_contact_still_works() {
+        let body = "remove bob@example.com from my contacts";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::RemoveContact(email)) => assert_eq!(email, "bob@example.com"),
+            _ => panic!("expected RemoveContact"),
+        }
+    }
 
     // ─── html_to_markdown tests ───
 

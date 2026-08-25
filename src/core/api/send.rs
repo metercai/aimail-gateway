@@ -134,9 +134,10 @@ pub async fn send_email_core(
 
     // Parse to addresses — strip persona prefix at entry point.
     // Persona-prefixed addresses (support.bob@agent.com) are reduced to base
-    // (bob@agent.com) for all internal matching; the _persona header carries
-    // the role. Full addresses are reconstructed from persona_map for display
-    // and SMTP envelope delivery.
+    // (bob@agent.com) for all internal matching. Full addresses are
+    // reconstructed from persona_map for display and SMTP envelope delivery;
+    // the raw full address in the To header is what the receiving preprocessor
+    // uses to derive the persona.
     let mut persona_map: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let to_raw: Vec<(String, String)> = req
@@ -324,12 +325,6 @@ pub async fn send_email_core(
     let mut merged_headers = req.headers.clone().unwrap_or_default();
     for (k, v) in display_headers {
         merged_headers.insert(k, v);
-    }
-    // Inject _persona entries for persona-aware recipients — the webhook
-    // preprocessor extracts these to set my_role on the receiving agent.
-    for (base, persona) in &persona_map {
-        let key = format!("_persona.{}", base);
-        merged_headers.entry(key).or_insert_with(|| persona.clone());
     }
 
     // ── a2a_board: session flow detection (outbound) ──

@@ -1,8 +1,6 @@
 // Encapsulated accessors for EmailRecord and AttachmentMetaRecord JSON fields.
 
 use crate::core::email::storage::{AttachmentMetaRecord, EmailRecord, Recipients};
-use crate::core::errors::AppResult;
-use crate::core::factory::EnvFactory;
 
 // ═══════════════════════════════════════════════════════════════════════
 //  EmailRecord helpers
@@ -234,65 +232,6 @@ impl EmailRecord {
             payload["signature"] = serde_json::Value::String(sig);
         }
         payload
-    }
-
-    /// Enrich webhook payload with sender/recipient contact descriptions from whitelist.
-    pub async fn enrich_with_contacts(
-        &self,
-        payload: &mut serde_json::Value,
-        env_factory: &EnvFactory,
-    ) -> AppResult<()> {
-        let recipients = self.recipients_parsed();
-
-        // Collect all addresses: sender + to + cc
-        let mut all_addrs = Vec::new();
-        all_addrs.push(self.sender.clone());
-        all_addrs.extend(recipients.to.clone());
-        all_addrs.extend(recipients.cc.clone());
-
-        // Lookup each address from whitelist
-        let mut sender_contact = None;
-        let mut recipient_contacts = Vec::new();
-
-        for addr in &all_addrs {
-            if addr.is_empty() {
-                continue;
-            }
-            let domain = match addr.split('@').nth(1) {
-                Some(d) if !d.is_empty() => d,
-                _ => continue,
-            };
-
-            // Try to list whitelist entries for this domain
-            let description = match env_factory.list_whitelist_entries(domain).await {
-                Ok(entries) => entries
-                    .iter()
-                    .find(|e| e.value == *addr)
-                    .and_then(|e| e.description.clone()),
-                Err(_) => None,
-            };
-
-            if *addr == self.sender {
-                sender_contact = Some(serde_json::json!({
-                    "address": addr,
-                    "description": description,
-                }));
-            } else {
-                recipient_contacts.push(serde_json::json!({
-                    "address": addr,
-                    "description": description,
-                }));
-            }
-        }
-
-        if let Some(sc) = sender_contact {
-            payload["sender_contact"] = sc;
-        }
-        if !recipient_contacts.is_empty() {
-            payload["recipient_contacts"] = serde_json::Value::Array(recipient_contacts);
-        }
-
-        Ok(())
     }
 }
 

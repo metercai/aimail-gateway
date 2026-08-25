@@ -2286,6 +2286,21 @@ async fn get_contact_profile(
 }
 
 /// GET /api/v1/contacts?name=... — search contacts by name
+///
+/// GET /api/v1/contacts?addresses=a,b,c — batch profile lookup (preprocessor).
+/// The FIRST address in the list is the inbound sender; the rest are
+/// recipients. Returns:
+///   {
+///     "my_profile":         {address, profile} | null  — the calling agent's
+///                                       approved persona (domain_addr_meta),
+///     "sender_profile":     {address: profile}  — sender's stored profile,
+///     "recipients_profile": {address: profile}  — recipients' stored profiles,
+///     "results":            [{address, profile}]  — all found, in input order
+///   }
+/// Profiles are stored under base-address keys (`profile:{base}`);
+/// persona-prefixed addresses resolve by stripping the prefix, with a
+/// fallback to a literal full-address key. Returned addresses keep the
+/// full (persona-prefixed) form the caller passed.
 async fn get_contacts_by_name(
     state: axum::extract::State<HttpState>,
     Query(query): Query<ContactsByNameQuery>,
@@ -2300,10 +2315,82 @@ async fn get_contacts_by_name(
         })));
     }
     let db = &state.factories.email.env_factory.db;
-    let name_key = query.name.to_lowercase();
+
+    // ── Batch branch: profile lookup by address list ──
+    if let Some(raw) = query
+        .addresses
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let mut seen = std::collections::HashSet::new();
+        let addresses: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .filter(|s| seen.insert(s.clone()))
+            .collect();
+        if addresses.len() > 50 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "too many addresses (max 50)".to_string(),
+                    detail: None,
+                }),
+            ));
+        }
+
+        // Self profile: the approved persona is the single source of truth.
+        let my_profile: Option<serde_json::Value> =
+            match db.get_domain_addr_meta(agent_addr).await {
+                Ok(Some(meta)) if !meta.agent_persona.is_empty() => Some(serde_json::json!({
+                    "address": agent_addr,
+                    "profile": meta.agent_persona,
+                })),
+                _ => None,
+            };
+
+        let mut sender_profile = serde_json::Map::new();
+        let mut recipients_profile = serde_json::Map::new();
+        let mut results = Vec::new();
+        for (i, addr) in addresses.iter().enumerate() {
+            if let Some(profile) = fetch_contact_profile(db, agent_addr, addr).await {
+                if i == 0 {
+                    sender_profile.insert(addr.clone(), serde_json::Value::String(profile.clone()));
+                } else {
+                    recipients_profile.insert(addr.clone(), serde_json::Value::String(profile.clone()));
+                }
+                results.push(serde_json::json!({
+                    "address": addr,
+                    "profile": profile,
+                }));
+            }
+        }
+
+        return Ok(Json(serde_json::json!({
+            "my_profile": my_profile,
+            "sender_profile": sender_profile,
+            "recipients_profile": recipients_profile,
+            "results": results,
+        })));
+    }
+
+    // ── Name search branch ──
+    let name = match &query.name {
+        Some(n) if !n.trim().is_empty() => n.trim().to_lowercase(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "either name or addresses query parameter is required".to_string(),
+                    detail: None,
+                }),
+            ));
+        }
+    };
 
     let index_value = db
-        .agent_state_get(agent_addr, &format!("name:{}", name_key))
+        .agent_state_get(agent_addr, &format!("name:{}", name))
         .await
         .unwrap_or(None);
     let results = if let Some((_, idx)) = index_value {
@@ -2327,6 +2414,28 @@ async fn get_contacts_by_name(
     };
 
     Ok(Json(serde_json::json!({"results": results})))
+}
+
+/// Look up a stored contact profile for `addr` under the calling agent.
+/// Tries the persona-stripped base address first, then the literal
+/// full address (legacy entries stored with a persona prefix).
+async fn fetch_contact_profile(db: &Database, agent_addr: &str, addr: &str) -> Option<String> {
+    let (base, _persona) = crate::core::email::utils::strip_persona(addr);
+    if let Ok(Some((_, v))) = db
+        .agent_state_get(agent_addr, &format!("profile:{}", base))
+        .await
+    {
+        return Some(v);
+    }
+    if base != addr {
+        if let Ok(Some((_, v))) = db
+            .agent_state_get(agent_addr, &format!("profile:{}", addr))
+            .await
+        {
+            return Some(v);
+        }
+    }
+    None
 }
 
 // ── Name index helpers ────────────────────────────────────────────
