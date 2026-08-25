@@ -198,7 +198,7 @@ pub struct RelayConfig {
     pub smtp_server: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
-    /// Custom DNS server address (host:port) for all DNS queries (SPF, MX, DKIM).
+    /// Custom DNS server address (host:port) for the shared DNS resolver.
     /// Takes precedence over system /etc/resolv.conf.
     /// Override precedence: mx_dns_override > dns_server > resolv.conf
     #[serde(default)]

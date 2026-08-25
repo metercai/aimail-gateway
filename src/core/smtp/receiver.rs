@@ -39,11 +39,12 @@ pub fn temp_fail(msg: &str) -> Response {
 /// `ConnectionHandler` (impl `mailin::Handler`) is instantiated per connection
 /// and borrows shared `Config` and a scheduler `trigger_tx`.
 ///
-/// The advanced edition wraps this in its own `AdvancedSmtpHandler`
-/// (`aimail-advanced`), which adds SPF/PTR/DKIM/DMARC/HELO/IP-blacklist
-/// checks, auth.local sender resolution, and per-system rate limiting by
-/// calling its own security components directly — the two editions keep
-/// independent SMTP inbound flows while sharing the business core here.
+/// This type is the edition-independent business core. The `Handler` impl
+/// below is the default inbound flow. A wrapping handler can reuse this
+/// core verbatim while supplying its own connection-level security: it
+/// overrides the individual `Handler` methods (helo / mail / data_end)
+/// with its own pre-checks and delegates the business body back through
+/// the public entry points and pending-session accessors.
 /// `Clone` is derived so `spawn_smtp` can hand each accepted connection its
 /// own copy (session state starts at defaults, equivalent to a fresh `new`).
 #[derive(Clone)]
@@ -212,10 +213,10 @@ impl ConnectionHandler {
     /// Shared MAIL FROM business body.
     ///
     /// `from` is the raw envelope sender (used for the anti-loop domain
-    /// lookup); `effective_sender` is the sender stored on the session. The
-    /// base edition passes `from` as-is; the advanced edition passes an
-    /// auth.local-resolved sender (its own `mail` performs the IP-blacklist,
-    /// auth.local resolution, and SPF/PTR checks before delegating here).
+    /// lookup). `effective_sender` is the sender stored on the session.
+    /// This handler's own `mail` passes both through unchanged. A wrapping
+    /// handler may pass a resolved or rewritten `effective_sender` after
+    /// applying its own pre-`mail` checks before delegating here.
     pub fn mail_with_sender(
         &mut self,
         _ip: IpAddr,
@@ -245,11 +246,10 @@ impl ConnectionHandler {
         }
     }
 
-    // ── Read-only accessors for the edition-specific wrapper handler ────
-    // The advanced edition's `AdvancedSmtpHandler` wraps this handler and
-    // needs the pending session data (sender / raw bytes / system id) to run
-    // its own rate-limit, DKIM/DMARC, and per-system attachment checks before
-    // delegating the business body.
+    // ── Read-only accessors for a wrapping handler ───────────────────────
+    // A wrapper that layers its own mid-pipeline checks on top of this core
+    // inspects the in-flight message state (sender / raw bytes / system id)
+    // before delegating the business body.
 
     /// Pending MAIL FROM sender (None before MAIL FROM).
     pub fn pending_sender(&self) -> Option<&str> {
@@ -421,9 +421,10 @@ impl Handler for ConnectionHandler {
     }
 
     fn data_end(&mut self) -> Response {
-        // Base edition: no mid-pipeline security (rate limit / DKIM / DMARC)
-        // and no per-system attachment overrides (None → global config limits)
-        // — those are enforced by the advanced edition's own handler.
+        // Default flow: no mid-pipeline message checks and no per-system
+        // attachment overrides — `process_data_end_post(None, None)` applies
+        // the global config limits. A wrapping handler runs its own checks
+        // first and passes explicit per-system limits.
         if let Err(r) = self.check_deferred_whitelist() {
             return r;
         }
@@ -500,9 +501,10 @@ impl ConnectionHandler {
 }
 
 // ── Shared DATA-phase business body ─────────────────────────────────────
-// Edition-independent. The advanced edition's `AdvancedSmtpHandler` runs its
-// own rate-limit, DKIM/DMARC, and per-system attachment checks first, then
-// delegates here with its per-system attachment limits.
+// Edition-independent. `att_count` / `att_size` are optional per-system
+// attachment limits; `None` falls back to the global config limits. A
+// wrapping handler computes these from its own policy store before
+// delegating here.
 
 impl ConnectionHandler {
     /// Deferred whitelist rejection check (does NOT consume session state).
@@ -512,9 +514,10 @@ impl ConnectionHandler {
     /// everything else before wasting time on full MIME parse. Returns
     /// `Err(response)` to reject, or `Ok(())` to continue.
     ///
-    /// Split out so the advanced edition can run its mid-pipeline security
-    /// (rate limit / DKIM / DMARC) *after* this check and *before* the
-    /// business body — matching the original ordering exactly.
+    /// Split out so a wrapping handler can interpose its own mid-pipeline
+    /// checks *after* this rejection and *before* the business body —
+    /// preserving the ordering in which unwhitelisted senders are rejected
+    /// before any per-message processing.
     pub fn check_deferred_whitelist(&self) -> Result<(), Response> {
         if !self.sender_whitelisted {
             let is_stranger_cmd = match mailparse::parse_headers(&self.message_data) {
@@ -755,9 +758,10 @@ impl ConnectionHandler {
             // layout — arbitrary forged ".a2a@" strings are rejected here,
             // so a random sender cannot inject a fresh board namespace.
             // (Cross-gateway first invite has no local record yet, so an
-            // existence check would break the bootstrap; authenticity is
-            // anchored by DKIM/DMARC in the advanced edition via
-            // check_inbound_message at data_end, which runs before this.)
+            // existence check would break the bootstrap. The format check
+            // above is the injection anchor; a wrapping handler that runs
+            // its own message authentication at data_end — which happens
+            // before this — adds the authenticity gate.)
             if crate::board::models::parse_board_email(&sender).is_some() {
                 let raw_text = String::from_utf8_lossy(&raw_data);
             let header_val = raw_text.lines().find_map(|l| {
