@@ -14,7 +14,7 @@ use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 pub(crate) enum SmtpTransportMode {
     /// Upstream SMTP relay.
     Relay(AsyncSmtpTransport<Tokio1Executor>),
-    /// Direct MX delivery (advanced edition).
+    /// Direct MX delivery (default mode when no upstream relay is configured).
     DirectMx(Arc<MxDelivererImpl>),
 }
 

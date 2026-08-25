@@ -18,5 +18,4 @@ pub mod models;
 pub mod notify;
 pub mod quota;
 pub mod registry;
-pub mod router;
 pub mod sweeper;

@@ -8,10 +8,6 @@ use serde::Deserialize;
 /// using double underscores (e.g. `AIMAILGW_HTTP_ADDR` → `http.addr`).
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
-    /// File path this config was loaded from (for advanced features that
-    /// need to re-read sections from the original TOML).
-    #[serde(skip)]
-    pub config_path: Option<String>,
     #[serde(default)]
     pub http: HttpConfig,
     #[serde(default)]
@@ -277,9 +273,6 @@ pub fn load(path: &str) -> Result<Config, crate::core::errors::AppError> {
 
     // Apply environment variable overrides (AIMAILGW_* prefix)
     apply_env_overrides(&mut config);
-
-    // Record path for advanced features that need to re-read sections
-    config.config_path = Some(path.to_string());
 
     // Runtime validation — fail fast on invalid config
     config.validate()?;
