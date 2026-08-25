@@ -16,6 +16,5 @@ pub mod handlers;
 pub mod interceptor;
 pub mod models;
 pub mod notify;
-pub mod quota;
 pub mod registry;
 pub mod sweeper;

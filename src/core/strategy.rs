@@ -2,13 +2,11 @@
 //
 // Advanced edition adds: SPF+PTR, an outbound message transform
 // (DKIM signing), MX direct delivery, GCRA rate limiting, DB-backed
-// quotas, and extra HTTP routes (/metrics etc).
+// admission limits, and extra HTTP routes (/metrics etc).
 
 use crate::core::email::storage::EmailRecord;
 use async_trait::async_trait;
 use std::sync::Arc;
-
-use crate::board::quota::BoardQuotaChecker;
 
 // ── OutboundTransform ─────────────────────────────────────────────────
 
@@ -33,23 +31,24 @@ pub trait OutboundTransform: Send + Sync {
     }
 }
 
-// ── QuotaChecker ──────────────────────────────────────────────────────
+// ── AdmissionGate ─────────────────────────────────────────────────────
 
-/// Per-system quota checks for emails, domains, and API keys.
+/// Neutral per-system admission hook. The base edition installs a no-op
+/// implementation; editions with per-system limits install their own.
+///
+/// Every check must run BEFORE the corresponding create/send side effect;
+/// `Err` means reject (the caller maps it to the `quota_exceeded` /
+/// `rate_limited` API errors).
 #[async_trait]
-pub trait QuotaChecker: Send + Sync {
-    async fn check_send_quota(&self, system_id: &str) -> Result<(), crate::core::errors::AppError>;
-    async fn check_domain_quota(
-        &self,
-        system_id: &str,
-    ) -> Result<(), crate::core::errors::AppError>;
-    async fn check_address_quota(&self, system_id: &str) -> Result<(), crate::core::errors::AppError>;
-    async fn get_max_attachments(&self, _system_id: &str) -> Option<usize> {
-        None
-    }
-    async fn get_max_attachment_size(&self, _system_id: &str) -> Option<usize> {
-        None
-    }
+pub trait AdmissionGate: Send + Sync {
+    /// Admit a new address-level API key (address count limit).
+    async fn admit_address(&self, system_id: &str) -> crate::core::errors::AppResult<()>;
+    /// Admit a new system domain (domain count limit).
+    async fn admit_domain(&self, system_id: &str) -> crate::core::errors::AppResult<()>;
+    /// Admit a new board (active-board limit).
+    async fn admit_board(&self, system_id: &str) -> crate::core::errors::AppResult<()>;
+    /// Invalidate cached counters — called after a board is created.
+    fn invalidate_board_cache(&self) {}
 }
 
 // ── RouterHook ────────────────────────────────────────────────────────
@@ -106,7 +105,6 @@ pub trait SystemStore: Send + Sync {
 /// Base edition: all fields default to no-op implementations.
 /// Advanced edition: each field can be replaced individually.
 pub struct ExtensionProviders {
-    pub quota_checker: Arc<dyn QuotaChecker>,
+    pub admission_gate: Arc<dyn AdmissionGate>,
     pub outbound: Arc<dyn OutboundTransform>,
-    pub board_quota: Arc<dyn BoardQuotaChecker>,
 }

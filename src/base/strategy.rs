@@ -3,13 +3,12 @@
 
 use async_trait::async_trait;
 
-use crate::core::errors::{AppError, AppResult};
+use crate::core::errors::AppResult;
 
 use std::sync::Arc;
 
-use crate::board::quota::NoopBoardQuota;
 use crate::core::strategy::{
-    ExtensionProviders, OutboundTransform, QuotaChecker, RouterHook, SystemStore,
+    AdmissionGate, ExtensionProviders, OutboundTransform, RouterHook, SystemStore,
 };
 
 // ── OutboundTransform ──
@@ -23,19 +22,19 @@ impl OutboundTransform for NoopOutboundTransform {
     }
 }
 
-// ── QuotaChecker ──
+// ── AdmissionGate ──
 
-pub struct BaseQuotaChecker;
+pub struct BaseAdmissionGate;
 
 #[async_trait]
-impl QuotaChecker for BaseQuotaChecker {
-    async fn check_send_quota(&self, _system_id: &str) -> Result<(), AppError> {
+impl AdmissionGate for BaseAdmissionGate {
+    async fn admit_address(&self, _system_id: &str) -> AppResult<()> {
         Ok(())
     }
-    async fn check_domain_quota(&self, _system_id: &str) -> Result<(), AppError> {
+    async fn admit_domain(&self, _system_id: &str) -> AppResult<()> {
         Ok(())
     }
-    async fn check_address_quota(&self, _system_id: &str) -> Result<(), AppError> {
+    async fn admit_board(&self, _system_id: &str) -> AppResult<()> {
         Ok(())
     }
 }
@@ -86,9 +85,8 @@ impl ExtensionProviders {
     /// Create providers with Base (no-op) implementations.
     pub fn base() -> Self {
         Self {
-            quota_checker: Arc::new(BaseQuotaChecker),
+            admission_gate: Arc::new(BaseAdmissionGate),
             outbound: Arc::new(NoopOutboundTransform),
-            board_quota: Arc::new(NoopBoardQuota),
         }
     }
 }

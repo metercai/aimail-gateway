@@ -4,8 +4,8 @@ use crate::board::commands;
 use crate::board::db;
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
 use crate::board::notify::Notifier;
-use crate::board::quota::BoardQuotaChecker;
 use crate::core::email::factory::AttachmentFactory;
+use crate::core::strategy::AdmissionGate;
 use crate::core::email::factory::EmailFactory;
 use crate::core::strategy::InboundInterceptor;
 use async_trait::async_trait;
@@ -18,7 +18,7 @@ pub struct A2aInterceptor {
     pub attachment_factory: Arc<AttachmentFactory>,
     pub storage_path: String,
     pub gateway_url: String,
-    pub board_quota: Arc<dyn BoardQuotaChecker>,
+    pub admission_gate: Arc<dyn AdmissionGate>,
 }
 
 impl A2aInterceptor {
@@ -27,14 +27,14 @@ impl A2aInterceptor {
         attachment_factory: Arc<AttachmentFactory>,
         storage_path: &str,
         gateway_url: &str,
-        board_quota: Arc<dyn BoardQuotaChecker>,
+        admission_gate: Arc<dyn AdmissionGate>,
     ) -> Self {
         Self {
             email_factory,
             attachment_factory,
             storage_path: storage_path.to_string(),
             gateway_url: gateway_url.to_string(),
-            board_quota,
+            admission_gate,
         }
     }
 
@@ -176,7 +176,7 @@ impl InboundInterceptor for A2aInterceptor {
                 // Compute board identifiers from orchestrator's domain
                 let orch_domain = orch_email.split('@').nth(1).unwrap_or("");
 
-                // Resolve orchestrator system for quota attribution
+                // Resolve orchestrator system for limit attribution
                 let orch_system = self
                     .email_factory
                     .env_factory
@@ -216,7 +216,7 @@ impl InboundInterceptor for A2aInterceptor {
                 // Validate: sender must be declared as the owner member
                 // BEFORE any side effect (board row, members, tokens) —
                 // a non-owner sender must never create junk boards or
-                // consume board quota or mint member tokens.
+                // consume board limit or mint member tokens.
                 let sender_is_owner = members
                     .map(|arr| {
                         arr.iter().any(|m| {
@@ -234,10 +234,10 @@ impl InboundInterceptor for A2aInterceptor {
                 }
 
                 if db::get_board(&conn, &board_id).is_err() {
-                    // Board quota: check max_active_boards (only after the
-                    // owner gate — a rejected command must not consume quota).
-                    if let Err(e) = self.board_quota.check_active_boards(&orch_system).await {
-                        tracing::warn!("[a2a_board] Board quota exceeded: {e:?}");
+                    // Board admission: check max_active_boards (only after the
+                    // owner gate — a rejected command must not consume limit).
+                    if let Err(e) = self.admission_gate.admit_board(&orch_system).await {
+                        tracing::warn!("[a2a_board] Board limit exceeded: {e:?}");
                         return crate::core::strategy::InterceptorDecision::PassThrough;
                     }
                     let board = Board {
@@ -266,7 +266,7 @@ impl InboundInterceptor for A2aInterceptor {
                         },
                     };
                     db::create_board(&conn, &board).ok();
-                    self.board_quota.invalidate_cache();
+                    self.admission_gate.invalidate_board_cache();
                     // Register the new board address for the RCPT
                     // substantive check — the only creation path in the
                     // whole codebase.
@@ -958,7 +958,7 @@ pub fn register(
     attachment_factory: &std::sync::Arc<AttachmentFactory>,
     storage_path: &str,
     gateway_url: &str,
-    board_quota: Arc<dyn BoardQuotaChecker>,
+    admission_gate: Arc<dyn AdmissionGate>,
 ) {
     use crate::core::strategy::InboundInterceptor;
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
@@ -966,7 +966,7 @@ pub fn register(
         attachment_factory.clone(),
         storage_path,
         gateway_url,
-        board_quota.clone(),
+        admission_gate.clone(),
     ));
     email_factory
         .env_factory

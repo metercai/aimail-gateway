@@ -226,11 +226,11 @@ pub async fn create_system_domain(
     // Verify system exists
     match state.factories.email.env_factory.resolve_system(&tid).await {
         Ok(Some(_)) => {
-            // ── Domain quota check (only for bare domains) ──
+            // ── Domain admission check (only for bare domains) ──
             state
                 .extensions
-                .quota_checker
-                .check_domain_quota(&tid)
+                .admission_gate
+                .admit_domain(&tid)
                 .await
                 .map_err(|e| {
                     (
@@ -526,8 +526,8 @@ async fn register_address(
         ));
     }
 
-    // ── Address quota check ──
-    state.extensions.quota_checker.check_address_quota(&tid).await.map_err(|e| {
+    // ── Address admission check ──
+    state.extensions.admission_gate.admit_address(&tid).await.map_err(|e| {
         (StatusCode::FORBIDDEN, Json(ErrorResponse {
             error: "quota_exceeded".to_string(),
             detail: Some(e.to_string()),

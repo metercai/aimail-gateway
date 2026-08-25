@@ -337,13 +337,13 @@ pub fn register_board_interceptors(http_state: &HttpState) {
     let attachment_factory = http_state.factories.attachment.clone();
     let storage_path = http_state.config.storage.path.to_str().unwrap_or("");
     let endpoint = api_endpoint_url(&http_state.config);
-    let board_quota = http_state.extensions.board_quota.clone();
+    let admission_gate = http_state.extensions.admission_gate.clone();
     crate::board::interceptor::register(
         &email_factory,
         &attachment_factory,
         storage_path,
         &endpoint,
-        board_quota,
+        admission_gate,
     );
 }
 

@@ -16,7 +16,7 @@ use crate::core::storage::ApiKeyRecord;
 
 /// POST /api/v1/send — Create an outbound email record via API.
 /// Base edition: scope + bare-domain check only; the advanced wrapper
-/// layers system/quota/rate prechecks before the shared core.
+/// layers system/admission/rate prechecks before the shared core.
 pub async fn send_email(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
@@ -45,7 +45,7 @@ pub async fn send_email(
 }
 
 /// Shared send core (no edition strategy gates).
-/// Base routes to it directly; the advanced wrapper does system/quota/rate
+/// Base routes to it directly; the advanced wrapper does system/admission/rate
 /// prechecks first then calls this.
 pub async fn send_email_core(
     state: State<HttpState>,

@@ -115,7 +115,7 @@ impl Server {
         ));
         let router_hook: Arc<dyn RouterHook> = base_hook;
         // Base SMTP inbound handler: pure business logic, no security, no
-        // rate/quota, no TLS (the base edition stays free of those concerns).
+        // rate/limits, no TLS (the base edition stays free of those concerns).
         let smtp_handler = amail_base::core::smtp::receiver::ConnectionHandler::new(
             Arc::new(config.clone()),
             http_state.factories.email.clone(),

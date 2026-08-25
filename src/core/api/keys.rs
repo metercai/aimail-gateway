@@ -25,7 +25,7 @@ pub async fn create_api_key(
         return Err(e);
     }
 
-    // ── Address quota check ──
+    // ── Address admission check ──
     {
         let _system = match state
             .factories
@@ -54,11 +54,11 @@ pub async fn create_api_key(
                 ));
             }
         };
-        // Delegate quota check to QuotaChecker trait
+        // Delegate admission check to the AdmissionGate hook
         state
             .extensions
-            .quota_checker
-            .check_address_quota(&req.system_id)
+            .admission_gate
+            .admit_address(&req.system_id)
             .await
             .map_err(|e| {
                 (

@@ -541,7 +541,7 @@ impl ConnectionHandler {
     ///
     /// Called AFTER `check_deferred_whitelist` (and, for the advanced
     /// edition, after its mid-pipeline security). `att_count` / `att_size`
-    /// are per-system attachment limits (advanced quota store); `None`
+    /// are per-system attachment limits (advanced edition); `None`
     /// falls back to the global config limits.
     pub fn process_data_end_post(
         &mut self,
@@ -643,7 +643,7 @@ impl ConnectionHandler {
             };
 
         // ── Attachment limit enforcement ───────────────────────────
-        // Per-system limits (advanced quota store) override global config.
+        // Per-system limits (advanced edition) override global config.
         if let Err(e) = EmailFactory::validate_attachments(
             &self.config.storage,
             &attachments,
