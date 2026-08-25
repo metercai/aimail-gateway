@@ -4,12 +4,10 @@
 // limiting, DB-backed quotas, and extra HTTP routes (/metrics etc).
 
 use crate::core::email::storage::EmailRecord;
-use crate::core::errors::AppResult;
 use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::board::quota::BoardQuotaChecker;
-use crate::core::storage::Database;
 
 // ── MessageSigner ─────────────────────────────────────────────────────
 
@@ -93,13 +91,6 @@ pub trait SystemStore: Send + Sync {
         &self,
         id: &str,
     ) -> crate::core::errors::AppResult<Option<crate::core::storage::SystemRecord>>;
-}
-
-/// Resolves a sender/receiver address into whitelist lookup keys.
-/// Both editions use `ExactKeyResolver` (exact address match).
-#[async_trait]
-pub trait WhitelistKeyResolver: Send + Sync {
-    async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>>;
 }
 
 // ── ExtensionProviders ─────────────────────────────────────────────

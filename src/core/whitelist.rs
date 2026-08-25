@@ -33,12 +33,10 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
 use regex::Regex;
 
 use crate::core::errors::{AppError, AppResult};
 use crate::core::storage::Database;
-use crate::core::strategy::WhitelistKeyResolver;
 
 /// Maximum length for a whitelist pattern value.
 const MAX_PATTERN_LEN: usize = 128;
@@ -272,11 +270,11 @@ mod tests {
     }
 }
 
-/// Default resolver: single exact match (address-level only).
+/// Resolves a sender/receiver address into whitelist lookup keys
+/// (single exact match, address-level only).
 pub struct ExactKeyResolver;
-#[async_trait]
-impl WhitelistKeyResolver for ExactKeyResolver {
-    async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>> {
+impl ExactKeyResolver {
+    pub async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>> {
         let record = db
             .get_system_domain_by_name(addr)
             .await?

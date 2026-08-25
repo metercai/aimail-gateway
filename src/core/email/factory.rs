@@ -49,11 +49,7 @@ impl EmailFactory {
         system_store: Arc<dyn SystemStore>,
     ) -> Self {
         EmailFactory {
-            env_factory: EnvFactory::new(
-                db.clone(),
-                system_store,
-                Arc::new(crate::core::whitelist::ExactKeyResolver),
-            ),
+            env_factory: EnvFactory::new(db.clone(), system_store),
             db,
             attachments_dir,
         }

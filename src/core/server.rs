@@ -223,11 +223,7 @@ pub async fn setup_admin_key(
     system_store: std::sync::Arc<dyn crate::core::strategy::SystemStore>,
 ) -> crate::core::errors::AppResult<String> {
     let db_arc = std::sync::Arc::new(db.clone());
-    let factory = crate::core::factory::EnvFactory::new(
-        db_arc,
-        system_store,
-        Arc::new(crate::core::whitelist::ExactKeyResolver),
-    );
+    let factory = crate::core::factory::EnvFactory::new(db_arc, system_store);
 
     // ── Bootstrap system-id, persisted across restarts ──────────────
     let sid_path = config.storage.path.join("system.id");

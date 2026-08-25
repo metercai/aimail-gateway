@@ -6,16 +6,13 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::storage::{
     ApiKeyRecord, Database, DomainAddrMetaRecord, SystemDomainRecord, SystemRecord, WhitelistRecord,
 };
-use crate::core::strategy::{SystemStore, WhitelistKeyResolver};
-
-/// Default resolver: single exact match (address-level only).
+use crate::core::strategy::SystemStore;
 
 /// Database-backed environment factory.
 #[derive(Clone)]
 pub struct EnvFactory {
     pub db: Arc<Database>,
     system_store: Arc<dyn SystemStore>,
-    domain_resolver: Arc<dyn WhitelistKeyResolver>,
     interceptors: Arc<RwLock<Vec<Arc<dyn crate::core::strategy::InboundInterceptor>>>>,
     /// Board address cache for RCPT substantive checks. Built empty;
     /// production wiring calls `with_board_registry` (loaded from disk)
@@ -28,12 +25,10 @@ impl EnvFactory {
     pub fn new(
         db: Arc<Database>,
         system_store: Arc<dyn SystemStore>,
-        domain_resolver: Arc<dyn WhitelistKeyResolver>,
     ) -> Self {
         Self {
             db,
             system_store,
-            domain_resolver,
             interceptors: Arc::new(RwLock::new(Vec::new())),
             board_registry: Arc::new(crate::board::registry::BoardRegistry::new()),
         }
@@ -265,7 +260,9 @@ impl EnvFactory {
         value: &str,
         description: Option<&str>,
     ) -> AppResult<WhitelistRecord> {
-        let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
+        let keys = crate::core::whitelist::ExactKeyResolver
+            .resolve(&self.db, domain_addr)
+            .await?;
         let (system_id, _) = &keys[0];
         let record = self
             .db
@@ -290,7 +287,9 @@ impl EnvFactory {
         domain_addr: &str,
         value: &str,
     ) -> AppResult<Option<WhitelistRecord>> {
-        let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
+        let keys = crate::core::whitelist::ExactKeyResolver
+            .resolve(&self.db, domain_addr)
+            .await?;
         let (system_id, _) = &keys[0];
         self.db.get_whitelist(system_id, domain_addr, value).await
     }
@@ -349,13 +348,15 @@ impl EnvFactory {
     /// P0 gate: used by HTTP send ("to"/"all") and SMTP receive ("from"/"all").
     /// Returns 0 → reject immediately (no whitelist protection at all).
     ///
-    /// Uses WhitelistKeyResolver to determine lookup keys.
+    /// Uses exact-address matching to determine lookup keys.
     pub async fn count_whitelist_entries(
         &self,
         domain: &str,
         directions: &[&str],
     ) -> AppResult<i64> {
-        let keys = self.domain_resolver.resolve(&self.db, domain).await?;
+        let keys = crate::core::whitelist::ExactKeyResolver
+            .resolve(&self.db, domain)
+            .await?;
         for (system_id, lookup_key) in &keys {
             let count = self
                 .db
@@ -393,7 +394,9 @@ impl EnvFactory {
         if crate::board::addr::is_board_address(domain_addr) {
             return Ok(self.db.is_board_member(domain_addr, value).await?);
         }
-        let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
+        let keys = crate::core::whitelist::ExactKeyResolver
+            .resolve(&self.db, domain_addr)
+            .await?;
         for (system_id, lookup_key) in &keys {
             if self
                 .db
@@ -509,7 +512,9 @@ impl EnvFactory {
         api_key_id: Option<i64>,
         description: Option<&str>,
     ) -> AppResult<WhitelistRecord> {
-        let keys = self.domain_resolver.resolve(&self.db, domain_addr).await?;
+        let keys = crate::core::whitelist::ExactKeyResolver
+            .resolve(&self.db, domain_addr)
+            .await?;
         let (system_id, _) = &keys[0];
         let record = self
             .db
