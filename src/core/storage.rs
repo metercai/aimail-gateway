@@ -1313,6 +1313,51 @@ impl Database {
         }).await
     }
 
+    /// Update `last_used_at` for an API key (best-effort observability).
+    pub async fn touch_api_key_last_used(&self, id: i64) -> AppResult<()> {
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Candidate keys for signature verification, by caller identity.
+    ///
+    /// Identity is the key's `domain_addr` (address-scoped keys) or its
+    /// `system_id` (system-level keys). An empty identity (caller does not
+    /// know its system yet — e.g. the frontend login path) matches all
+    /// active, unexpired keys so the server can identify the key from the
+    /// HMAC match itself.
+    ///
+    /// The returned `key_hash` (= sha256 of the raw key) is the HMAC secret:
+    /// the client derives the same value offline, so the raw key never
+    /// crosses the wire (see docs/API-SIGNATURE-PROTOCOL.md).
+    pub async fn list_api_keys_by_identity(&self, identity: &str) -> AppResult<Vec<ApiKeyRecord>> {
+        let identity = identity.to_string();
+        self.call(move |conn| {
+            let mut results = Vec::new();
+            if identity.is_empty() {
+                let mut stmt = conn.prepare(
+                    "SELECT id, system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category, activation_code_hash, activation_expires_at, claimed_at FROM api_keys WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+                )?;
+                let rows = stmt.query_map([], api_key_row)?;
+                for row in rows { results.push(row?); }
+                return Ok(results);
+            }
+            let mut stmt = conn.prepare(
+                "SELECT id, system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category, activation_code_hash, activation_expires_at, claimed_at FROM api_keys WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) AND (domain_addr = ?1 OR system_id = ?1)",
+            )?;
+            let rows = stmt.query_map(params![identity], api_key_row)?;
+            for row in rows { results.push(row?); }
+            Ok(results)
+        }).await
+    }
+
     /// Verify an API key hash exists and is active.
     /// Returns the full ApiKeyRecord if valid, None if invalid/expired/deactivated.
     pub async fn verify_api_key(&self, key_hash: &str) -> AppResult<Option<ApiKeyRecord>> {

@@ -1,13 +1,16 @@
 //! Authentication middleware and scope guard utilities.
 
 use axum::{
+    body::Body,
     extract::Request,
     http::StatusCode,
     middleware::Next,
     response::{Json, Response},
 };
 
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::api::types::ErrorResponse;
 use crate::core::factory::EnvFactory;
@@ -16,61 +19,169 @@ use crate::core::storage::ApiKeyRecord;
 
 // ── AuthLayer Middleware ──
 
-/// Middleware: Verify API key from X-Api-Key header against database.
+/// Freshness window for `X-Api-Timestamp` (±5 minutes).
+const SIGNATURE_FRESHNESS_MS: u64 = 300_000;
+/// Cap on candidate keys tried per request (bounds the empty-identity path).
+const MAX_SIGNATURE_CANDIDATES: usize = 64;
+/// Cap on the request body buffered for signature verification (30 MB).
+const MAX_SIGNATURE_BODY_BYTES: u64 = 30 * 1024 * 1024;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn unauthorized(err: &str) -> Response {
+    let err_body = serde_json::to_string(&ErrorResponse {
+        error: err.to_string(),
+        detail: None,
+    })
+    .unwrap_or_default();
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header("Content-Type", "application/json")
+        .body(Body::from(err_body))
+        .unwrap()
+}
+
+/// Canonical v1 API signature base string:
+/// `METHOD\npath_and_query\ntimestamp\nsha256_hex(body)` (no trailing newline).
+fn signature_base(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body);
+    let body_hash = hex::encode(hasher.finalize());
+    format!("{method}\n{path}\n{timestamp}\n{body_hash}")
+}
+
+/// Compute the v1 API request signature (spec: docs/API-SIGNATURE-PROTOCOL.md).
 ///
-/// Returns 401 if key is missing, invalid, or deactivated.
-pub async fn auth_layer(env_factory: EnvFactory, mut req: Request, next: Next) -> Response {
-    let api_key = req
+/// `sig = hex(HMAC-SHA256(key = key_hash bytes, msg = signature_base bytes))`
+///
+/// `key_hash` is `sha256(raw_key)` — the value stored in `api_keys.key_hash`.
+/// Clients derive it offline from the raw key, so the raw key never crosses
+/// the wire.
+pub fn compute_api_signature(
+    key_hash: &str,
+    method: &str,
+    path: &str,
+    timestamp: &str,
+    body: &[u8],
+) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key_hash.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(signature_base(method, path, timestamp, body).as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Middleware: verify the v1 API signature
+/// (`X-Api-Identity` + `X-Api-Timestamp` + `X-Api-Signature`) against the
+/// database.
+///
+/// The raw API key never crosses the wire: the client signs with
+/// `sha256(raw_key)` (= the DB `key_hash`), and the server re-computes the
+/// HMAC for each candidate key of the claimed identity, comparing in
+/// constant time. A 5-minute freshness window on the (signed) timestamp
+/// bounds replay. Returns 401 if any header is missing, the signature does
+/// not match, or the timestamp is stale.
+pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next) -> Response {
+    // `X-Api-Identity` is optional: curl drops empty-valued headers on the
+    // wire, so a *missing* header must mean the same as an empty one
+    // (empty-identity fallback — the signature itself selects the key).
+    let identity = req
         .headers()
-        .get("X-Api-Key")
+        .get("X-Api-Identity")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let timestamp = req
+        .headers()
+        .get("X-Api-Timestamp")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let signature = req
+        .headers()
+        .get("X-Api-Signature")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let Some(api_key) = api_key else {
-        let err_body = serde_json::to_string(&ErrorResponse {
-            error: "Missing X-Api-Key header".to_string(),
-            detail: None,
-        })
-        .unwrap_or_default();
-        return Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .header("Content-Type", "application/json")
-            .body(axum::body::Body::from(err_body))
-            .unwrap();
+    let (Some(timestamp), Some(signature)) = (timestamp, signature) else {
+        return unauthorized("Missing X-Api-Timestamp or X-Api-Signature header");
     };
 
-    let key_hash = sha256_hex(&api_key);
+    let ts_ms: u64 = match timestamp.parse() {
+        Ok(v) => v,
+        Err(_) => return unauthorized("Invalid X-Api-Timestamp"),
+    };
+    if ts_ms.abs_diff(now_ms()) > SIGNATURE_FRESHNESS_MS {
+        return unauthorized("Stale X-Api-Timestamp (outside ±5 min window)");
+    }
 
-    let record = match env_factory.verify_api_key(&key_hash).await {
-        Ok(Some(r)) => r,
-        Ok(None) => {
-            let err_body = serde_json::to_string(&ErrorResponse {
-                error: "Invalid or deactivated API key".to_string(),
-                detail: None,
-            })
-            .unwrap_or_default();
-            return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(err_body))
-                .unwrap();
-        }
+    let provided_sig = match hex::decode(&signature) {
+        Ok(v) => v,
+        Err(_) => return unauthorized("Invalid X-Api-Signature"),
+    };
+
+    // Buffer the body so it can be hashed, then forwarded unchanged.
+    let (parts, body) = req.into_parts();
+    let bytes = match axum::body::to_bytes(body, MAX_SIGNATURE_BODY_BYTES as usize).await {
+        Ok(b) => b,
         Err(e) => {
-            tracing::error!(%e, "auth_layer: DB error during API key verification");
+            // Body exceeded the cap or could not be read — reject (fail closed).
+            tracing::debug!(%e, "auth_layer: failed to buffer request body");
             let err_body = serde_json::to_string(&ErrorResponse {
-                error: "Authentication error".to_string(),
+                error: "Payload too large or unreadable".to_string(),
                 detail: None,
             })
             .unwrap_or_default();
             return Response::builder()
-                .status(StatusCode::UNAUTHORIZED)
+                .status(StatusCode::PAYLOAD_TOO_LARGE)
                 .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(err_body))
+                .body(Body::from(err_body))
                 .unwrap();
         }
     };
 
-    // Attach verified key info to request extensions for downstream handlers
+    let method = parts.method.to_string();
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| parts.uri.path().to_string());
+
+    let candidates = match env_factory.list_api_keys_by_identity(&identity).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(%e, "auth_layer: DB error during signature verification");
+            return unauthorized("Authentication error");
+        }
+    };
+
+    let base = signature_base(&method, &path, &timestamp, &bytes);
+    let mut record: Option<ApiKeyRecord> = None;
+    for rec in candidates.iter().take(MAX_SIGNATURE_CANDIDATES) {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(rec.key_hash.as_bytes())
+                .expect("HMAC can take key of any size");
+        mac.update(base.as_bytes());
+        if mac.verify_slice(&provided_sig).is_ok() {
+            record = Some(rec.clone());
+            break;
+        }
+    }
+
+    let Some(record) = record else {
+        return unauthorized("Invalid X-Api-Signature");
+    };
+
+    // Best-effort last_used_at (observability only).
+    if let Err(e) = env_factory.touch_api_key_last_used(record.id).await {
+        tracing::debug!(%e, "auth_layer: failed to update last_used_at");
+    }
+
+    // Reassemble the request with the buffered body for downstream handlers.
+    let mut req = Request::from_parts(parts, Body::from(bytes));
     req.extensions_mut().insert(record);
 
     next.run(req).await
@@ -273,6 +384,61 @@ pub fn require_scope_any(
     }
     // return error for first scope
     require_scope(key, required_scopes[0])
+}
+
+/// Canonical v1 signature vector (docs/API-SIGNATURE-PROTOCOL.md).
+/// Rust / Python / TS clients MUST all produce this exact value.
+#[test]
+fn api_signature_matches_canonical_vector() {
+    let raw_key = "0123456789abcdef0123456789abcdef";
+    let key_hash = sha256_hex(raw_key);
+    assert_eq!(
+        key_hash,
+        "3eb1bd439947eb762998e566ccc2e099c791118b2f40579cc4f7da2b5061b7f9"
+    );
+
+    let method = "POST";
+    let path = "/api/v1/whitelists?domain=alice%40x.com&value=%40mx-a.test";
+    let timestamp = "1756000000000";
+    let body = b"{\"direction\":\"to\"}";
+
+    let sig = compute_api_signature(&key_hash, method, path, timestamp, body);
+    assert_eq!(
+        sig,
+        "cabf840e1d1a8dd9d6885762beae087f422dbd4d6d20c9ca404896120a45bcbd"
+    );
+
+    // Empty-body (GET) case.
+    let sig_empty =
+        compute_api_signature(&key_hash, "GET", "/api/v1/whoami", timestamp, b"");
+    assert_eq!(
+        sig_empty,
+        "1aac75c79bea9c60efb3280a384900ce649c346c3da5cc124361fc5070e55c74"
+    );
+}
+
+/// Tampering any part of the request must change the signature.
+#[test]
+fn api_signature_is_tamper_sensitive() {
+    let key_hash = sha256_hex("0123456789abcdef0123456789abcdef");
+    let method = "POST";
+    let path = "/api/v1/whitelists?domain=alice%40x.com";
+    let timestamp = "1756000000000";
+    let body = b"{\"direction\":\"to\"}";
+    let base = compute_api_signature(&key_hash, method, path, timestamp, body);
+
+    assert_ne!(
+        compute_api_signature(&key_hash, method, path, timestamp, b"{\"direction\":\"from\"}"),
+        base
+    );
+    assert_ne!(
+        compute_api_signature(&key_hash, method, path, "1756000000001", body),
+        base
+    );
+    assert_ne!(
+        compute_api_signature(&key_hash, "GET", path, timestamp, body),
+        base
+    );
 }
 
 /// Compute SHA-256 hash of a string and return as hex.

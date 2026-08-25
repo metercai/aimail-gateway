@@ -450,6 +450,17 @@ impl EnvFactory {
         self.db.verify_api_key(key_hash).await
     }
 
+    /// Update `last_used_at` for an API key (best-effort observability).
+    pub async fn touch_api_key_last_used(&self, id: i64) -> AppResult<()> {
+        self.db.touch_api_key_last_used(id).await
+    }
+
+    /// Candidate keys for signature verification, by caller identity
+    /// (see Database::list_api_keys_by_identity).
+    pub async fn list_api_keys_by_identity(&self, identity: &str) -> AppResult<Vec<ApiKeyRecord>> {
+        self.db.list_api_keys_by_identity(identity).await
+    }
+
     /// Resolve an API key by its numeric ID.
     pub async fn resolve_api_key_by_id(&self, id: i64) -> AppResult<Option<ApiKeyRecord>> {
         self.db.get_api_key(id).await
