@@ -9,16 +9,16 @@ use std::sync::Arc;
 
 use crate::board::quota::NoopBoardQuota;
 use crate::core::strategy::{
-    ExtensionProviders, MessageSigner, QuotaChecker, RouterHook, SystemStore,
+    ExtensionProviders, OutboundTransform, QuotaChecker, RouterHook, SystemStore,
 };
 
-// ── MessageSigner ──
+// ── OutboundTransform ──
 
-pub struct BaseMessageSigner;
+pub struct NoopOutboundTransform;
 
 #[async_trait]
-impl MessageSigner for BaseMessageSigner {
-    async fn sign(&self, _raw: &[u8], _email_id: &str) -> Option<Vec<u8>> {
+impl OutboundTransform for NoopOutboundTransform {
+    async fn transform(&self, _raw: &[u8], _email_id: &str) -> Option<Vec<u8>> {
         None
     }
 }
@@ -87,7 +87,7 @@ impl ExtensionProviders {
     pub fn base() -> Self {
         Self {
             quota_checker: Arc::new(BaseQuotaChecker),
-            dkim_signer: Arc::new(BaseMessageSigner),
+            outbound: Arc::new(NoopOutboundTransform),
             board_quota: Arc::new(NoopBoardQuota),
         }
     }

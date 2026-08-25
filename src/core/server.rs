@@ -195,9 +195,7 @@ pub fn spawn_retry_worker(
     let attachment_factory = (*http_state.factories.attachment).clone();
     let config = http_state.config.clone();
     let metrics = (*http_state.metrics).clone();
-    let dkim_signer =
-        Some(http_state.extensions.dkim_signer.clone()
-            as Arc<dyn crate::core::strategy::MessageSigner>);
+    let outbound = http_state.extensions.outbound.clone();
     let dns_resolver = http_state.dns_resolver.clone();
     let inflight = crate::core::scheduler::new_inflight_set();
     tokio::spawn(async move {
@@ -209,7 +207,7 @@ pub fn spawn_retry_worker(
             metrics,
             cancel,
             inflight,
-            dkim_signer,
+            outbound,
             dns_resolver,
         )
         .await

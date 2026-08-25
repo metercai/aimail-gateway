@@ -1,7 +1,8 @@
 // Strategy traits for edition-specific behavior injection.
 //
-// Advanced edition adds: SPF+PTR, DKIM, MX direct delivery, GCRA rate
-// limiting, DB-backed quotas, and extra HTTP routes (/metrics etc).
+// Advanced edition adds: SPF+PTR, an outbound message transform
+// (DKIM signing), MX direct delivery, GCRA rate limiting, DB-backed
+// quotas, and extra HTTP routes (/metrics etc).
 
 use crate::core::email::storage::EmailRecord;
 use async_trait::async_trait;
@@ -9,18 +10,24 @@ use std::sync::Arc;
 
 use crate::board::quota::BoardQuotaChecker;
 
-// ── MessageSigner ─────────────────────────────────────────────────────
+// ── OutboundTransform ─────────────────────────────────────────────────
 
-/// Signs outbound email messages.
+/// Neutral outbound message transform hook. The base edition installs a
+/// no-op implementation; editions that modify outbound messages
+/// (e.g. DKIM signing) install their own.
 #[async_trait]
-pub trait MessageSigner: Send + Sync {
-    /// Produce a signed version of `raw`. Returns `None` when signing is unavailable.
-    async fn sign(&self, raw: &[u8], email_id: &str) -> Option<Vec<u8>>;
+pub trait OutboundTransform: Send + Sync {
+    /// Transform `raw` before sending. Return `None` to send the original.
+    async fn transform(&self, raw: &[u8], email_id: &str) -> Option<Vec<u8>>;
 
-    /// Sign if configured, otherwise return the input unchanged.
-    async fn apply_sign<'a>(&self, raw: &'a [u8], email_id: &str) -> std::borrow::Cow<'a, [u8]> {
-        match self.sign(raw, email_id).await {
-            Some(signed) => std::borrow::Cow::Owned(signed),
+    /// Apply the transform, or return the input unchanged when it is a no-op.
+    async fn transform_or_passthrough<'a>(
+        &self,
+        raw: &'a [u8],
+        email_id: &str,
+    ) -> std::borrow::Cow<'a, [u8]> {
+        match self.transform(raw, email_id).await {
+            Some(transformed) => std::borrow::Cow::Owned(transformed),
             None => std::borrow::Cow::Borrowed(raw),
         }
     }
@@ -100,6 +107,6 @@ pub trait SystemStore: Send + Sync {
 /// Advanced edition: each field can be replaced individually.
 pub struct ExtensionProviders {
     pub quota_checker: Arc<dyn QuotaChecker>,
-    pub dkim_signer: Arc<dyn MessageSigner>,
+    pub outbound: Arc<dyn OutboundTransform>,
     pub board_quota: Arc<dyn BoardQuotaChecker>,
 }

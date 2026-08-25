@@ -11,7 +11,7 @@ use crate::core::email::factory::EmailFactory;
 use crate::core::email::storage::EmailRecord;
 use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mx::{resolve_mx, MxTransportPool};
-use crate::core::strategy::MessageSigner;
+use crate::core::strategy::OutboundTransform;
 
 /// Custom headers that must be forwarded verbatim onto outbound SMTP mail.
 /// These are consumed by the receiving side from the raw message:
@@ -55,7 +55,7 @@ impl MxDelivererImpl {
     /// - Returns Ok when all pending recipients delivered, Err otherwise.
     pub async fn deliver_via_mx(
         &self,
-        dkim_signer: &Option<Arc<dyn MessageSigner>>,
+        outbound: &Arc<dyn OutboundTransform>,
         from_addr: &Address,
         recipients: &[Address],
         header_to: &[Address],
@@ -90,7 +90,7 @@ impl MxDelivererImpl {
 
         // Build message once (all recipients share same body/headers)
         let raw_to_send = build_mx_message(
-            dkim_signer,
+            outbound,
             from_addr,
             header_to,
             header_cc,
@@ -115,7 +115,6 @@ impl MxDelivererImpl {
                     &envelope,
                     &raw_to_send,
                     from_addr,
-                    dkim_signer,
                     record,
                 )
                 .await;
@@ -146,7 +145,6 @@ impl MxDelivererImpl {
         envelope: &lettre::address::Envelope,
         raw_to_send: &[u8],
         _from_addr: &Address,
-        _dkim_signer: &Option<Arc<dyn MessageSigner>>,
         _record: &EmailRecord,
     ) -> bool {
         // Resolve MX
@@ -199,9 +197,9 @@ impl MxDelivererImpl {
     }
 }
 
-/// Build a signed MIME message for MX delivery (shared across domains).
+/// Build a transformed MIME message for MX delivery (shared across domains).
 async fn build_mx_message(
-    dkim_signer: &Option<Arc<dyn MessageSigner>>,
+    outbound: &Arc<dyn OutboundTransform>,
     from_addr: &Address,
     header_to: &[Address],
     header_cc: &[Address],
@@ -268,10 +266,7 @@ async fn build_mx_message(
         .multipart(email_body.clone())
         .map_err(|e| AppError::Smtp(format!("build MIME: {}", e)))?;
     let raw = email.formatted();
-    let raw_to_send = match dkim_signer {
-        Some(signer) => signer.apply_sign(&raw, &record.id).await,
-        None => std::borrow::Cow::Borrowed(raw.as_slice()),
-    };
+    let raw_to_send = outbound.transform_or_passthrough(&raw, &record.id).await;
     Ok(raw_to_send.into_owned())
 }
 

@@ -18,7 +18,7 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::smtp::mime::{build_with_attachments, parse_address};
 use crate::core::smtp::mx_deliverer::MxDelivererImpl;
 use crate::core::smtp::transport::{build_transport, SmtpTransportMode};
-use crate::core::strategy::MessageSigner;
+use crate::core::strategy::OutboundTransform;
 
 // ── SmtpRelay ─────────────────────────────────────────────────────
 
@@ -26,7 +26,7 @@ use crate::core::strategy::MessageSigner;
 pub struct SmtpRelay {
     transport: SmtpTransportMode,
     email_factory: Arc<EmailFactory>,
-    dkim_signer: Option<Arc<dyn MessageSigner>>,
+    outbound: Arc<dyn OutboundTransform>,
     /// Fixed system auto-reply sender (postman@{gateway domain}). The system
     /// sender is never a deliverable mailbox — if it ever appears as a
     /// recipient (e.g. a reply-all to a welcome mail), it is excluded from
@@ -61,7 +61,7 @@ impl SmtpRelay {
         config: &RelayConfig,
         email_factory: Arc<EmailFactory>,
         hostname: Option<&str>,
-        dkim_signer: Option<Arc<dyn MessageSigner>>,
+        outbound: Arc<dyn OutboundTransform>,
         dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
     ) -> AppResult<Self> {
         let has_relay = config
@@ -84,7 +84,7 @@ impl SmtpRelay {
         Ok(SmtpRelay {
             transport,
             email_factory,
-            dkim_signer,
+            outbound,
             system_sender: format!("postman@{}", hostname.unwrap_or("amail-relay")),
         })
     }
@@ -170,7 +170,7 @@ impl SmtpRelay {
             SmtpTransportMode::DirectMx(deliverer) => {
                 deliverer
                     .deliver_via_mx(
-                        &self.dkim_signer,
+                        &self.outbound,
                         &from_addr,
                         &external,
                         &header_to,
@@ -306,10 +306,10 @@ impl SmtpRelay {
             .multipart(email_body.clone())
             .map_err(|e| AppError::Smtp(format!("failed to build MIME message: {}", e)))?;
         let raw = email.formatted();
-        let raw_to_send = match &self.dkim_signer {
-            Some(signer) => signer.apply_sign(&raw, &record.id).await,
-            None => std::borrow::Cow::Borrowed(raw.as_slice()),
-        };
+        let raw_to_send = self
+            .outbound
+            .transform_or_passthrough(&raw, &record.id)
+            .await;
 
         match transport.send_raw(&envelope_obj, &*raw_to_send).await {
             Ok(response) => {
