@@ -16,7 +16,8 @@ use crate::core::strategy::OutboundTransform;
 /// Custom headers that must be forwarded verbatim onto outbound SMTP mail.
 /// These are consumed by the receiving side from the raw message:
 ///   - X-AIMail-Agent: agent platform/version identity (agent-side tools)
-///     X-Agentmail-Agent: 旧名, 过渡保留(agent 工具升级前仍在发)
+///     X-Agentmail-Agent: legacy name, kept for the transition (agent tools
+///     may still send it until upgraded)
 ///   - X-Board-Members:  board member set for cross-gateway whitelist sync
 ///   - X-AIMail-AutoReply: system-generated auto-reply marker
 /// Everything else in the record headers is internal (webhook-only) and

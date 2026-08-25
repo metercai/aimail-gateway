@@ -371,7 +371,7 @@ pub async fn send_email_core(
         && !merged_headers.contains_key("message-id")
         && !merged_headers.contains_key("message_id")
     {
-        // 域解析链(精确 → 宽泛)见 resolve_fallback_domain()
+        // Domain resolution chain (specific → general): see resolve_fallback_domain()
         let domain = resolve_fallback_domain(
             sender,
             state.config.smtp.hostname.as_deref(),
@@ -759,7 +759,15 @@ pub async fn send_email_core(
                 )
             })?;
 
-        let _ = state.trigger_tx.try_send(new_id.clone());
+        if let Err(e) = state.trigger_tx.try_send(new_id.clone()) {
+            state.metrics.inc_trigger_dropped();
+            warn!(
+                operation = "dispatch_trigger_failed",
+                error = %e,
+                email_id = %new_id,
+                "Failed to trigger pong-redirected dispatch; will be picked up by periodic sweep"
+            );
+        }
         return Ok((
             StatusCode::OK,
             Json(SendEmailResponse {
@@ -840,6 +848,7 @@ pub async fn send_email_core(
 
                 // Trigger immediate outbound dispatch via async channel
                 if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
                     warn!(
                         operation = "dispatch_trigger_failed",
                         error = %e,
@@ -1018,13 +1027,15 @@ pub async fn send_email_core(
 
 /// Resolve the domain used when auto-generating a missing Message-ID.
 ///
-/// 域解析链(精确 → 宽泛):
-///   ① sender 域 — = API key email 的域(调用前已精确匹配, 权威且与发件人一致)。
-///      共享 gateway 部署下 ② 是 relay 域, sender 域可让 Message-ID 与发件人域
-///      保持一致(仅影响未自带 Message-ID 的兜底调用方)。
-///   ② smtp.hostname — 必填(validate 缺失直接报错)
-///   ③ http.hostname — 可选
-///   ④ "amail.local" — 死回退, 因 ② 必填实际不可达
+/// Domain resolution chain (most specific → most general):
+///   ① sender domain — the API key email's domain (exact-matched before this
+///      call; authoritative, and keeps the Message-ID domain consistent with
+///      the sender). In a shared-gateway deployment ② is the relay domain, so
+///      this lets the Message-ID match the sender's domain (only affects
+///      fallback callers that don't set their own Message-ID).
+///   ② smtp.hostname — required (validation fails if missing)
+///   ③ http.hostname — optional
+///   ④ "amail.local" — dead fallback, unreachable in practice since ② is required
 fn resolve_fallback_domain(
     sender: &str,
     smtp_hostname: Option<&str>,
@@ -1209,12 +1220,12 @@ mod tests {
 
     #[test]
     fn fallback_domain_prefers_sender_domain() {
-        // ① sender 域优先于 smtp/http hostname
+        // ① sender domain preferred over smtp/http hostname
         assert_eq!(
             resolve_fallback_domain("alice@agent.com", Some("relay.example"), Some("http.example")),
             "agent.com"
         );
-        // shared-domain persona (2-dot local) 同样取其域
+        // shared-domain persona (2-dot local) also yields its domain
         assert_eq!(
             resolve_fallback_domain("persona.profile.system@shared.example", Some("relay.example"), None),
             "shared.example"
@@ -1223,16 +1234,16 @@ mod tests {
 
     #[test]
     fn fallback_domain_without_sender_uses_hostname_chain() {
-        // 无 sender 域 → ② smtp.hostname
+        // no sender domain → ② smtp.hostname
         assert_eq!(
             resolve_fallback_domain("", Some("relay.example"), Some("http.example")),
             "relay.example"
         );
-        // ② 缺 → ③ http.hostname
+        // ② missing → ③ http.hostname
         assert_eq!(resolve_fallback_domain("", None, Some("http.example")), "http.example");
-        // ③ 缺 → ④ amail.local
+        // ③ missing → ④ amail.local
         assert_eq!(resolve_fallback_domain("", None, None), "amail.local");
-        // sender 带 @ 但域为空 → 回退 hostname 链
+        // sender has @ but empty domain → falls back to hostname chain
         assert_eq!(resolve_fallback_domain("alice@", Some("relay.example"), None), "relay.example");
     }
 }

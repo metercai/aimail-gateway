@@ -1473,7 +1473,7 @@ impl Database {
             if let Some(ref domains) = domain_filter {
                 if !domains.is_empty() {
                     let mut conditions: Vec<String> = Vec::new();
-                    for d in domains.iter() {
+                    for _ in domains.iter() {
                         // Parameterized LIKE: value is bound, never interpolated
                         // (AUDIT-1 P1-1: raw format! allowed SQL injection via
                         // malicious domain strings from authenticated clients).

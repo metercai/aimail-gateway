@@ -271,6 +271,7 @@ pub async fn send_welcome(
                 );
                 created_ids.push(record.id.clone());
                 if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
                     tracing::warn!(
                         operation = "welcome_dispatch_trigger_failed",
                         error = %e,
@@ -353,6 +354,17 @@ pub async fn send_welcome(
                     "Welcome mail record created for internal delivery"
                 );
                 created_ids.push(record.id.clone());
+                // Trigger immediate webhook delivery (CAS in the scheduler
+                // guards against double delivery with the periodic sweep).
+                if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
+                    tracing::warn!(
+                        operation = "welcome_dispatch_trigger_failed",
+                        error = %e,
+                        email_id = %record.id,
+                        "Failed to trigger inbound delivery for welcome record"
+                    );
+                }
             }
             Err(e) => {
                 return Err((

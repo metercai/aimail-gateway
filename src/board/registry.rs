@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::RwLock;
 
 use super::db;
@@ -120,11 +119,6 @@ impl std::fmt::Debug for BoardRegistry {
             .field("boards", &self.entries.read().unwrap().len())
             .finish()
     }
-}
-
-/// Convenience for components that hold an `Arc<BoardRegistry>`.
-pub fn shared() -> Arc<BoardRegistry> {
-    Arc::new(BoardRegistry::new())
 }
 
 #[cfg(test)]
