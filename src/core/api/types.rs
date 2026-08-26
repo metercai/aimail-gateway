@@ -303,22 +303,6 @@ impl From<WhitelistRecord> for WhitelistResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ActivateAddressRequest {
-    pub code: String,
-    pub email_address: String,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ActivateAddressResponse {
-    pub status: String,
-    pub raw_key: String,
-    pub email_address: String,
-    pub system_id: String,
-    pub scopes: Vec<String>,
-}
-
 // ── Agent State ────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

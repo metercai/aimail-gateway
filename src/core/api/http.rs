@@ -39,6 +39,7 @@ pub fn create_router(
     domain_handler: Option<axum::routing::MethodRouter<HttpState>>,
     list_domain_handler: Option<axum::routing::MethodRouter<HttpState>>,
     send_handler: Option<axum::routing::MethodRouter<HttpState>>,
+    whitelist_handler: Option<axum::routing::MethodRouter<HttpState>>,
 ) -> Router {
     // Health check: no IP restriction — open access
     let health = Router::new()
@@ -106,7 +107,7 @@ pub fn create_router(
         .route("/api/v1/contacts/:address", get(get_contact_profile))
         .route("/api/v1/contacts", get(get_contacts_by_name))
         // Admin: whitelist CRUD
-        .route("/api/v1/whitelists", post(create_whitelist))
+        .route("/api/v1/whitelists", post(whitelist_handler.unwrap_or_else(|| post(create_whitelist))))
         .route("/api/v1/whitelists", get(list_whitelists))
         .route("/api/v1/whitelists/check", get(check_whitelist))
         .route("/api/v1/whitelists/:id", put(update_whitelist))
@@ -1067,7 +1068,7 @@ async fn update_agent_meta(
 
 // ── Whitelist CRUD ──
 
-async fn create_whitelist(
+pub async fn create_whitelist(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
     Json(req): Json<CreateWhitelistRequest>,

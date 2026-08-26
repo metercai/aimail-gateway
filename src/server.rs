@@ -127,7 +127,7 @@ impl Server {
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();
-        let router = create_router(http_state, router_hook, None, None, None);
+        let router = create_router(http_state, router_hook, None, None, None, None);
 
         let retry_handle = amail_base::core::server::spawn_retry_worker(
             &http_state_for_worker,
