@@ -49,7 +49,22 @@ fn resolve_sender(record: &EmailRecord) -> AppResult<Address> {
             }
         }
     }
-    parse_address(&record.sender)
+    // record.sender may itself be display-name form — "Name <addr>" — e.g.
+    // board init notifications use the board short id as display name.
+    // lettre's Address::parse rejects that (Invalid email user), so extract
+    // the inner address when present; a bare address parses as-is.
+    let sender = record.sender.trim();
+    if let Some(pos) = sender.rfind('<') {
+        if let Some(end) = sender.rfind('>') {
+            if pos + 1 < end {
+                let email = sender[pos + 1..end].trim();
+                if !email.is_empty() && email.contains('@') {
+                    return parse_address(email);
+                }
+            }
+        }
+    }
+    parse_address(sender)
 }
 
 impl SmtpRelay {
@@ -247,6 +262,20 @@ impl SmtpRelay {
                     } else {
                         None
                     }
+                })
+                .or_else(|| {
+                    // No From header (or no display name in it): fall back to a
+                    // "Name <addr>" form stored in record.sender, so display
+                    // names survive even when only the sender field carries it.
+                    let s = record.sender.trim();
+                    s.find('<').and_then(|pos| {
+                        let n = s[..pos].trim().to_string();
+                        if n.is_empty() {
+                            None
+                        } else {
+                            Some(n)
+                        }
+                    })
                 });
 
         let mut builder = Message::builder()

@@ -901,7 +901,7 @@ impl Database {
         );
         self.call(move |conn| {
             let changes = conn.execute(
-                "UPDATE emails SET endpoints = json_set(endpoints, '$.\\\"' || ?2 || '\\\".status', ?3) WHERE id = ?1",
+                "UPDATE emails SET endpoints = json_set(endpoints, '$.\"' || ?2 || '\".status', ?3) WHERE id = ?1",
                 params![email_id, domain, new_status],
             )?;
             let updated = changes == 1;

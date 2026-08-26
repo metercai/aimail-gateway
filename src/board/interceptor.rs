@@ -233,6 +233,7 @@ impl InboundInterceptor for A2aInterceptor {
                     return crate::core::strategy::InterceptorDecision::PassThrough;
                 }
 
+                let mut board_created = false;
                 if db::get_board(&conn, &board_id).is_err() {
                     // Board admission: check max_active_boards (only after the
                     // owner gate — a rejected command must not consume limit).
@@ -267,6 +268,7 @@ impl InboundInterceptor for A2aInterceptor {
                     };
                     db::create_board(&conn, &board).ok();
                     self.admission_gate.invalidate_board_cache();
+                    board_created = true;
                     // Register the new board address for the RCPT
                     // substantive check — the only creation path in the
                     // whole codebase.
@@ -276,8 +278,19 @@ impl InboundInterceptor for A2aInterceptor {
                         .insert(&board_email, &board_id, board.system_id.clone());
                 }
 
-                // Register members and collect invite info
+                // Register members and collect invite info.
+                // Idempotency: a re-processed [A2A] new (e.g. a webhook
+                // delivery retry re-running this interceptor) must NOT rotate
+                // member tokens — a fresh token would invalidate tokens
+                // members already hold (and invites already sent), breaking
+                // any board API calls in flight. Only genuinely new members
+                // are registered + invited; existing members keep their token.
+                // The board group whitelist below is rebuilt from the FULL
+                // member set (existing + new) because replace_board_members
+                // is a full replacement — omitting existing members would drop
+                // them from the whitelist on re-processing.
                 let mut member_invites: Vec<(String, String)> = Vec::new();
+                let mut all_member_emails: Vec<String> = Vec::new();
                 if let Some(members) = members {
                     for m in members {
                         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
@@ -299,19 +312,28 @@ impl InboundInterceptor for A2aInterceptor {
                             .and_then(|v| v.as_str())
                             .unwrap_or(email);
                         if !email.is_empty() {
-                            let token = db::generate_board_token();
-                            let member = Member {
-                                email: email.to_string(),
-                                role: role.to_string(),
-                                display_name: display.to_string(),
-                                board_id: board_id.clone(),
-                                board_token: Some(token.clone()),
-                                joined_at: Some(chrono::Utc::now().to_rfc3339()),
-                                domains: None,
-                                capability_snapshot: None,
-                            };
-                            db::add_member(&conn, &member).ok();
-                            member_invites.push((email.to_string(), token));
+                            all_member_emails.push(email.to_string());
+                            match db::get_member(&conn, &board_id, email) {
+                                Ok(Some(_existing)) => {
+                                    // Re-processed: already registered. Keep the
+                                    // existing token — no rotation, no re-invite.
+                                }
+                                _ => {
+                                    let token = db::generate_board_token();
+                                    let member = Member {
+                                        email: email.to_string(),
+                                        role: role.to_string(),
+                                        display_name: display.to_string(),
+                                        board_id: board_id.clone(),
+                                        board_token: Some(token.clone()),
+                                        joined_at: Some(chrono::Utc::now().to_rfc3339()),
+                                        domains: None,
+                                        capability_snapshot: None,
+                                    };
+                                    db::add_member(&conn, &member).ok();
+                                    member_invites.push((email.to_string(), token));
+                                }
+                            }
                         }
                     }
                 }
@@ -320,15 +342,11 @@ impl InboundInterceptor for A2aInterceptor {
                 // SMTP/HTTP whitelist checks; cross-gateway members are
                 // learnt from invite notifications (X-Board-Members header,
                 // receiver.rs) — no manual per-member whitelisting needed.
-                let all_members: Vec<String> = member_invites
-                    .iter()
-                    .map(|(email, _)| email.clone())
-                    .collect();
                 let _ = self
                     .email_factory
                     .env_factory
                     .db
-                    .replace_board_members(&board_email, &all_members)
+                    .replace_board_members(&board_email, &all_member_emails)
                     .await;
 
                 // Seed default role_permissions
@@ -357,8 +375,13 @@ impl InboundInterceptor for A2aInterceptor {
                     tracing::warn!("[a2a_board] [create] role_permissions seed failed: {:?}", e);
                 }
 
-                // Send team initialization notification to all members
-                {
+                // Send team initialization notification to all members.
+                // Only on the path that actually created the board — a
+                // re-processed [A2A] new must not re-notify members who
+                // already got their invite (duplicate notify spam, and the
+                // notify From is the board address which external gateways
+                // may reject; one notification per board, period).
+                if board_created {
                     let members_list: Vec<String> = members
                         .map(|arr| {
                             arr.iter()

@@ -1726,4 +1726,53 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "one row per (system_id, domain_addr, value)");
     }
+
+    #[tokio::test]
+    async fn endpoint_status_update_targets_existing_keys() {
+        // Regression: a broken json_set path (`$.\"dom\".status` containing a
+        // literal backslash) matched no key and instead created a garbage
+        // key — the original endpoint stayed "pending" forever, so
+        // check_all_endpoints_completed never returned true and webhook
+        // delivery was retried indefinitely (re-running interceptors,
+        // re-creating boards, rotating member tokens).
+        let db = temp_db();
+        let endpoints = r#"{"orch@y.com":{"url":"http://a","status":"pending"},"ver@y.com":{"url":"http://b","status":"pending"}}"#;
+        db.insert_email(
+            "e1", "sys1", "outbound", "s@x.com", "r@y.com",
+            "subj", "body", Some(endpoints), None, None, 3,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !db.check_all_endpoints_completed("e1").await.unwrap(),
+            "both pending → not all completed"
+        );
+
+        assert!(
+            db.update_email_endpoint_status("e1", "orch@y.com", "success").await.unwrap(),
+            "known endpoint key must match"
+        );
+        assert!(
+            !db.check_all_endpoints_completed("e1").await.unwrap(),
+            "one endpoint still pending → not all completed"
+        );
+
+        assert!(db.update_email_endpoint_status("e1", "ver@y.com", "success").await.unwrap());
+        assert!(
+            db.check_all_endpoints_completed("e1").await.unwrap(),
+            "all endpoints success → completed"
+        );
+
+        // No garbage key: the endpoints column must contain exactly the two
+        // original domains (the old bug created a `\"orch@y.com` key and left
+        // the real ones pending).
+        let rec = db.get_email("e1").await.unwrap().unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
+        let obj = v.as_object().expect("endpoints is a JSON object");
+        assert_eq!(obj.len(), 2, "no garbage keys in endpoints JSON");
+        assert!(obj.contains_key("orch@y.com"));
+        assert!(obj.contains_key("ver@y.com"));
+    }
 }
