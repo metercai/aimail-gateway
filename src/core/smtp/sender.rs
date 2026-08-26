@@ -358,7 +358,11 @@ impl SmtpRelay {
                 }
                 Ok(None) => external.push(addr),
                 Err(e) => {
-                    warn!(operation="loopback_db_error", recipient = %r, error = %e, "Database error during loopback lookup, skipping")
+                    // Fail closed: a DB error here must not silently drop
+                    // external recipients — propagate so delivery is retried
+                    // instead of losing mail.
+                    warn!(operation="loopback_db_error", recipient = %r, error = %e, "Database error during loopback lookup — failing closed");
+                    return Err(e);
                 }
             }
         }

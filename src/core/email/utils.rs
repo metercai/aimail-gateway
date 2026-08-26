@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
@@ -40,6 +39,14 @@ pub fn strip_persona(address: &str) -> (String, String) {
         }
         _ => (address.to_string(), String::new()),
     }
+}
+
+/// Detect if text contains CJK characters (unified ideographs + CJK
+/// punctuation + fullwidth forms). Same ranges as the advanced-edition
+/// notification templates; shared here so both base and advanced can reuse it.
+pub fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3000}'..='\u{303f}' | '\u{ff00}'..='\u{ffef}'))
 }
 
 /// Check if an IP address is within any of the allowed CIDRs.
@@ -159,17 +166,6 @@ pub fn html_to_markdown(html: &str) -> String {
         .to_string();
 
     result.trim().to_string()
-}
-
-/// Parse email headers into a HashMap.
-pub fn parse_headers(raw: &str) -> HashMap<String, String> {
-    let mut headers = HashMap::new();
-    for line in raw.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            headers.insert(key.trim().to_lowercase(), value.trim().to_string());
-        }
-    }
-    headers
 }
 
 /// Convert Markdown to HTML: headers, bold, italic, links, code, lists, paragraphs.

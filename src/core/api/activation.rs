@@ -61,18 +61,27 @@ pub async fn generate_activation_codes(
     Ok(codes)
 }
 
-/// Redeem an address activation code → creates API key.
+/// Redeem an address activation code → creates an agent-scope API key.
+///
+/// The endpoint is unauthenticated (the code is the only credential), so
+/// caller-supplied scopes are ignored and the bound address is enforced.
 pub async fn activate_address_code(
     db: &crate::core::storage::Database,
     code: &str,
     email_address: &str,
-    scopes: &[String],
     factory: &crate::core::factory::EnvFactory,
 ) -> crate::core::errors::AppResult<(String, i64)> {
     let hash = crate::core::api::auth::sha256_hex(code);
-    let (system_id, _) = db.lookup_activation_code(&hash).await?.ok_or_else(|| {
+    let (system_id, bound_email) = db.lookup_activation_code(&hash).await?.ok_or_else(|| {
         crate::core::errors::AppError::Internal("invalid or expired activation code".into())
     })?;
+    // Codes generated for a specific address (register_address) are bound to it.
+    // Batch codes (platform/system) carry an empty binding and accept any address.
+    if !bound_email.is_empty() && !email_address.eq_ignore_ascii_case(&bound_email) {
+        return Err(crate::core::errors::AppError::Forbidden(
+            "activation code is bound to a different address".into(),
+        ));
+    }
 
     let (raw_key, key_hash, key_prefix) = {
         use rand::Rng;
@@ -84,11 +93,8 @@ pub async fn activate_address_code(
         (raw_key, hash, prefix)
     };
 
-    let actual_scopes: Vec<String> = if scopes.is_empty() {
-        vec!["agent".to_string()]
-    } else {
-        scopes.to_vec()
-    };
+    // Address activation codes always produce an agent-scope key.
+    let actual_scopes: Vec<String> = vec!["agent".to_string()];
 
     let record = factory
         .create_api_key(
@@ -116,7 +122,11 @@ const ACTIVATION_MAX_FAILURES: u32 = 10;
 const ACTIVATION_BLOCK_SECS: u64 = 300;
 
 fn check_activation_limit(ip: IpAddr) -> bool {
-    let map = ACTIVATION_ATTEMPTS.lock().unwrap();
+    let mut map = ACTIVATION_ATTEMPTS.lock().unwrap();
+    // Prune entries whose block window has fully elapsed. Without this, an IP
+    // that accumulates failures and later cools off would keep its stale
+    // (count, since) entry forever (unbounded map growth).
+    map.retain(|_, (_, since)| since.elapsed() < Duration::from_secs(ACTIVATION_BLOCK_SECS));
     if let Some((count, since)) = map.get(&ip) {
         if *count >= ACTIVATION_MAX_FAILURES
             && since.elapsed() < Duration::from_secs(ACTIVATION_BLOCK_SECS)
@@ -262,16 +272,6 @@ pub async fn activate_address_handler(
         .get("email_address")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let scopes: Vec<String> = body
-        .get("scopes")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
     let email_domain = email.rsplit('@').next().unwrap_or("");
     if !email_domain.is_empty() {
         // Domain-anchor lookup mirrors register_address: non-shared keys
@@ -329,7 +329,6 @@ pub async fn activate_address_handler(
         &state.factories.email.env_factory.db,
         code,
         email,
-        &scopes,
         &state.factories.email.env_factory,
     )
     .await
@@ -337,6 +336,7 @@ pub async fn activate_address_handler(
         record_activation_failure(ip);
         let code = match e.to_string().as_str() {
             s if s.contains("expired") => StatusCode::GONE,
+            s if s.contains("bound to a different address") => StatusCode::FORBIDDEN,
             s if s.contains("invalid") => StatusCode::FORBIDDEN,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -355,4 +355,101 @@ pub async fn activate_address_handler(
         "status": "activated", "raw_key": raw_key, "api_key_id": api_key_id, "email_address": email,
     }));
     Ok((StatusCode::OK, body))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::strategy::BaseSystemStore;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_env_factory() -> (crate::core::storage::Database, crate::core::factory::EnvFactory) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("amailgw-act-test-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        db.init_global();
+        let factory = crate::core::factory::EnvFactory::new(
+            std::sync::Arc::new(db.clone()),
+            std::sync::Arc::new(BaseSystemStore),
+        );
+        (db, factory)
+    }
+
+    async fn insert_code(db: &crate::core::storage::Database, code: &str, email: &str) {
+        let hash = crate::core::api::auth::sha256_hex(code);
+        db.insert_activation_code(&hash, code, "address", "sys-test", "test.com", email, None)
+            .await
+            .unwrap();
+    }
+
+    // P1-1: activation codes must never yield non-agent scopes.
+    #[tokio::test]
+    async fn activate_code_produces_agent_scope_key() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0001", "alice@test.com").await;
+
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0001", "alice@test.com", &factory)
+            .await
+            .expect("activation must succeed");
+
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .expect("key must exist");
+        assert_eq!(rec.scopes, vec!["agent".to_string()]);
+        assert_eq!(rec.category, "agent");
+        assert_eq!(rec.email_address, "alice@test.com");
+    }
+
+    // P1-1: a code bound to one address cannot be activated for another.
+    #[tokio::test]
+    async fn activate_code_rejects_unbound_address() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0002", "alice@test.com").await;
+
+        let err = activate_address_code(&db, "addr-test-0002", "bob@test.com", &factory)
+            .await
+            .expect_err("bound code must reject a different address");
+        assert!(err.to_string().contains("bound to a different address"));
+
+        // Case-insensitive match on the bound address still works.
+        let (raw_key, _) =
+            activate_address_code(&db, "addr-test-0002", "Alice@Test.COM", &factory)
+                .await
+                .expect("case-insensitive bound match must succeed");
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.email_address, "Alice@Test.COM");
+    }
+
+    // P1-1: batch codes (empty binding) remain usable with any address.
+    #[tokio::test]
+    async fn activate_code_empty_binding_accepts_any_address() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0003", "").await;
+
+        let (raw_key, _) =
+            activate_address_code(&db, "addr-test-0003", "carol@test.com", &factory)
+                .await
+                .expect("unbound batch code must accept any address");
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.scopes, vec!["agent".to_string()]);
+    }
 }

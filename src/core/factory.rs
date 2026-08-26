@@ -159,8 +159,10 @@ impl EnvFactory {
         self.db.list_system_domains(&system_id).await
     }
 
-    /// Update a domain's webhook config, active flag, manager address, agent signature, or agent persona.
-    /// For email-address domains, also syncs to domain_addr_meta.
+    /// Update a domain's webhook config or active flag.
+    /// Does not touch agent meta (domain_addr_meta): meta lifecycle is owned
+    /// by create_domain (upsert manager) and delete_domain (cleanup). An update
+    /// must not wipe manager_address / agent_signature / agent_persona.
     pub async fn update_domain(
         &self,
         id: &str,
@@ -168,20 +170,7 @@ impl EnvFactory {
         webhook_secret: Option<&str>,
         is_active: Option<bool>,
     ) -> AppResult<Option<SystemDomainRecord>> {
-        let existing = self.db.get_system_domain(id).await?;
-        let result = self
-            .db
-            .update_system_domain(id, webhook_url, webhook_secret, is_active)
-            .await?;
-        if let Some(ref record) = existing {
-            if record.domain.contains('@') {
-                let _ = self
-                    .db
-                    .upsert_domain_addr_meta(&record.domain, &record.system_id, None, None, None)
-                    .await;
-            }
-        }
-        Ok(result)
+        self.db.update_system_domain(id, webhook_url, webhook_secret, is_active).await
     }
 
     /// Delete a domain registration.
@@ -582,5 +571,63 @@ impl EnvFactory {
         }
 
         serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::strategy::BaseSystemStore;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_factory() -> (Database, EnvFactory) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("amailgw-factory-test-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        db.init_global();
+        let factory = EnvFactory::new(Arc::new(db.clone()), Arc::new(BaseSystemStore));
+        (db, factory)
+    }
+
+    // P1-2: updating a domain's webhook config must not wipe agent meta
+    // (manager_address / agent_signature / agent_persona).
+    #[tokio::test]
+    async fn update_domain_does_not_wipe_agent_meta() {
+        let (_db, factory) = temp_factory();
+        let addr = "agent@test.com";
+
+        // Create an address-type domain with manager, then set signature + persona.
+        factory
+            .create_domain("1", "sys1", addr, Some("http://hook"), None, Some("mgr@test.com"))
+            .await
+            .unwrap();
+        factory
+            .upsert_domain_addr_meta(addr, "sys1", Some("mgr@test.com"), Some("sig text"), Some("assistant"))
+            .await
+            .unwrap();
+
+        // Update webhook config only.
+        let updated = factory
+            .update_domain("1", Some("http://newhook"), None, None)
+            .await
+            .unwrap()
+            .expect("record must exist");
+        assert_eq!(
+            updated.webhook_url.as_deref(),
+            Some("http://newhook"),
+            "webhook_url update must apply"
+        );
+
+        // Meta must be untouched.
+        let meta = factory.resolve_domain_addr_meta(addr).await.unwrap().unwrap();
+        assert_eq!(meta.manager_address, "mgr@test.com", "manager must survive update");
+        assert_eq!(meta.agent_signature, "sig text", "signature must survive update");
+        assert_eq!(meta.agent_persona, "assistant", "persona must survive update");
     }
 }

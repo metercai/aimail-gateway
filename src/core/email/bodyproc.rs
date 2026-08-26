@@ -374,7 +374,10 @@ fn is_disclaimer_continuation(line: &str) -> bool {
 // ═══════════════════════════════════════════════════════════════
 
 /// Assemble layers into a single markdown body with quote markers.
-fn assemble_layers(layers: &[Layer]) -> String {
+/// Labels adapt to the body's language (`cn`): Chinese bodies get
+/// Chinese labels, everything else English — same has_cjk convention as
+/// the advanced-edition notification templates.
+fn assemble_layers(layers: &[Layer], cn: bool) -> String {
     if layers.is_empty() {
         return String::new();
     }
@@ -391,16 +394,20 @@ fn assemble_layers(layers: &[Layer]) -> String {
             }
             // Signature
             if let Some(ref sig) = layer.signature {
-                parts.push(format!("---\n\n**发件人签名:** {}", sig.raw));
+                let label = if cn { "**发件人签名:**" } else { "**Sender Signature:**" };
+                parts.push(format!("---\n\n{} {}", label, sig.raw));
             }
         } else {
             // Quoted layer: prefix every content line with >
-            let kind_label = match layer.kind {
-                LayerKind::Forward => "转发",
-                LayerKind::Reply => "回复",
-                _ => "引用",
+            let kind_label: &str = match (layer.kind, cn) {
+                (LayerKind::Forward, true) => "**转发邮件:**",
+                (LayerKind::Forward, false) => "**Forwarded Message:**",
+                (LayerKind::Reply, true) => "**回复:**",
+                (LayerKind::Reply, false) => "**Reply:**",
+                (_, true) => "**引用:**",
+                (_, false) => "**Quoted:**",
             };
-            parts.push(format!("---\n**{}邮件:**", kind_label));
+            parts.push(format!("---\n{}", kind_label));
             if !layer.body.is_empty() {
                 let quoted_body = layer
                     .body
@@ -419,9 +426,10 @@ fn assemble_layers(layers: &[Layer]) -> String {
             }
             // Signature
             if let Some(ref sig) = layer.signature {
+                let label = if cn { "**原发件人签名:**" } else { "**Original Sender Signature:**" };
                 parts.push(format!(
-                    "{}> ---\n{}> **原发件人签名:** {}",
-                    prefix, prefix, sig.raw
+                    "{}> ---\n{}> {} {}",
+                    prefix, prefix, label, sig.raw
                 ));
             }
         }
@@ -442,8 +450,9 @@ pub fn process_email_body(body: &str, _is_html: bool) -> ProcessedEmail {
     // Step 1: Decompose into layers (on raw text, handles HTML in per-layer processing)
     let layers = decompose_layers(body);
 
-    // Step 2: Assemble
-    let assembled = assemble_layers(&layers);
+    // Step 2: Assemble (labels adapt to the body's own language)
+    let cn = crate::core::email::utils::has_cjk(body);
+    let assembled = assemble_layers(&layers, cn);
 
     // Step 3: Extract current (outermost) signature
     let current_sig = layers.first().and_then(|l| l.signature.clone());
@@ -566,5 +575,73 @@ mod tests {
             result.layers.len(),
             result.signature.is_some()
         );
+    }
+
+    // ─── P2-6: language-adaptive assembly labels ───
+
+    #[test]
+    fn assemble_labels_follow_body_language() {
+        // English body → English labels.
+        let en = assemble_layers(
+            &[
+                Layer {
+                    body: "My reply".to_string(),
+                    signature: Some(ExtractedSignature {
+                        raw: "Best".to_string(),
+                        separator: "-- ".to_string(),
+                        confidence: 1.0,
+                    }),
+                    kind: LayerKind::Current,
+                    children: vec![],
+                },
+                Layer {
+                    body: "Old message".to_string(),
+                    signature: None,
+                    kind: LayerKind::Reply,
+                    children: vec![],
+                },
+            ],
+            false,
+        );
+        assert!(en.contains("**Sender Signature:**"), "en sig label");
+        assert!(en.contains("**Reply:**"), "en reply label");
+        assert!(!en.contains("发件人签名"), "no CJK in English output");
+
+        // Chinese body → Chinese labels.
+        let cn = assemble_layers(
+            &[
+                Layer {
+                    body: "我的回复".to_string(),
+                    signature: Some(ExtractedSignature {
+                        raw: "此致敬礼".to_string(),
+                        separator: "-- ".to_string(),
+                        confidence: 1.0,
+                    }),
+                    kind: LayerKind::Current,
+                    children: vec![],
+                },
+                Layer {
+                    body: "原始邮件".to_string(),
+                    signature: None,
+                    kind: LayerKind::Reply,
+                    children: vec![],
+                },
+            ],
+            true,
+        );
+        assert!(cn.contains("**发件人签名:**"), "cn sig label");
+        assert!(cn.contains("**回复:**"), "cn reply label");
+        assert!(!cn.contains("Sender Signature"), "no English in CJK output");
+    }
+
+    #[test]
+    fn process_email_body_detects_language_from_content() {
+        // English reply with a signature → English signature label.
+        let en = process_email_body("My reply\n\nOn Mon John wrote:\n> old\n\n-- \nBest", false);
+        assert!(en.body.contains("**Sender Signature:**"), "en: {}", en.body);
+
+        // Chinese reply with a signature → Chinese signature label.
+        let cn = process_email_body("我的回复\n\n在周一 John 写道：\n> 旧内容\n\n-- \n此致敬礼", false);
+        assert!(cn.body.contains("**发件人签名:**"), "cn: {}", cn.body);
     }
 }

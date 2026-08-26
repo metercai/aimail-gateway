@@ -23,8 +23,16 @@ use crate::core::storage::ApiKeyRecord;
 const SIGNATURE_FRESHNESS_MS: u64 = 300_000;
 /// Cap on candidate keys tried per request (bounds the empty-identity path).
 const MAX_SIGNATURE_CANDIDATES: usize = 64;
-/// Cap on the request body buffered for signature verification (30 MB).
+/// Base cap on the request body buffered for signature verification (30 MB).
 const MAX_SIGNATURE_BODY_BYTES: u64 = 30 * 1024 * 1024;
+
+/// Effective body cap: at least the base cap, but never below the configured
+/// max attachment size (+1 MB margin for MIME framing). A configured
+/// attachment limit above the base cap would otherwise 413 at the auth layer
+/// before the upload handler could even see the body.
+pub fn signature_body_cap(configured_attachment_max: u64) -> u64 {
+    configured_attachment_max.max(MAX_SIGNATURE_BODY_BYTES) + 1024 * 1024
+}
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -85,7 +93,7 @@ pub fn compute_api_signature(
 /// constant time. A 5-minute freshness window on the (signed) timestamp
 /// bounds replay. Returns 401 if any header is missing, the signature does
 /// not match, or the timestamp is stale.
-pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next) -> Response {
+pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next, body_cap: u64) -> Response {
     // `X-Api-Identity` is optional: curl drops empty-valued headers on the
     // wire, so a *missing* header must mean the same as an empty one
     // (empty-identity fallback — the signature itself selects the key).
@@ -125,7 +133,7 @@ pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next) -> Re
 
     // Buffer the body so it can be hashed, then forwarded unchanged.
     let (parts, body) = req.into_parts();
-    let bytes = match axum::body::to_bytes(body, MAX_SIGNATURE_BODY_BYTES as usize).await {
+    let bytes = match axum::body::to_bytes(body, body_cap as usize).await {
         Ok(b) => b,
         Err(e) => {
             // Body exceeded the cap or could not be read — reject (fail closed).
@@ -458,6 +466,25 @@ pub fn domain_from_email(address: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── P2-2: signature body cap ───
+
+    #[test]
+    fn signature_body_cap_tracks_attachment_config() {
+        use super::signature_body_cap;
+        use super::MAX_SIGNATURE_BODY_BYTES;
+        // Below base cap → base cap + 1 MB margin.
+        assert_eq!(signature_body_cap(0), MAX_SIGNATURE_BODY_BYTES + 1024 * 1024);
+        assert_eq!(
+            signature_body_cap(20 * 1024 * 1024),
+            MAX_SIGNATURE_BODY_BYTES + 1024 * 1024
+        );
+        // Above base cap → configured value + 1 MB margin.
+        assert_eq!(
+            signature_body_cap(40 * 1024 * 1024),
+            40 * 1024 * 1024 + 1024 * 1024
+        );
+    }
     use crate::core::storage::ApiKeyRecord;
 
     fn key(system_id: &str, email: &str, scopes: &[&str]) -> ApiKeyRecord {

@@ -1,7 +1,6 @@
 //! SMTP receiver — accepts inbound email via the mailin protocol.
 
 use std::net::IpAddr;
-use std::path::Path;
 use std::sync::Arc;
 use tracing::{trace, warn};
 
@@ -115,10 +114,9 @@ impl ConnectionHandler {
         original_filename: &str,
         uuid: &str,
     ) -> AppResult<String> {
-        let extension = Path::new(original_filename)
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("bin");
+        let extension = crate::core::email::factory::AttachmentFactory::extension_for(
+            original_filename,
+        );
         let full = self.attachment_factory.file_path(sender, uuid, extension);
         let relative = full.to_string_lossy().to_string();
 

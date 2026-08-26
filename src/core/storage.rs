@@ -213,6 +213,10 @@ fn migrate_to_encrypted(path: &Path, key: &str) -> AppResult<()> {
 
 const SCHEMA_VERSION: i64 = 1;
 
+/// Retention window (days) for `delivered` pending_deliveries rows, kept as an
+/// audit trail before purge.
+const DELIVERED_AUDIT_RETENTION_DAYS: i64 = 7;
+
 fn check_schema_version(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _schema_version (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);",
@@ -654,8 +658,8 @@ impl Database {
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.call(move |conn| {
             let affected = conn.execute(
-                "UPDATE system_domains SET webhook_url = ?1, webhook_secret = ?2, is_active = ?3, updated_at = ?4 WHERE id = ?5",
-                params![wu, ws, is_active.map(|a| a as i32).unwrap_or(1), now, id],
+                "UPDATE system_domains SET webhook_url = ?1, webhook_secret = ?2, is_active = COALESCE(?3, is_active), updated_at = ?4 WHERE id = ?5",
+                params![wu, ws, is_active.map(|a| a as i32), now, id],
             )?;
             if affected == 0 { return Ok(None); }
             let updated = conn.query_row(
@@ -669,11 +673,19 @@ impl Database {
 
     pub async fn delete_system_domain(&self, id: &str) -> AppResult<()> {
         let id = id.to_string();
+        let id_for_cache = id.clone();
         self.call(move |conn| {
             conn.execute("DELETE FROM system_domains WHERE id = ?1", params![id])?;
             Ok(())
         })
-        .await
+        .await?;
+        // Evict any cached copy of the deleted record. Cache keys are the raw
+        // query strings callers pass in, so match on the stored id rather than
+        // a possibly-differently-cased domain to be format-agnostic.
+        if let Ok(mut cache) = self.domain_cache.write() {
+            cache.retain(|_, (_, rec)| rec.as_ref().map(|r| r.id != id_for_cache).unwrap_or(true));
+        }
+        Ok(())
     }
 
     /// Get the webhook config for a domain.
@@ -1579,11 +1591,12 @@ impl Database {
 
     pub async fn cleanup_deliveries(&self, ttl_hours: u64) -> AppResult<()> {
         let ttl = ttl_hours as i64;
+        let delivered_cutoff = format!("-{} days", DELIVERED_AUDIT_RETENTION_DAYS);
         self.call(move |conn| {
-            // Clean delivered entries older than 7 days (retained for audit)
+            // Clean delivered entries older than the audit retention window
             conn.execute(
-                "DELETE FROM pending_deliveries WHERE status = 'delivered' AND created_at < datetime('now', '-7 days')",
-                [],
+                "DELETE FROM pending_deliveries WHERE status = 'delivered' AND created_at < datetime('now', ?1)",
+                [&delivered_cutoff],
             )?;
             // Clean stale pending entries older than configured TTL
             let ttl_sql = format!("-{} hours", ttl);

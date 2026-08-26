@@ -682,71 +682,6 @@ impl EmailFactory {
         result.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
-    // ── MIME construction for outbound ────────────────────────────────
-
-    /// Build a MIME message for outbound delivery with attachments.
-    pub fn build_with_attachments(
-        body: &str,
-        attachments: &[(Vec<u8>, String, String)],
-    ) -> AppResult<Vec<u8>> {
-        if attachments.is_empty() {
-            return Ok(body.as_bytes().to_vec());
-        }
-
-        let boundary = format!(
-            "----=_Part_{}.{}",
-            uuid::Uuid::new_v4(),
-            chrono::Utc::now().timestamp()
-        );
-        let mut mime = String::new();
-
-        // Write body part
-        mime.push_str(&format!("--{}\r\n", boundary));
-        mime.push_str("Content-Type: text/plain; charset=utf-8\r\n");
-        mime.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
-        mime.push_str(&EmailFactory::base64_encode_wrapped(body.as_bytes()));
-        mime.push_str("\r\n");
-
-        // Write attachment parts
-        for (content, filename, content_type) in attachments {
-            mime.push_str(&format!("--{}\r\n", boundary));
-            mime.push_str(&format!(
-                "Content-Type: {}; name=\"{}\"\r\n",
-                content_type, filename
-            ));
-            mime.push_str(&format!(
-                "Content-Disposition: attachment; filename=\"{}\"\r\n",
-                filename
-            ));
-            mime.push_str("Content-Transfer-Encoding: base64\r\n\r\n");
-            mime.push_str(&EmailFactory::base64_encode_wrapped(content));
-            mime.push_str("\r\n");
-        }
-
-        // Close boundary
-        mime.push_str(&format!("--{}--\r\n", boundary));
-
-        Ok(mime.into_bytes())
-    }
-
-    /// Base64-encode bytes with 76-character line wrapping (RFC 2045).
-    pub fn base64_encode_wrapped(data: &[u8]) -> String {
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-        encoded
-            .chars()
-            .enumerate()
-            .flat_map(|(i, c)| {
-                if i > 0 && i % 76 == 0 {
-                    Some('\n')
-                } else {
-                    None
-                }
-                .into_iter()
-                .chain(std::iter::once(c))
-            })
-            .collect()
-    }
 }
 
 /// Factory for attachment CRUD and permission operations.
@@ -798,6 +733,17 @@ impl AttachmentFactory {
             db,
             attachments_dir,
         }
+    }
+
+    /// Derive the on-disk extension from a filename — the single source of
+    /// truth shared by save (receiver.rs, save_attachment), load
+    /// (deliver.rs) and download (files.rs), so path derivation can never
+    /// drift between the four sites again.
+    pub fn extension_for(filename: &str) -> &str {
+        std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("bin")
     }
 
     // ── Metadata CRUD ─────────────────────────────────────────────────
@@ -947,11 +893,8 @@ impl AttachmentFactory {
             )));
         }
 
-        // Extract extension — uses Path::extension() to match load side
-        let ext = std::path::Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin");
+        // Extract extension via the single derivation entry point.
+        let ext = Self::extension_for(filename);
 
         // Build file path
         let file_path = self.file_path(sender_email, attachment_id, ext);
@@ -1057,5 +1000,24 @@ impl AttachmentFactory {
     /// Check if the attachment size is within the limit.
     pub fn is_size_allowed(config: &StorageConfig, size: usize) -> bool {
         size <= config.attachment_max_size
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // P1-3: extension derivation is the single source of truth shared by
+    // save/load/download. Extensionless filenames must map to "bin".
+    #[test]
+    fn extension_for_handles_missing_and_normal_extensions() {
+        assert_eq!(AttachmentFactory::extension_for("report"), "bin");
+        assert_eq!(AttachmentFactory::extension_for(""), "bin");
+        assert_eq!(AttachmentFactory::extension_for("data.tar.gz"), "gz");
+        assert_eq!(AttachmentFactory::extension_for("photo.PNG"), "PNG");
+        // Dotfiles: ".hidden" has no extension per Path::new.
+        assert_eq!(AttachmentFactory::extension_for(".hidden"), "bin");
     }
 }

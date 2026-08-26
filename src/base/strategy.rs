@@ -66,6 +66,9 @@ pub struct BaseRouterHook(pub crate::core::api::types::HttpState);
 impl RouterHook for BaseRouterHook {
     fn mount(&self, router: axum::Router) -> axum::Router {
         let api_env_factory = self.0.factories.email.env_factory.clone();
+        let body_cap = crate::core::api::auth::signature_body_cap(
+            self.0.config.storage.attachment_max_size as u64,
+        );
         let batch = axum::Router::new()
             .route(
                 "/api/v1/admin/activation-codes/batch",
@@ -73,7 +76,11 @@ impl RouterHook for BaseRouterHook {
             )
             .with_state(self.0.clone())
             .route_layer(axum::middleware::from_fn(move |req, next| {
-                crate::core::api::auth::auth_layer(api_env_factory.clone(), req, next)
+                let ef = api_env_factory.clone();
+                let cap = body_cap;
+                async move {
+                    crate::core::api::auth::auth_layer(ef, req, next, cap).await
+                }
             }));
         router.merge(batch)
     }

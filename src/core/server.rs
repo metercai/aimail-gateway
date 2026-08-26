@@ -315,10 +315,6 @@ pub fn register_stranger_interceptor(http_state: &HttpState) {
             id
         });
 
-    // ── Legacy support: if the bootstrap ID doesn't exist yet but
-    //    there are existing api_keys under "admin", use "admin" once
-    //    then migrate.  One-shot migration.
-
     email_factory
         .env_factory
         .register_interceptor(std::sync::Arc::new(

@@ -30,7 +30,7 @@ use crate::core::api::send::send_email;
 use crate::core::api::welcome::send_welcome;
 use crate::core::api::types::*;
 use crate::core::api::whoami::whoami;
-use crate::core::storage::{ApiKeyRecord, Database};
+use crate::core::storage::{ApiKeyRecord, Database, DomainAddrMetaRecord};
 use crate::core::strategy::RouterHook;
 
 pub fn create_router(
@@ -47,6 +47,12 @@ pub fn create_router(
 
     // API routes: auth layer
     let api_env_factory = state.factories.email.env_factory.clone();
+    // Body cap tracks the configured attachment limit (P2-2): the auth layer
+    // buffers the full body for signature hashing, so it must accept at least
+    // as much as the upload handler will later accept.
+    let body_cap = crate::core::api::auth::signature_body_cap(
+        state.config.storage.attachment_max_size as u64,
+    );
     let api = Router::new()
         // API Key CRUD
         .route("/api/v1/key/rotate", post(rotate_own_key))
@@ -114,7 +120,9 @@ pub fn create_router(
         .route("/api/v1/admin/domains/check", get(check_domain_exists))
         .with_state(state.clone())
         .route_layer(axum::middleware::from_fn(move |req, next| {
-            auth_layer(api_env_factory.clone(), req, next)
+            let ef = api_env_factory.clone();
+            let cap = body_cap;
+            async move { auth_layer(ef, req, next, cap).await }
         }));
 
     let base_router = Router::new()
@@ -668,6 +676,17 @@ async fn register_address(
     }
 }
 
+/// Fill the agent-meta fields (manager_address / agent_signature / agent_persona)
+/// on a domain response from its `domain_addr_meta` row. Bare domains have no
+/// meta row → fields stay empty.
+fn apply_domain_meta(resp: &mut SystemDomainResponse, meta: Option<&DomainAddrMetaRecord>) {
+    if let Some(m) = meta {
+        resp.manager_address = m.manager_address.clone();
+        resp.agent_signature = m.agent_signature.clone();
+        resp.agent_persona = m.agent_persona.clone();
+    }
+}
+
 /// GET /api/v1/admin/systems/:sid/domains — List domains for a system.
 async fn list_system_domains(
     state: axum::extract::State<HttpState>,
@@ -697,7 +716,35 @@ async fn list_system_domains(
         .list_domains_by_system(&tid)
         .await
     {
-        Ok(records) => Ok(Json(records.into_iter().map(|r| r.into()).collect())),
+        Ok(records) => {
+            // Enrich address-type records with their per-agent meta so the
+            // response matches the advanced edition (base previously returned
+            // empty manager_address / agent_signature / agent_persona).
+            let metas = state
+                .factories
+                .email
+                .env_factory
+                .list_domain_addr_meta_by_system(&tid)
+                .await
+                .unwrap_or_default();
+            let meta_by_addr: std::collections::HashMap<&str, &DomainAddrMetaRecord> = metas
+                .iter()
+                .map(|m| (m.email_address.as_str(), m))
+                .collect();
+            let resp = records
+                .into_iter()
+                .map(|r| {
+                    let mut resp: SystemDomainResponse = r.clone().into();
+                    if r.domain.contains('@') {
+                        if let Some(m) = meta_by_addr.get(r.domain.as_str()) {
+                            apply_domain_meta(&mut resp, Some(m));
+                        }
+                    }
+                    resp
+                })
+                .collect();
+            Ok(Json(resp))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -805,7 +852,20 @@ async fn update_system_domain(
         Ok(update_result) => match update_result {
             Some(record) => {
                 info!(operation = "domain_updated", system_domain_id = %id, "System domain updated");
-                Ok(Json(record.into()))
+                let mut resp: SystemDomainResponse = record.clone().into();
+                // Enrich address-type records with their per-agent meta.
+                if record.domain.contains('@') {
+                    if let Ok(Some(meta)) = state
+                        .factories
+                        .email
+                        .env_factory
+                        .resolve_domain_addr_meta(&record.domain)
+                        .await
+                    {
+                        apply_domain_meta(&mut resp, Some(&meta));
+                    }
+                }
+                Ok(Json(resp))
             }
             None => Err((
                 StatusCode::NOT_FOUND,
@@ -2728,5 +2788,54 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r.contains(&"x.com".to_string()));
         assert!(r.contains(&"bob@y.com".to_string()));
+    }
+
+    // ─── P3-8: domain response meta enrichment ───
+
+    fn domain_record(domain: &str) -> crate::core::storage::SystemDomainRecord {
+        crate::core::storage::SystemDomainRecord {
+            id: "d1".to_string(),
+            system_id: "sys1".to_string(),
+            domain: domain.to_string(),
+            webhook_url: None,
+            webhook_secret: None,
+            is_active: true,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        }
+    }
+
+    fn meta_record(email: &str, manager: &str) -> DomainAddrMetaRecord {
+        DomainAddrMetaRecord {
+            email_address: email.to_string(),
+            system_id: "sys1".to_string(),
+            manager_address: manager.to_string(),
+            agent_signature: "sig".to_string(),
+            agent_persona: "persona".to_string(),
+            is_active: true,
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_domain_meta_fills_address_record() {
+        // Address-type record with a meta row → fields filled.
+        let mut resp: SystemDomainResponse = domain_record("agent@x.com").into();
+        assert_eq!(resp.manager_address, "", "baseline must be empty");
+        apply_domain_meta(&mut resp, Some(&meta_record("agent@x.com", "mgr@x.com")));
+        assert_eq!(resp.manager_address, "mgr@x.com");
+        assert_eq!(resp.agent_signature, "sig");
+        assert_eq!(resp.agent_persona, "persona");
+    }
+
+    #[test]
+    fn apply_domain_meta_leaves_bare_domain_empty() {
+        // Bare domain has no meta row → fields stay empty.
+        let mut resp: SystemDomainResponse = domain_record("x.com").into();
+        apply_domain_meta(&mut resp, None);
+        assert_eq!(resp.manager_address, "");
+        assert_eq!(resp.agent_signature, "");
+        assert_eq!(resp.agent_persona, "");
     }
 }

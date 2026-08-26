@@ -192,10 +192,10 @@ pub async fn download_attachment(
         }
     }
 
-    // Compute file path from sender_email and attachment_id
-    // Extension must match the save-side default ("bin" for extensionless
-    // filenames, AUDIT-1 P2-5: download used "dat" → file-not-found 500).
-    let ext = record.filename.rsplit('.').next().unwrap_or("bin");
+    // Compute file path from sender_email and attachment_id.
+    // Extension comes from the single derivation entry point — must match
+    // the save side ("bin" for extensionless filenames).
+    let ext = AttachmentFactory::extension_for(&record.filename);
     let file_path = state
         .factories
         .attachment

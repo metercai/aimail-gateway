@@ -651,13 +651,26 @@ async fn handle_manager_commands(
 
         match &cmd {
             ManagerCommand::PersonaApproval { persona, signature } => {
+                // Omitted sections (empty string) must keep the existing
+                // value — the meta upsert overwrites every column, so passing
+                // an empty string would wipe the stored signature/persona.
+                let sig = if signature.is_empty() {
+                    agent_meta.agent_signature.as_str()
+                } else {
+                    signature.as_str()
+                };
+                let per = if persona.is_empty() {
+                    agent_meta.agent_persona.as_str()
+                } else {
+                    persona.as_str()
+                };
                 if let Err(e) = env_factory
                     .upsert_domain_addr_meta(
                         to_addr,
                         &agent_meta.system_id,
                         Some(&agent_meta.manager_address),
-                        Some(signature),
-                        Some(persona),
+                        Some(sig),
+                        Some(per),
                     )
                     .await
                 {
@@ -719,7 +732,7 @@ fn extract_description_from_body(body: &str) -> Option<String> {
 mod tests {
     use crate::core::config::Config;
     use crate::core::email::utils::sign_payload;
-    use crate::core::email::utils::{html_to_markdown, parse_headers};
+    use crate::core::email::utils::html_to_markdown;
 
     // ─── manager command parsing tests ───
 
@@ -878,32 +891,6 @@ mod tests {
         assert!(md.contains("Line 2"));
     }
 
-    // ─── parse_headers tests ───
-
-    #[test]
-    fn test_parse_headers_basic() {
-        let raw = "Content-Type: text/plain\r\nSubject: Test\r\n";
-        let headers = parse_headers(raw);
-        assert_eq!(headers.get("content-type").unwrap(), "text/plain");
-        assert_eq!(headers.get("subject").unwrap(), "Test");
-    }
-
-    #[test]
-    fn test_parse_headers_empty() {
-        let headers = parse_headers("");
-        assert!(headers.is_empty());
-    }
-
-    #[test]
-    fn test_parse_headers_case_insensitive_keys() {
-        let raw = "Content-Type: multipart/alternative\r\n";
-        let headers = parse_headers(raw);
-        assert_eq!(
-            headers.get("content-type").unwrap(),
-            "multipart/alternative"
-        );
-    }
-
     // ─── sign_payload tests ───
 
     #[test]
@@ -923,5 +910,98 @@ mod tests {
         let (sig1, _) = sign_payload(secret, body);
         let (sig2, _) = sign_payload(secret, body);
         assert_eq!(sig1, sig2);
+    }
+
+    // ─── P2-1: approve persona merge semantics (integration) ───
+
+    use crate::core::email::factory::EmailFactory;
+    use crate::core::email::storage::EmailRecord;
+    use crate::core::factory::EnvFactory;
+    use crate::base::strategy::BaseSystemStore;
+
+    fn approval_env() -> (EnvFactory, EmailFactory) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("amailgw-wb-approval-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        db.init_global();
+        let arc = std::sync::Arc::new(db);
+        let env = EnvFactory::new(arc.clone(), std::sync::Arc::new(BaseSystemStore));
+        let ef = EmailFactory::new(arc, std::path::PathBuf::from("/tmp/amailgw-wb-att"), std::sync::Arc::new(BaseSystemStore));
+        (env, ef)
+    }
+
+    fn approval_record(body: &str) -> EmailRecord {
+        EmailRecord {
+            id: "t1".to_string(),
+            status: "pending".to_string(),
+            system_id: "sys1".to_string(),
+            direction: "inbound".to_string(),
+            sender: "mgr@ext.com".to_string(),
+            recipients: r#"{"to":["agent@test.com"],"cc":[],"rcpt":["agent@test.com"]}"#.to_string(),
+            endpoints: None,
+            subject: "approve persona".to_string(),
+            body: body.to_string(),
+            headers: None,
+            attachments: None,
+            send_count: 0,
+            last_sent_at: String::new(),
+            next_retry_at: None,
+            max_attempts: 3,
+            created_at: String::new(),
+            sender_signature: None,
+        }
+    }
+
+    async fn seed_agent(env: &EnvFactory) {
+        env.create_domain("d1", "sys1", "agent@test.com", Some("http://hook"), None, Some("mgr@ext.com"))
+            .await
+            .unwrap();
+        env.upsert_domain_addr_meta("agent@test.com", "sys1", Some("mgr@ext.com"), Some("old sig"), Some("old persona"))
+            .await
+            .unwrap();
+    }
+
+    // P2-1: persona-only approval must NOT wipe the existing signature.
+    #[tokio::test]
+    async fn persona_approval_only_persona_keeps_signature() {
+        let (env, ef) = approval_env();
+        seed_agent(&env).await;
+        let rec = approval_record("approve persona\npersona: new persona only");
+        assert!(
+            super::handle_manager_commands(&rec, &env, &ef).await,
+            "approval must be consumed"
+        );
+        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        assert_eq!(meta.agent_persona, "new persona only");
+        assert_eq!(meta.agent_signature, "old sig", "signature must be preserved");
+        assert_eq!(meta.manager_address, "mgr@ext.com");
+    }
+
+    // P2-1: signature-only approval must NOT wipe the existing persona.
+    #[tokio::test]
+    async fn persona_approval_only_signature_keeps_persona() {
+        let (env, ef) = approval_env();
+        seed_agent(&env).await;
+        let rec = approval_record("approve persona\nsignature: new sig only");
+        assert!(super::handle_manager_commands(&rec, &env, &ef).await);
+        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        assert_eq!(meta.agent_signature, "new sig only");
+        assert_eq!(meta.agent_persona, "old persona", "persona must be preserved");
+    }
+
+    // P2-1: both sections replace both values.
+    #[tokio::test]
+    async fn persona_approval_both_sections_replaces_both() {
+        let (env, ef) = approval_env();
+        seed_agent(&env).await;
+        let rec = approval_record("approve persona\npersona: p2\nsignature: s2");
+        assert!(super::handle_manager_commands(&rec, &env, &ef).await);
+        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        assert_eq!(meta.agent_persona, "p2");
+        assert_eq!(meta.agent_signature, "s2");
     }
 }

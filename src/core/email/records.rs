@@ -149,14 +149,6 @@ impl EmailRecord {
         self.sender.rsplit('@').next().filter(|d| !d.is_empty())
     }
 
-    /// Return a deterministic hash prefix of the sender for filesystem sharding.
-    pub fn sender_hash_prefix(&self) -> String {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.sender.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    }
-
     // ── Serialisation helpers ────────────────────────────────────────
 
     /// Build a complete JSON payload for webhook delivery.
@@ -259,10 +251,9 @@ impl AttachmentMetaRecord {
     }
 
     /// Return the file extension for this attachment, defaulting to "bin".
+    /// Delegates to the single derivation entry point so save/load/download/
+    /// cleanup all agree on the on-disk extension.
     pub fn file_extension(&self) -> &str {
-        std::path::Path::new(&self.filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin")
+        crate::core::email::factory::AttachmentFactory::extension_for(&self.filename)
     }
 }

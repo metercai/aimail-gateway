@@ -365,8 +365,8 @@ impl Config {
 /// Apply `AIMAILGW_*` environment variable overrides to the config.
 ///
 /// Mapping convention:
-/// - `AIMAILGW_HTTP_ADDR` → `http.addr`
-/// - `AIMAILGW_SMTP_ADDR` → `smtp.addr` (alias: listen_addr)
+/// - `AIMAILGW_HTTP_ADDR` → `http.bind`
+/// - `AIMAILGW_SMTP_ADDR` → `smtp.bind` (alias: listen_addr)
 fn apply_env_overrides(config: &mut Config) {
     // ── Core external resources (bind address, upstream services) ──
     // HTTP

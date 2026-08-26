@@ -71,12 +71,9 @@ pub(crate) async fn load_attachment_data(
         let filename = item.get("filename")?.as_str()?;
         let content_type = item.get("content_type")?.as_str()?;
 
-        // Derive file extension from stored filename — uses Path::extension()
-        // to match the save-side logic (receiver.rs save_attachment).
-        let ext = std::path::Path::new(filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("bin");
+        // Derive file extension via the single derivation entry point
+        // (shared with save-side and download-side).
+        let ext = crate::core::email::factory::AttachmentFactory::extension_for(filename);
 
         let filepath = base_dir.join(format!("{}.{}", attachment_id, ext));
         let fp_display = filepath.clone();

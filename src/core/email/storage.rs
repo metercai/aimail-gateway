@@ -421,39 +421,6 @@ impl Database {
         .await
     }
 
-    pub async fn update_email_status(
-        &self,
-        id: &str,
-        status: &str,
-    ) -> AppResult<Option<EmailRecord>> {
-        let id = id.to_string();
-        let status = status.to_string();
-        self.call(move |conn| {
-            let current = conn
-                .query_row(
-                    &format!("{} WHERE id = ?1", EMAIL_SELECT),
-                    params![id],
-                    email_row,
-                )
-                .optional()?;
-            let mut record = match current {
-                Some(r) => r,
-                None => return Ok(None),
-            };
-            record.status = status.clone();
-            if status == "completed" {
-                record.last_sent_at =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-            }
-            conn.execute(
-                "UPDATE emails SET status = ?1, last_sent_at = ?2 WHERE id = ?3",
-                params![record.status, &record.last_sent_at, record.id],
-            )?;
-            Ok(Some(record))
-        })
-        .await
-    }
-
     /// CAS (Compare-And-Swap) claim: atomically transition status `ready` → `sending`.
     /// Returns `Some(record)` if the claim succeeded, `None` if already consumed by another path.
     /// This prevents concurrent delivery from trigger + interval batch.
