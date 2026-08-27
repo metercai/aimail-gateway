@@ -160,6 +160,22 @@ impl EmailFactory {
         self.db.count_emails_by_status(status).await
     }
 
+    /// Count emails awaiting delivery: `ready` (retryable) + `readying`
+    /// (preparing, about to be trigger-delivered). Used for the pending gauge.
+    pub async fn count_pending_emails(&self) -> AppResult<i64> {
+        self.db.count_pending_emails().await
+    }
+
+    /// Fetch `readying` emails older than `cutoff` (crash orphans for Flow 0).
+    pub async fn get_stuck_readying(&self, cutoff: &str, limit: i32) -> AppResult<Vec<EmailRecord>> {
+        self.db.get_stuck_readying_emails(cutoff, limit).await
+    }
+
+    /// CAS flip a `readying` email to `ready` (crash recovery).
+    pub async fn flip_readying_to_ready(&self, id: &str) -> AppResult<bool> {
+        self.db.flip_readying_to_ready(id).await
+    }
+
     /// Count emails by system.
     pub async fn count_by_system(&self, system_id: &str) -> AppResult<i64> {
         self.db.count_emails_by_system(system_id).await

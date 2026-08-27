@@ -1164,6 +1164,11 @@ impl ConnectionHandler {
                 // Complete + delete the original delivered email (best-effort)
                 let _ = self.email_factory.complete(original_id).await;
                 let _ = self.email_factory.delete(original_id).await;
+                // Trigger first delivery (born `readying`; tick never claims it).
+                if let Err(e) = self.trigger_tx.try_send(rec.id.clone()) {
+                    self.metrics.inc_trigger_dropped();
+                    tracing::warn!(operation="bounce_trigger_dropped", error = %e, mail_id = %rec.id, "Bounce notification trigger dropped; readying sweep will pick it up");
+                }
                 Some(rec.id)
             }
             Err(e) => {

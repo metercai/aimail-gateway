@@ -198,11 +198,13 @@ pub fn spawn_retry_worker(
     let outbound = http_state.extensions.outbound.clone();
     let dns_resolver = http_state.dns_resolver.clone();
     let inflight = crate::core::scheduler::new_inflight_set();
+    let trigger_tx = http_state.trigger_tx.clone();
     tokio::spawn(async move {
         crate::core::scheduler::run_retry_worker_with_trigger(
             email_factory,
             attachment_factory,
             config,
+            trigger_tx,
             trigger_rx,
             metrics,
             cancel,
@@ -322,6 +324,7 @@ pub fn register_stranger_interceptor(http_state: &HttpState) {
                 email_factory.clone(),
                 &bootstrap_id,
                 max_attempts,
+                Some(http_state.trigger_tx.clone()),
             ),
         )
             as std::sync::Arc<dyn crate::core::strategy::InboundInterceptor>);
@@ -340,6 +343,7 @@ pub fn register_board_interceptors(http_state: &HttpState) {
         storage_path,
         &endpoint,
         admission_gate,
+        Some(http_state.trigger_tx.clone()),
     );
 }
 

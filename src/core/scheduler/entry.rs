@@ -22,6 +22,7 @@ pub async fn run_retry_worker_with_trigger(
     email_factory: EmailFactory,
     attachment_factory: AttachmentFactory,
     config: Config,
+    trigger_tx: mpsc::Sender<String>,
     mut trigger_rx: mpsc::Receiver<String>,
     metrics: Metrics,
     cancel: CancellationToken,
@@ -69,6 +70,10 @@ pub async fn run_retry_worker_with_trigger(
 
     let poll_interval = Duration::from_secs(config.retry.poll_interval_secs);
     let batch_size = config.retry.batch_size;
+    // Clone the trigger sender for the tick path: the exhaustion flows
+    // (overlimit auto-replies, retry notifications) insert new `readying`
+    // emails and must wake the scheduler for their first delivery.
+    let trigger_tx = trigger_tx.clone();
 
     info!(operation="scheduler_started",
         poll_interval_secs = config.retry.poll_interval_secs,
@@ -87,10 +92,10 @@ pub async fn run_retry_worker_with_trigger(
         tokio::select! {
             _ = interval.tick() => {
                 tracing::debug!("Scheduler periodic tick");
-                if let Ok(count) = email_factory.count_by_status("ready").await {
+                if let Ok(count) = email_factory.count_pending_emails().await {
                     metrics.set_scheduler_pending_count(count);
                 }
-                process_batch(&email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &metrics, batch_size, &inflight).await;
+                process_batch(&email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &metrics, batch_size, &inflight, &trigger_tx).await;
             }
             Some(mail_uuid) = trigger_rx.recv() => {
                 debug!(operation="scheduler_trigger_wake", %mail_uuid, "Scheduler woken by SMTP receiver trigger");
@@ -111,6 +116,7 @@ pub async fn run_retry_worker_with_trigger(
                 inflight.lock().await.insert(mail_uuid.clone());
                 immediate_forward(
                     &email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &record, &metrics,
+                    Some(&trigger_tx),
                 ).await;
                 // De-register — the email is now completed/retried by immediate_forward
                 inflight.lock().await.remove(&mail_uuid);

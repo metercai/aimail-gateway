@@ -19,6 +19,7 @@ pub struct A2aInterceptor {
     pub storage_path: String,
     pub gateway_url: String,
     pub admission_gate: Arc<dyn AdmissionGate>,
+    pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl A2aInterceptor {
@@ -28,6 +29,7 @@ impl A2aInterceptor {
         storage_path: &str,
         gateway_url: &str,
         admission_gate: Arc<dyn AdmissionGate>,
+        trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Self {
         Self {
             email_factory,
@@ -35,6 +37,7 @@ impl A2aInterceptor {
             storage_path: storage_path.to_string(),
             gateway_url: gateway_url.to_string(),
             admission_gate,
+            trigger_tx,
         }
     }
 
@@ -441,10 +444,11 @@ impl InboundInterceptor for A2aInterceptor {
                         for m in all_members {
                             let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
                             if !email.is_empty() {
+                                let email_id = format!("a2a-init-notify-{}", uuid::Uuid::new_v4());
                                 let _ = self
                                     .email_factory
                                     .create_outbound(
-                                        &format!("a2a-init-notify-{}", uuid::Uuid::new_v4()),
+                                        &email_id,
                                         &orch_system,
                                         &format!("{} <{}>", short_id, board_email),
                                         email,
@@ -456,6 +460,16 @@ impl InboundInterceptor for A2aInterceptor {
                                         3,
                                     )
                                     .await;
+                                // Born `readying`; trigger is the only first-delivery claimant.
+                                if let Some(tx) = &self.trigger_tx {
+                                    if let Err(e) = tx.try_send(email_id) {
+                                        tracing::warn!(
+                                            "[a2a_board] init-notify trigger dropped (channel full): to={} error={} — readying sweep will pick it up",
+                                            email,
+                                            e
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -473,6 +487,7 @@ impl InboundInterceptor for A2aInterceptor {
                     gateway_domain: orch_domain.to_string(),
                     gateway_url: self.gateway_url.clone(),
                     attachments_json: None,
+                    trigger_tx: self.trigger_tx.clone(),
                     tasks: RefCell::new(Vec::new()),
                 };
                 // Group-whitelist header: full list of newly invited members.
@@ -622,6 +637,7 @@ impl InboundInterceptor for A2aInterceptor {
                 gateway_domain: board_domain.to_string(),
                 gateway_url: self.gateway_url.clone(),
                 attachments_json: attachments_json.clone(),
+                trigger_tx: self.trigger_tx.clone(),
                 tasks: RefCell::new(Vec::new()),
             };
 
@@ -982,6 +998,7 @@ pub fn register(
     storage_path: &str,
     gateway_url: &str,
     admission_gate: Arc<dyn AdmissionGate>,
+    trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) {
     use crate::core::strategy::InboundInterceptor;
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
@@ -990,6 +1007,7 @@ pub fn register(
         storage_path,
         gateway_url,
         admission_gate.clone(),
+        trigger_tx,
     ));
     email_factory
         .env_factory

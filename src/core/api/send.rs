@@ -963,6 +963,20 @@ pub async fn send_email_core(
                         }
                     }
                 }
+
+                // Trigger first delivery. Born `readying` — the trigger is the
+                // only first-delivery claimant (the tick never reads
+                // `readying`). Firing after the permission + mail_id loops
+                // guarantees the payload is complete when claimed.
+                if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
+                    warn!(
+                        operation = "dispatch_trigger_failed",
+                        error = %e,
+                        email_id = %record.id,
+                        "Failed to trigger internal dispatch; will be picked up by the readying sweep"
+                    );
+                }
             }
             Err(e) => {
                 return Err((

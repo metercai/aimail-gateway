@@ -374,7 +374,11 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
 
         CREATE TABLE IF NOT EXISTS emails (
             id              TEXT PRIMARY KEY,
-            status          TEXT NOT NULL DEFAULT 'ready',
+            -- Born state is 'readying' (preparing). The app always passes the
+            -- status explicitly via insert_email(); this DEFAULT only matters
+            -- for direct-DB scripts and documents the lifecycle:
+            -- readying → (trigger claim) sending | (recovery flip) ready → sending.
+            status          TEXT NOT NULL DEFAULT 'readying',
             system_id       TEXT NOT NULL,
             direction       TEXT NOT NULL CHECK(direction IN ('inbound', 'outbound')),
             sender          TEXT NOT NULL,
@@ -1774,5 +1778,95 @@ mod tests {
         assert_eq!(obj.len(), 2, "no garbage keys in endpoints JSON");
         assert!(obj.contains_key("orch@y.com"));
         assert!(obj.contains_key("ver@y.com"));
+    }
+
+    // ── readying → ready → sending state machine ────────────────────
+    //
+    // The flake this guards: a tick batch used to see a freshly-inserted
+    // inbound email (born `ready`) before its attachments were saved, and
+    // delivered a payload with an empty attachment list. Now every email is
+    // born `readying` and the tick only ever reads `ready`, so the race is
+    // structurally impossible. These tests pin each invariant down.
+
+    #[tokio::test]
+    async fn born_state_is_readying() {
+        // Invariant 1: every insert lands in `readying`, never `ready`.
+        let db = temp_db();
+        db.insert_email("born1", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        let rec = db.get_email("born1").await.unwrap().unwrap();
+        assert_eq!(rec.status, "readying");
+    }
+
+    #[tokio::test]
+    async fn readying_invisible_to_tick_and_overlimit() {
+        // Invariant 2 (the flake fix): the tick (Flow 2) and the overlimit
+        // fetch (Flow 1) only read `ready`. A born `readying` email is
+        // invisible to both, so a half-prepared payload can never be
+        // delivered early. Once flipped to `ready`, the tick sees it.
+        let db = temp_db();
+        db.insert_email("inv1", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        assert!(db.get_pending_retry_emails(10).await.unwrap().is_empty(),
+            "tick must not see a readying email");
+        assert!(db.get_overlimit_emails(10).await.unwrap().is_empty(),
+            "overlimit fetch must not see a readying email");
+
+        // Flip to ready (what crash recovery / retry fallback do) → visible.
+        assert!(db.flip_readying_to_ready("inv1").await.unwrap());
+        assert_eq!(db.get_pending_retry_emails(10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn claim_ready_accepts_readying_and_ready() {
+        // Invariant 3: the trigger claims from either state via CAS.
+        // `readying` (first delivery) and `ready` (recovery / retry
+        // fallback) are both claimable; a second claim must fail
+        // (single-delivery guarantee).
+        let db = temp_db();
+        db.insert_email("c1", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        let first = db.claim_ready("c1").await.unwrap();
+        assert!(first.is_some(), "trigger must claim a readying email");
+        assert_eq!(first.unwrap().status, "sending");
+        assert!(db.claim_ready("c1").await.unwrap().is_none(),
+            "double claim must fail — single delivery");
+
+        // A `ready` email (retry fallback) is claimable too; `sending` is not.
+        db.insert_email("c2", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.flip_readying_to_ready("c2").await.unwrap();
+        assert!(db.claim_ready("c2").await.unwrap().is_some());
+        assert!(db.claim_ready("c2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn flip_readying_is_cas() {
+        // Invariant 4: the crash-recovery flip is a no-op once a trigger has
+        // already claimed the email (flip-vs-claim race resolves safely).
+        let db = temp_db();
+        db.insert_email("f1", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        assert!(db.claim_ready("f1").await.unwrap().is_some());
+        assert!(!db.flip_readying_to_ready("f1").await.unwrap(),
+            "flip must not resurrect a claimed email");
+    }
+
+    #[tokio::test]
+    async fn ready_retry_relands_in_ready_not_readying() {
+        // Invariant 5: a failed delivery falls back to `ready` (with a
+        // backoff), never back to `readying` — so a retry is always
+        // tick-claimable and can never re-enter the hidden birth state.
+        let db = temp_db();
+        db.insert_email("r1", "sys1", "inbound", "a@x.com",
+            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.claim_ready("r1").await.unwrap(); // trigger → sending
+        let rec = db.update_email_ready_retry("r1", 1, "2099-01-01T00:00:00Z")
+            .await.unwrap().unwrap();
+        assert_eq!(rec.status, "ready");
+        // Past-due retry is visible to the tick.
+        db.update_email_ready_retry("r1", 1, "2000-01-01T00:00:00Z")
+            .await.unwrap().unwrap();
+        assert_eq!(db.get_pending_retry_emails(10).await.unwrap().len(), 1);
     }
 }

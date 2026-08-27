@@ -15,14 +15,21 @@ pub struct StrangerInterceptor {
     email_factory: Arc<EmailFactory>,
     system_id: String,
     max_attempts: i32,
+    trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 impl StrangerInterceptor {
-    pub fn new(email_factory: Arc<EmailFactory>, system_id: &str, max_attempts: i32) -> Self {
+    pub fn new(
+        email_factory: Arc<EmailFactory>,
+        system_id: &str,
+        max_attempts: i32,
+        trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    ) -> Self {
         Self {
             email_factory,
             system_id: system_id.to_string(),
             max_attempts,
+            trigger_tx,
         }
     }
 
@@ -82,6 +89,15 @@ impl StrangerInterceptor {
                 to,
                 e
             );
+        } else if let Some(tx) = &self.trigger_tx {
+            // Born `readying`; the trigger is the only first-delivery claimant.
+            if let Err(e) = tx.try_send(email_id.clone()) {
+                tracing::warn!(
+                    "[stranger] auto-reply trigger dropped (channel full): id={} error={} — readying sweep will pick it up",
+                    email_id,
+                    e
+                );
+            }
         }
     }
 }

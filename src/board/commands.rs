@@ -1190,6 +1190,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
 

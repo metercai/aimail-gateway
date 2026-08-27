@@ -34,6 +34,7 @@ pub struct Notifier {
     pub gateway_url: String,
     pub board_db_path: String,
     pub attachments_json: Option<String>,
+    pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
     pub tasks: RefCell<Vec<JoinHandle<()>>>,
 }
 
@@ -83,6 +84,7 @@ impl Notifier {
         let body = body.to_string();
         let is_internal = to.contains(&format!("@{}", self.gateway_domain));
         let attachments = self.attachments_json.clone();
+        let trigger_tx = self.trigger_tx.clone();
         // X-Board-Members is OUTBOUND-ONLY (cross-gateway member sync).
         // Inbound (same-gateway webhook) deliveries must NOT carry it —
         // members are already in the local board DB; the header is only
@@ -136,6 +138,16 @@ impl Notifier {
                     subject,
                     e
                 );
+            } else if let Some(tx) = trigger_tx {
+                // Born `readying`; the trigger is the only first-delivery
+                // claimant (tick only reads `ready`).
+                if let Err(e) = tx.try_send(email_id) {
+                    tracing::warn!(
+                        "[a2a_board] notify trigger dropped (channel full): to={} error={} — readying sweep will pick it up",
+                        to,
+                        e
+                    );
+                }
             }
         });
         self.tasks.borrow_mut().push(handle);
@@ -479,6 +491,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -502,6 +515,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -524,6 +538,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -546,6 +561,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -568,6 +584,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -590,6 +607,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -612,6 +630,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -634,6 +653,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -656,6 +676,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();
@@ -679,6 +700,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
@@ -700,6 +722,7 @@ mod tests {
             gateway_domain: "test.io".to_string(),
             gateway_url: "".to_string(),
             attachments_json: None,
+            trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
         };
         let task = make_task();

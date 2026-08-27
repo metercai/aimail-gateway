@@ -61,14 +61,15 @@ pub(crate) async fn exhaust_email(
     metrics: &Metrics,
     delivery_type: &str,
     final_send_count: Option<i32>,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     if let Some(count) = final_send_count {
         let _ = email_factory.update_send_count(&record.id, count).await;
     }
     if record.direction == "inbound" {
-        insert_exhaustion_auto_reply(config, email_factory, record, metrics).await;
+        insert_exhaustion_auto_reply(config, email_factory, record, metrics, trigger).await;
     } else if record.direction == "outbound" {
-        insert_exhaustion_notification(email_factory, attachment_factory, config, record).await;
+        insert_exhaustion_notification(email_factory, attachment_factory, config, record, trigger).await;
     }
     match delivery_type {
         "webhook" => metrics.inc_webhook_exhausted(),
@@ -93,6 +94,7 @@ pub(crate) async fn handle_overlimit(
     config: &Config,
     record: &EmailRecord,
     metrics: &Metrics,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     let delivery_type = detect_delivery_type(record);
 
@@ -113,6 +115,7 @@ pub(crate) async fn handle_overlimit(
         metrics,
         delivery_type,
         None,
+        trigger,
     )
     .await;
 }
@@ -128,6 +131,7 @@ pub(crate) async fn periodic_inspection(
     smtp_relay: &Option<SmtpRelay>,
     record: &EmailRecord,
     metrics: &Metrics,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     let delivery_type = detect_delivery_type(record);
     let new_send_count = record.send_count + 1;
@@ -169,6 +173,7 @@ pub(crate) async fn periodic_inspection(
             metrics,
             delivery_type,
             Some(new_send_count),
+            trigger,
         )
         .await;
         return;
@@ -228,6 +233,7 @@ pub(crate) async fn immediate_forward(
     smtp_relay: &Option<SmtpRelay>,
     record: &EmailRecord,
     metrics: &Metrics,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     let delivery_type = detect_delivery_type(record);
 
@@ -266,6 +272,7 @@ pub(crate) async fn immediate_forward(
             metrics,
             delivery_type,
             Some(new_send_count),
+            trigger,
         )
         .await;
         return;

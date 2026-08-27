@@ -7,6 +7,25 @@ use crate::core::email::storage::EmailRecord;
 
 use super::deliver::resolve_webhook_url;
 
+/// Wake the scheduler for a freshly-inserted auto-reply/notification
+/// (born `readying`; only the trigger claims it for first delivery).
+fn trigger_first_delivery(
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
+    email_id: &str,
+    operation: &str,
+) {
+    if let Some(tx) = trigger {
+        if let Err(e) = tx.try_send(email_id.to_string()) {
+            warn!(
+                operation,
+                error = %e,
+                email_id,
+                "Failed to trigger dispatch; will be picked up by the readying sweep"
+            );
+        }
+    }
+}
+
 // ── Exhaustion helpers ───────────────────────────────────────────────
 
 /// Insert an auto-reply email record for an exhausted inbound email.
@@ -15,6 +34,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
     email_factory: &EmailFactory,
     record: &EmailRecord,
     metrics: &Metrics,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     let orig_message_id = record.message_id_from_headers();
 
@@ -86,6 +106,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
     } else {
         info!(operation="auto_reply_inserted", email_id = %record.id, auto_reply_id = %auto_reply_id, "Auto-reply email record inserted");
         metrics.inc_auto_reply_sent();
+        trigger_first_delivery(trigger, &auto_reply_id, "auto_reply_trigger_failed");
     }
 }
 
@@ -102,6 +123,7 @@ pub(crate) async fn insert_exhaustion_notification(
     _attachment_factory: &AttachmentFactory,
     config: &Config,
     record: &EmailRecord,
+    trigger: Option<&tokio::sync::mpsc::Sender<String>>,
 ) {
     // Guard: prevent infinite cascade — system-generated notifications
     // (auto-replies, filtered notifications) should not recursively create
@@ -227,6 +249,7 @@ pub(crate) async fn insert_exhaustion_notification(
         }
         Ok(_) => {
             info!(operation="overlimit_notification_inserted", email_id = %record.id, notification_id = %notification_id, "Overlimit webhook notification record inserted");
+            trigger_first_delivery(trigger, &notification_id, "notification_trigger_failed");
         }
     }
 }

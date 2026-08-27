@@ -394,10 +394,15 @@ impl Database {
         self.call(move |conn| {
             conn.execute(
                 "INSERT INTO emails (id, status, system_id, direction, sender, recipients, endpoints, subject, body, headers, attachments, send_count, max_attempts, last_sent_at, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14)",
-                params![id, "ready", system_id, direction, sender, recipients, endpoints_owned, subject_owned, body_owned, headers_owned, attachments_owned, max_attempts, now.clone(), now],
+                // Every email is born 'readying' (preparing). The trigger path
+                // claims it readying→sending for first delivery; the tick never
+                // sees 'readying', so a half-prepared payload can never be
+                // delivered early. Crash recovery (batch Flow 0) flips
+                // complete 'readying' rows to 'ready' or discards partial ones.
+                params![id, "readying", system_id, direction, sender, recipients, endpoints_owned, subject_owned, body_owned, headers_owned, attachments_owned, max_attempts, now.clone(), now],
             )?;
             Ok(EmailRecord {
-                id, status: "ready".into(), system_id, direction, sender, recipients, subject: subject_owned,
+                id, status: "readying".into(), system_id, direction, sender, recipients, subject: subject_owned,
                 endpoints: endpoints_owned, body: body_owned, headers: headers_owned, attachments: attachments_owned,
                 send_count: 0, last_sent_at: now.clone(), next_retry_at: None, max_attempts,
                 created_at: now,
@@ -421,17 +426,24 @@ impl Database {
         .await
     }
 
-    /// CAS (Compare-And-Swap) claim: atomically transition status `ready` → `sending`.
+    /// CAS (Compare-And-Swap) claim: atomically transition status
+    /// `readying`/`ready` → `sending`.
     /// Returns `Some(record)` if the claim succeeded, `None` if already consumed by another path.
     /// This prevents concurrent delivery from trigger + interval batch.
+    ///
+    /// State machine:
+    /// - `readying` — preparing (born state; only the first-delivery trigger may claim it)
+    /// - `ready`    — payload-complete and retryable (only the tick may claim it;
+    ///                first-delivery emails are claimed from `readying` via trigger)
+    /// - `sending`  — in flight
     pub async fn claim_ready(&self, id: &str) -> AppResult<Option<EmailRecord>> {
         let id = id.to_string();
         self.call_tx(move |tx| {
-            // Atomic CAS: update only if current status is 'ready'
+            // Atomic CAS: update only if current status is 'readying' or 'ready'
             // Wrapped in a transaction so UPDATE + SELECT are atomic —
             // prevents orphaned 'sending' state if SELECT fails.
             let rows = tx.execute(
-                "UPDATE emails SET status = 'sending', last_sent_at = (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?1 AND status = 'ready'",
+                "UPDATE emails SET status = 'sending', last_sent_at = (SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) WHERE id = ?1 AND status IN ('readying', 'ready')",
                 params![id],
             )?;
             if rows == 0 {
@@ -518,6 +530,21 @@ impl Database {
         .await
     }
 
+    /// Count emails awaiting delivery: `ready` (retryable) + `readying`
+    /// (preparing, about to be trigger-delivered). Drives the pending gauge
+    /// so in-preparation emails aren't invisible while their trigger is in flight.
+    pub async fn count_pending_emails(&self) -> AppResult<i64> {
+        self.call(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM emails WHERE status IN ('ready', 'readying')",
+                params![],
+                |r| r.get(0),
+            )?;
+            Ok(count)
+        })
+        .await
+    }
+
     /// Find emails by sender address and direction (for NDR bounce correlation).
     pub async fn find_emails_by_sender_direction(
         &self,
@@ -552,6 +579,43 @@ impl Database {
             Ok(count)
         })
         .await
+    }
+
+    /// Fetch `readying` emails older than `cutoff` (RFC3339).
+    /// These are crash orphans: the process died between insert and trigger
+    /// claim (or the trigger was dropped by a full channel). Flow 0 sweeps
+    /// them: complete ones flip to `ready` (or are trigger-delivered),
+    /// partially-prepared ones are discarded.
+    pub async fn get_stuck_readying_emails(
+        &self,
+        cutoff: &str,
+        limit: i32,
+    ) -> AppResult<Vec<EmailRecord>> {
+        let cutoff = cutoff.to_string();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(&format!(
+                "{} WHERE status = 'readying' AND created_at < ?1 ORDER BY created_at ASC LIMIT ?2",
+                EMAIL_SELECT
+            ))?;
+            let rows = stmt.query_map(params![cutoff, limit], email_row)?;
+            let mut results = Vec::new();
+            for row in rows { results.push(row?); }
+            Ok(results)
+        }).await
+    }
+
+    /// CAS flip `readying` → `ready` (crash recovery: payload verified complete).
+    /// Returns true if this call performed the flip, false if the row is no
+    /// longer `readying` (e.g. a trigger claimed it in the meantime).
+    pub async fn flip_readying_to_ready(&self, id: &str) -> AppResult<bool> {
+        let id = id.to_string();
+        self.call(move |conn| {
+            let rows = conn.execute(
+                "UPDATE emails SET status = 'ready' WHERE id = ?1 AND status = 'readying'",
+                params![id],
+            )?;
+            Ok(rows > 0)
+        }).await
     }
 
     // ── Scheduler v1.0: periodic inspection queries ──────────────────
