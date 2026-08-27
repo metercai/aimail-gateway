@@ -1,6 +1,3 @@
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use crate::core::api::monitor::Metrics;
@@ -11,15 +8,6 @@ use crate::core::smtp::sender::SmtpRelay;
 use super::deliver::{cascade_delete_attachment, cleanup_completed_email};
 
 use super::flows::{handle_overlimit, periodic_inspection, process_expired_attachments};
-
-/// In-flight email IDs currently being processed by the trigger path.
-/// The interval batch skips these to avoid duplicate concurrent delivery.
-pub type InflightSet = Arc<Mutex<std::collections::HashSet<String>>>;
-
-/// Create an empty inflight set.
-pub fn new_inflight_set() -> InflightSet {
-    Arc::new(Mutex::new(std::collections::HashSet::new()))
-}
 
 /// How long an email may sit in `readying` before Flow 0 treats it as a
 /// crash orphan (process died between insert and trigger claim, or the
@@ -43,7 +31,6 @@ pub(crate) async fn process_batch(
     smtp_relay: &Option<SmtpRelay>,
     metrics: &Metrics,
     batch_size: i32,
-    inflight: &InflightSet,
     trigger: &tokio::sync::mpsc::Sender<String>,
 ) {
     // ── Flow 0: Stuck-`readying` crash recovery ──
@@ -68,6 +55,9 @@ pub(crate) async fn process_batch(
     }
 
     // ── Flow 2: Periodic retry inspection ──
+    // Only reads `ready` (retryable). A trigger-path email is already
+    // `sending` after its CAS claim, so it is structurally invisible here —
+    // no in-flight dedup set is needed.
     match email_factory.get_pending_retry(batch_size).await {
         Ok(records) if !records.is_empty() => {
             info!(
@@ -75,15 +65,7 @@ pub(crate) async fn process_batch(
                 count = records.len(),
                 "Retry batch — periodic inspection"
             );
-            // Build a snapshot of inflight IDs once, to avoid holding the lock
-            // per-record (reduces lock contention).
-            let inflight_ids: std::collections::HashSet<String> = inflight.lock().await.clone();
             for record in &records {
-                let record_id = record.id.trim();
-                if inflight_ids.contains(record_id) {
-                    debug!(email_id = %record.id, "Skipping inflight email (trigger path active)");
-                    continue;
-                }
                 periodic_inspection(
                     email_factory,
                     attachment_factory,
@@ -300,6 +282,7 @@ mod tests {
     use crate::base::strategy::BaseSystemStore;
     use crate::core::config::Config;
     use crate::core::storage::Database;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     struct Ctx {

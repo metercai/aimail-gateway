@@ -13,7 +13,7 @@ use crate::core::errors::AppResult;
 use crate::core::smtp::sender::SmtpRelay;
 use crate::core::strategy::OutboundTransform;
 
-use super::batch::{process_batch, InflightSet};
+use super::batch::process_batch;
 use super::flows::immediate_forward;
 
 /// Scheduler that wakes on interval ticks and an mpsc trigger from SMTP receiver
@@ -26,7 +26,6 @@ pub async fn run_retry_worker_with_trigger(
     mut trigger_rx: mpsc::Receiver<String>,
     metrics: Metrics,
     cancel: CancellationToken,
-    inflight: InflightSet,
     outbound: Arc<dyn OutboundTransform>,
     dns_resolver: Option<Arc<hickory_resolver::TokioAsyncResolver>>,
 ) -> AppResult<()> {
@@ -95,12 +94,15 @@ pub async fn run_retry_worker_with_trigger(
                 if let Ok(count) = email_factory.count_pending_emails().await {
                     metrics.set_scheduler_pending_count(count);
                 }
-                process_batch(&email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &metrics, batch_size, &inflight, &trigger_tx).await;
+                process_batch(&email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &metrics, batch_size, &trigger_tx).await;
             }
             Some(mail_uuid) = trigger_rx.recv() => {
                 debug!(operation="scheduler_trigger_wake", %mail_uuid, "Scheduler woken by SMTP receiver trigger");
-                // CAS claim: atomically transition ready→sending. If another path
-                // already consumed it (interval batch), this returns None and we skip.
+                // CAS claim: atomically transition readying/ready→sending.
+                // If another path already consumed it, this returns None and
+                // we skip. (A claimed email is `sending` while in flight, so
+                // the interval batch — which only reads `ready` — can never
+                // pick it up concurrently.)
                 let record = match email_factory.claim_ready(&mail_uuid).await {
                     Ok(Some(r)) => r,
                     Ok(None) => {
@@ -112,15 +114,10 @@ pub async fn run_retry_worker_with_trigger(
                         continue;
                     }
                 };
-                // Register in inflight set so interval batch skips this email
-                inflight.lock().await.insert(mail_uuid.clone());
                 immediate_forward(
                     &email_factory, &attachment_factory, &config, &http_client, &smtp_relay, &record, &metrics,
                     Some(&trigger_tx),
                 ).await;
-                // De-register — the email is now completed/retried by immediate_forward
-                inflight.lock().await.remove(&mail_uuid);
-                debug!(%mail_uuid, "Trigger: removed from inflight set");
             }
             _ = cancel.cancelled() => {
                 info!(operation="scheduler_cancellation", "Scheduler: cancellation received, shutting down");

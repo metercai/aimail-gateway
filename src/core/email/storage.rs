@@ -459,22 +459,6 @@ impl Database {
         }).await
     }
 
-    pub async fn get_ready_emails(&self, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        self.call(move |conn| {
-            let mut stmt = conn.prepare(&format!(
-                "{} WHERE status = 'ready' ORDER BY created_at ASC LIMIT ?1",
-                EMAIL_SELECT
-            ))?;
-            let rows = stmt.query_map(params![limit], email_row)?;
-            let mut results = Vec::new();
-            for row in rows {
-                results.push(row?);
-            }
-            Ok(results)
-        })
-        .await
-    }
-
     pub async fn list_emails_by_system(
         &self,
         system_id: &str,

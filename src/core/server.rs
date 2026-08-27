@@ -197,7 +197,6 @@ pub fn spawn_retry_worker(
     let metrics = (*http_state.metrics).clone();
     let outbound = http_state.extensions.outbound.clone();
     let dns_resolver = http_state.dns_resolver.clone();
-    let inflight = crate::core::scheduler::new_inflight_set();
     let trigger_tx = http_state.trigger_tx.clone();
     tokio::spawn(async move {
         crate::core::scheduler::run_retry_worker_with_trigger(
@@ -208,7 +207,6 @@ pub fn spawn_retry_worker(
             trigger_rx,
             metrics,
             cancel,
-            inflight,
             outbound,
             dns_resolver,
         )
