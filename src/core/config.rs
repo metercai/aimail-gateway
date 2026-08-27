@@ -178,6 +178,17 @@ pub struct RetryConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_batch_size")]
     pub batch_size: i32,
+    /// Seconds an email may sit in `readying` before Flow 0 treats it as a
+    /// crash orphan (process died between insert and trigger claim, or the
+    /// trigger was dropped by a full channel).
+    ///
+    /// The legitimate preparation window is ~50-100ms (attachment save loop
+    /// for SMTP inbound; a few local DB ops for API paths), so the default
+    /// of 30 is a 300x margin. Lowering it risks sweeping an in-flight SMTP
+    /// attachment save (which would re-introduce the early-delivery race the
+    /// state machine eliminates).
+    #[serde(default = "default_readying_stuck_secs")]
+    pub readying_stuck_secs: i64,
 }
 
 impl Default for RetryConfig {
@@ -189,6 +200,7 @@ impl Default for RetryConfig {
             max_backoff_secs: default_max_backoff(),
             poll_interval_secs: default_poll_interval(),
             batch_size: default_batch_size(),
+            readying_stuck_secs: default_readying_stuck_secs(),
         }
     }
 }
@@ -461,6 +473,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_batch_size() -> i32 {
     50
+}
+
+fn default_readying_stuck_secs() -> i64 {
+    30
 }
 
 fn default_auto_reply_subject_prefix() -> String {

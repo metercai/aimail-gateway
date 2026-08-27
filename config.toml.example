@@ -49,6 +49,7 @@ bind = "0.0.0.0:25"                      # listen address (host:port, default 0.
 # max_backoff_secs = 300                  # backoff ceiling in seconds (default 300)
 # poll_interval_secs = 5                  # scheduler batch processing interval in seconds (default 5)
 # batch_size = 50                         # max deliveries processed per batch (default 50)
+# readying_stuck_secs = 30                # safety-net: seconds a 'readying' email may stay untriggered before the sweep dead-letters it (default 30)
 
 # ── Storage ─────────────────────────────────────────────────────────────
 

@@ -730,7 +730,6 @@ fn extract_description_from_body(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::config::Config;
     use crate::core::email::utils::sign_payload;
     use crate::core::email::utils::html_to_markdown;
 

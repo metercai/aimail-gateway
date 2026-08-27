@@ -836,7 +836,6 @@ pub fn make_task_id(board_id: &str, short_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::models::*;
 
     fn setup_db() -> (Connection, String) {
         let conn = Connection::open_in_memory().unwrap();

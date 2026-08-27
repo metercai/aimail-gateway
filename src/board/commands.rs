@@ -1121,7 +1121,6 @@ fn promote_children(conn: &Connection, notifier: &Notifier, parent: &Task) {
 mod tests {
     use super::*;
     use crate::board::db;
-    use crate::board::models::*;
     use crate::board::notify::Notifier;
     use rusqlite::Connection;
     use std::cell::RefCell;

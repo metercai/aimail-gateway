@@ -430,7 +430,6 @@ impl Notifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::models::*;
 
     fn make_board() -> Board {
         Board {

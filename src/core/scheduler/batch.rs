@@ -9,16 +9,6 @@ use super::deliver::{cascade_delete_attachment, cleanup_completed_email};
 
 use super::flows::{handle_overlimit, periodic_inspection, process_expired_attachments};
 
-/// How long an email may sit in `readying` before Flow 0 treats it as a
-/// crash orphan (process died between insert and trigger claim, or the
-/// trigger was dropped by a full channel).
-///
-/// The legitimate preparation window is ~50-100ms (attachment save loop for
-/// SMTP inbound; a few local DB ops for API paths), so 30s is a 300x margin.
-/// Lowering it risks sweeping an in-flight SMTP attachment save (which would
-/// re-introduce the early-delivery race the state machine eliminates).
-const READYING_STUCK_SECS: i64 = 30;
-
 // ── Main scheduler loop ────────────────────────────────────────────
 
 /// Run all flows in one batch cycle: readying-sweep, overlimit, retry,
@@ -160,11 +150,13 @@ pub(crate) async fn process_batch(
 async fn sweep_stuck_readying(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
-    _config: &Config,
+    config: &Config,
     batch_size: i32,
 ) {
     let cutoff = chrono::Utc::now()
-        .checked_sub_signed(chrono::Duration::seconds(READYING_STUCK_SECS))
+        .checked_sub_signed(chrono::Duration::seconds(
+            config.retry.readying_stuck_secs,
+        ))
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 

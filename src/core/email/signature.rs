@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_noise_mobile_filtered() {
         let body = "Thanks.\n-- \nJohn\nSent from my iPhone";
-        let (sig, conf) = extract_signature(body);
+        let (sig, _conf) = extract_signature(body);
         assert!(sig.is_some());
         let s = sig.unwrap();
         assert!(!s.contains("iPhone"));
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn test_noise_confidential_filtered() {
         let body = "Here is the data.\n-- \nSarah\nConfidential - Do Not Forward\nsarah@corp.com";
-        let (sig, conf) = extract_signature(body);
+        let (sig, _conf) = extract_signature(body);
         assert!(sig.is_some());
         let s = sig.unwrap();
         assert!(!s.to_lowercase().contains("confidential"));
@@ -388,7 +388,7 @@ mod tests {
     fn test_noise_unsubscribe_filtered() {
         let body =
             "Newsletter content.\n-- \nThe Team\nUnsubscribe here: http://example.com/optout";
-        let (sig, conf) = extract_signature(body);
+        let (sig, _conf) = extract_signature(body);
         assert!(sig.is_some());
         let s = sig.unwrap();
         assert!(!s.to_lowercase().contains("unsubscribe"));
