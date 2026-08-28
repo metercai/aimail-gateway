@@ -1,5 +1,6 @@
 pub mod activation;
 pub mod auth;
+pub mod dedup;
 pub mod files;
 pub mod http;
 pub mod keys;

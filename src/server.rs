@@ -105,6 +105,10 @@ impl Server {
             trigger_tx: trigger_tx.clone(),
             extensions: extensions.clone(),
             dns_resolver: Some(dns_resolver.clone()),
+            send_deduper: amail_base::core::api::dedup::SendDeduper::new(
+                std::time::Duration::from_secs(config.retry.send_dedupe_window_secs),
+                4096,
+            ),
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──

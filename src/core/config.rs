@@ -178,6 +178,12 @@ pub struct RetryConfig {
     pub poll_interval_secs: u64,
     #[serde(default = "default_batch_size")]
     pub batch_size: i32,
+    /// Gateway-level duplicate-send suppression window, in seconds.
+    /// An identical (sender, to, cc, subject, body) send within this
+    /// window is rejected with 409 — regardless of which client made the
+    /// call. 0 disables dedup.
+    #[serde(default = "default_send_dedupe_window")]
+    pub send_dedupe_window_secs: u64,
     /// Seconds an email may sit in `readying` before Flow 0 treats it as a
     /// crash orphan (process died between insert and trigger claim, or the
     /// trigger was dropped by a full channel).
@@ -200,6 +206,7 @@ impl Default for RetryConfig {
             max_backoff_secs: default_max_backoff(),
             poll_interval_secs: default_poll_interval(),
             batch_size: default_batch_size(),
+            send_dedupe_window_secs: default_send_dedupe_window(),
             readying_stuck_secs: default_readying_stuck_secs(),
         }
     }
@@ -473,6 +480,10 @@ fn default_poll_interval() -> u64 {
 
 fn default_batch_size() -> i32 {
     50
+}
+
+fn default_send_dedupe_window() -> u64 {
+    600
 }
 
 fn default_readying_stuck_secs() -> i64 {

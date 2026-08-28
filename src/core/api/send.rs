@@ -104,6 +104,55 @@ pub async fn send_email_core(
         }
     }
 
+    // ── 2c. Gateway-level duplicate-send suppression (check) ──
+    // Identical (sender, to, cc, subject, body) within the configured
+    // window → 409, regardless of client. This is the backstop for
+    // out-of-band resends (scripts, direct API, tool workarounds).
+    // Key = raw request inputs (pre-whitelist) so check and the mark
+    // below (after all inserts) always agree. A resend with identical
+    // content re-derives the same key and is suppressed; a resend with
+    // ANY change (recipient, subject, body) gets a new key and goes
+    // through. The body includes the agent signature (appended at 2b),
+    // so signature changes also break the match.
+    if state.config.retry.send_dedupe_window_secs > 0 {
+        let dedup_to: Vec<String> = req
+            .to
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let dedup_cc: Vec<String> = req
+            .cc
+            .iter()
+            .flatten()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        let dedup_subject = req.subject.as_deref().unwrap_or("");
+        if state
+            .send_deduper
+            .is_duplicate(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body)
+        {
+            warn!(
+                operation = "send_dedupe_suppressed",
+                sender = %sender,
+                subject = %dedup_subject,
+                "Identical outbound send suppressed (dedup window)"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "duplicate_send".to_string(),
+                    detail: Some(format!(
+                        "An identical email (same sender/to/cc/subject/body) was already sent within {}s. \
+                         This is terminal — do not retry by any other means (no scripts, no direct API calls). \
+                         If the original delivery matters, verify it arrived before acting.",
+                        state.config.retry.send_dedupe_window_secs
+                    )),
+                }),
+            ));
+        }
+    }
+
     // ── 3. Parse recipients, preserving to/cc distinction ──
     // Support "Name <email>" and bare "email" formats.
     // Helper: parse "Name <email>" → (name, email); bare "email" → ("", email)
@@ -1022,6 +1071,26 @@ pub async fn send_email_core(
         );
         "filtered"
     } else {
+        // ── 8c. Dedup mark (only after ALL inserts succeeded) ──
+        // A failed insert path returns Err before reaching here, so a
+        // partially-delivered send (e.g. external ok, internal failed)
+        // does not poison the key — the client may legitimately resend.
+        if state.config.retry.send_dedupe_window_secs > 0 {
+            let dedup_to: Vec<String> = req
+                .to
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let dedup_cc: Vec<String> = req
+                .cc
+                .iter()
+                .flatten()
+                .map(|s| s.trim().to_lowercase())
+                .collect();
+            let dedup_subject = req.subject.as_deref().unwrap_or("");
+            state.send_deduper.mark(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body);
+        }
         "queued"
     };
 

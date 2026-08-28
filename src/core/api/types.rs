@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+use crate::core::api::dedup::SendDeduper;
 use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
 use crate::core::email::factory::MailFactories;
@@ -21,6 +22,9 @@ pub struct HttpState {
     pub trigger_tx: mpsc::Sender<String>,
     pub extensions: Arc<ExtensionProviders>,
     pub dns_resolver: Option<Arc<TokioAsyncResolver>>,
+    /// Gateway-level duplicate-send suppression (sender+to+cc+subject+body
+    /// within a configurable window). Shared across all API handlers.
+    pub send_deduper: SendDeduper,
 }
 
 // ── Request/Response types ──
