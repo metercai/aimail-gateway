@@ -1780,6 +1780,51 @@ mod tests {
         assert!(obj.contains_key("ver@y.com"));
     }
 
+    #[tokio::test]
+    async fn endpoint_status_update_creates_key_from_null_endpoints() {
+        // Regression: pull-mode (bridge) domains build NO endpoint key at
+        // insert time, so `endpoints` is NULL. SQLite `json_set(NULL, ...)`
+        // returns NULL — the success mark was lost,
+        // check_all_endpoints_completed stayed false, and the scheduler
+        // treated the successful delivery as a failure, retrying to
+        // max_attempts and re-inserting a pending delivery on every pass
+        // (the 3x delivery storm). COALESCE(endpoints, '{}') makes the
+        // success mark land and the email complete on first delivery.
+        let db = temp_db();
+        db.insert_email(
+            "e1", "sys1", "inbound", "ext@x.com", "agent@pull.test",
+            "subj", "body", None, None, None, 3,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !db.check_all_endpoints_completed("e1").await.unwrap(),
+            "NULL endpoints → not completed (nothing delivered yet)"
+        );
+
+        assert!(
+            db.update_email_endpoint_status("e1", "pull.test", "success").await.unwrap(),
+            "NULL endpoints must gain the key, not stay NULL"
+        );
+        assert!(
+            db.check_all_endpoints_completed("e1").await.unwrap(),
+            "success mark must make the email complete"
+        );
+
+        // The key landed with the right status and nothing else.
+        let rec = db.get_email("e1").await.unwrap().unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
+        let obj = v.as_object().expect("endpoints is a JSON object");
+        assert_eq!(obj.len(), 1);
+        assert_eq!(
+            obj["pull.test"]["status"].as_str(),
+            Some("success"),
+            "status written under the domain key"
+        );
+    }
+
     // ── readying → ready → sending state machine ────────────────────
     //
     // The flake this guards: a tick batch used to see a freshly-inserted

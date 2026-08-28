@@ -936,6 +936,14 @@ impl Database {
 
     /// Atomically update a single endpoint's status within the `endpoints` JSON.
     /// Returns `true` on success, `false` if endpoint not found or email doesn't exist.
+    ///
+    /// `COALESCE(endpoints, '{}')` is required: emails delivered to pull-mode
+    /// (bridge) domains have no pre-built endpoint key, so `endpoints` is NULL
+    /// at insert time. SQLite `json_set(NULL, ...)` returns NULL — the success
+    /// mark would be lost, `check_all_endpoints_completed` would report
+    /// "not completed", and the scheduler would treat the successful delivery
+    /// as a failure and retry to `max_attempts`, re-inserting a pending
+    /// delivery on every pass (the 3x delivery storm).
     pub async fn update_email_endpoint_status(
         &self,
         email_id: &str,
@@ -949,7 +957,7 @@ impl Database {
         );
         self.call(move |conn| {
             let changes = conn.execute(
-                "UPDATE emails SET endpoints = json_set(endpoints, '$.\"' || ?2 || '\".status', ?3) WHERE id = ?1",
+                "UPDATE emails SET endpoints = json_set(COALESCE(endpoints, '{}'), '$.\"' || ?2 || '\".status', ?3) WHERE id = ?1",
                 params![email_id, domain, new_status],
             )?;
             let updated = changes == 1;
