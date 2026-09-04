@@ -364,13 +364,6 @@ pub fn is_admin_scope(key: &ApiKeyRecord) -> bool {
     is_platform_admin_scope(key) || is_system_admin_scope(key) || is_agent_admin_scope(key)
 }
 
-/// Check if the API key has Bridge scope (pending deliveries only).
-pub fn is_bridge_scope(key: &ApiKeyRecord) -> bool {
-    key.scopes
-        .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == Scope::Bridge))
-}
-
 /// Scope guard: verify API key has at least one of the given scopes.
 pub fn require_scope_any(
     key: &ApiKeyRecord,

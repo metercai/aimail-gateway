@@ -15,7 +15,6 @@ use crate::core::errors::{AppError, AppResult};
 use crate::core::whitelist::{is_whitelisted_wildcard, WhitelistCache};
 
 /// Global database handle — set once at startup.
-static GLOBAL_DB: std::sync::OnceLock<Database> = std::sync::OnceLock::new();
 
 // ── Database Pool ──────────────────────────────────────────────────────
 
@@ -127,19 +126,6 @@ impl Database {
             whitelist_cache: Arc::new(WhitelistCache::new()),
             domain_cache: Arc::new(RwLock::new(HashMap::new())),
         })
-    }
-
-    /// Register this instance as the global database handle.
-    pub fn init_global(&self) {
-        let _ = GLOBAL_DB.set(self.clone());
-    }
-
-    /// Return a clone of the global handle. Panics if not initialized.
-    pub fn global() -> Database {
-        GLOBAL_DB
-            .get()
-            .expect("Database::init_global() must be called before Database::global()")
-            .clone()
     }
 
     pub async fn call<F, R>(&self, f: F) -> AppResult<R>
@@ -1401,7 +1387,9 @@ impl Database {
         }).await
     }
 
-    /// Drop-in replacement for `Database::pool()` that AdvancedStorage needs.
+    /// Connection pool accessor for cross-edition consumers (aimail-advanced
+    /// AdvancedStorage wraps the base pool). Not dead code — consumed
+    /// cross-crate, which the compiler cannot see from this crate alone.
     #[allow(dead_code)]
     pub fn raw_pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
@@ -1632,7 +1620,6 @@ mod tests {
         // Database::open expects the SQLite FILE path (like main.rs passes
         // config.storage.db_path() = <dir>/aimail.db), not a directory.
         let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
-        db.init_global();
         db
     }
 

@@ -35,7 +35,6 @@ impl Server {
         }
 
         let db = Database::open(&db_path, 25, db_key)?;
-        db.init_global();
         let metrics = Arc::new(Metrics::with_version(concat!("base-", env!("GIT_VERSION"))));
 
         Ok(Self {

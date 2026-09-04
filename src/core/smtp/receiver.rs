@@ -728,7 +728,7 @@ impl ConnectionHandler {
 
         tracing::debug!(
             operation="recipients_filtered",
-            sender = ?self.sender,
+            sender = %sender,
             email_to = ?filtered_to,
             email_cc = ?filtered_cc,
             envelope_count = recipients.len(),

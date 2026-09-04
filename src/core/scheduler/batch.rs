@@ -291,7 +291,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("amailgw-sweep-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
-        db.init_global();
         let arc = std::sync::Arc::new(db.clone());
         let att_dir = dir.join("attachments");
         std::fs::create_dir_all(&att_dir).unwrap();

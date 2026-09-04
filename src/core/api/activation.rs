@@ -373,7 +373,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("amailgw-act-test-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
-        db.init_global();
         let factory = crate::core::factory::EnvFactory::new(
             std::sync::Arc::new(db.clone()),
             std::sync::Arc::new(BaseSystemStore),

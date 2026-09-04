@@ -145,21 +145,6 @@ impl EmailFactory {
         self.db.get_overlimit_emails(limit).await
     }
 
-    /// List emails by system.
-    pub async fn list_by_system(&self, system_id: &str, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        self.db.list_emails_by_system(system_id, limit).await
-    }
-
-    /// List emails by status.
-    pub async fn list_by_status(&self, status: &str, limit: i32) -> AppResult<Vec<EmailRecord>> {
-        self.db.list_emails_by_status(status, limit).await
-    }
-
-    /// Count emails by status.
-    pub async fn count_by_status(&self, status: &str) -> AppResult<i64> {
-        self.db.count_emails_by_status(status).await
-    }
-
     /// Count emails awaiting delivery: `ready` (retryable) + `readying`
     /// (preparing, about to be trigger-delivered). Used for the pending gauge.
     pub async fn count_pending_emails(&self) -> AppResult<i64> {
@@ -174,11 +159,6 @@ impl EmailFactory {
     /// CAS flip a `readying` email to `ready` (crash recovery).
     pub async fn flip_readying_to_ready(&self, id: &str) -> AppResult<bool> {
         self.db.flip_readying_to_ready(id).await
-    }
-
-    /// Count emails by system.
-    pub async fn count_by_system(&self, system_id: &str) -> AppResult<i64> {
-        self.db.count_emails_by_system(system_id).await
     }
 
     /// Search outbound emails by sender address (for NDR correlation).
@@ -262,11 +242,6 @@ impl EmailFactory {
         self.db.is_internal_sender(sender).await
     }
 
-    /// Parse the attachments JSON string from an email record to get attachment IDs.
-    pub async fn get_attachment_ids(&self, email_id: &str) -> AppResult<Vec<String>> {
-        self.db.get_email_attachment_ids(email_id).await
-    }
-
     /// Resolve attachment IDs to human-readable "filename (type)" strings.
     /// Used for notification body display — not for file access.
     /// Uses batch lookup (single DB call) instead of N+1 queries.
@@ -289,16 +264,6 @@ impl EmailFactory {
     }
 
     // ── Recipient resolution ──────────────────────────────────────────
-
-    /// Build a Recipients struct from a JSON string.
-    pub fn parse_recipients(json: &str) -> Recipients {
-        Recipients::from_json(json)
-    }
-
-    /// Serialize Recipients to JSON string.
-    pub fn recipients_to_json(recipients: &Recipients) -> String {
-        recipients.to_json()
-    }
 
     /// Resolve the domain registration for an email address.
     /// Delegates to EnvFactory::resolve_domain_from_address for consistent two-step logic.
@@ -370,78 +335,6 @@ impl EmailFactory {
     }
 
     // ── MIME parsing ──────────────────────────────────────────────────
-
-    /// Parse an inbound MIME message body: body text, attachments, to/cc, threading headers.
-    pub fn parse_mime(
-        raw: &[u8],
-    ) -> AppResult<(
-        String,
-        Vec<MimeAttachment>,
-        Vec<String>,
-        Vec<String>,
-        BTreeMap<String, String>,
-    )> {
-        let parsed = mailparse::parse_mail(raw)
-            .map_err(|e| AppError::Parse(format!("MIME parse failed: {}", e)))?;
-
-        let mut body = String::new();
-        let mut attachments: Vec<MimeAttachment> = Vec::new();
-
-        // Walk MIME parts recursively
-        EmailFactory::walk_mime_parts(&parsed, &mut body, &mut attachments);
-
-        // Extract To/Cc headers
-        let to_emails = parsed
-            .headers
-            .iter()
-            .filter(|h| h.get_key().eq_ignore_ascii_case("to"))
-            .flat_map(|h| {
-                let val = h.get_value();
-                val.split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let cc_emails = parsed
-            .headers
-            .iter()
-            .filter(|h| h.get_key().eq_ignore_ascii_case("cc"))
-            .flat_map(|h| {
-                let val = h.get_value();
-                val.split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect::<Vec<_>>()
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        // Extract threading headers
-        let mut threading_headers = BTreeMap::new();
-        for h in &parsed.headers {
-            if h.get_key().eq_ignore_ascii_case("references") {
-                threading_headers.insert("references".to_string(), h.get_value().to_string());
-            } else if h.get_key().eq_ignore_ascii_case("in-reply-to") {
-                threading_headers.insert("in-reply-to".to_string(), h.get_value().to_string());
-            }
-        }
-
-        // Convert HTML body to plain text if needed
-        if body.starts_with("<") {
-            let before_len = body.len();
-            body = EmailFactory::html_to_text(&body);
-            tracing::info!(
-                operation = "html_to_text_applied",
-                before_len = before_len,
-                after_len = body.len(),
-                after_preview = %body.chars().take(80).collect::<String>(),
-                "HTML-to-text conversion applied"
-            );
-        }
-
-        Ok((body, attachments, to_emails, cc_emails, threading_headers))
-    }
 
     /// Parse MIME with full header extraction: subject, message_id, in-reply-to, references.
     /// Returns an 8-tuple for SMTP receiver usage.

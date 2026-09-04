@@ -926,7 +926,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("amailgw-wb-approval-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
-        db.init_global();
         let arc = std::sync::Arc::new(db);
         let env = EnvFactory::new(arc.clone(), std::sync::Arc::new(BaseSystemStore));
         let ef = EmailFactory::new(arc, std::path::PathBuf::from("/tmp/amailgw-wb-att"), std::sync::Arc::new(BaseSystemStore));
