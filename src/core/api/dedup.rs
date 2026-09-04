@@ -17,7 +17,6 @@
 //! blast radius of a restart is acceptable (one re-send window).
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
