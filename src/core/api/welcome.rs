@@ -218,7 +218,7 @@ pub async fn send_welcome(
         .map(|(e, _)| e.split('@').next().unwrap_or(e))
         .unwrap_or("Agent");
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let subject = format!("Welcome to AIMail, {agent} — your address is active ({date})");
+    let subject = format!("Welcome to AIMail, {agent} - your address is active ({date})");
     let body = WELCOME_BODY
         .replace("{domain}", domain)
         .replace("{timestamp}", &timestamp);
