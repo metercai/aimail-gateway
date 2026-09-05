@@ -1412,6 +1412,20 @@ async fn check_whitelist(
             }),
         ));
     }
+    // System auto-mail sender is whitelisted by construction — agents must
+    // never request adding it to their whitelist/contacts (it is the
+    // gateway itself; config.system_sender() is the single Rust-side
+    // source). Any direction: inbound auto mails are system deliveries,
+    // outbound to noreply lands in the sink.
+    if query.value.trim().to_lowercase() == state.config.system_sender().to_lowercase() {
+        return Ok(Json(serde_json::json!({
+            "whitelisted": true,
+            "system_sender": true,
+            "domain_addr": query.domain_addr,
+            "value": query.value,
+            "direction": query.direction,
+        })));
+    }
     // Proceed with check
     match state
         .factories
