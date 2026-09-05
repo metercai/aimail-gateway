@@ -2322,6 +2322,18 @@ async fn get_contact_profile(
         })));
     }
     let db = &state.factories.email.env_factory.db;
+    // System auto-mail sender (configurable: noreply@{smtp.hostname} via
+    // config.system_sender()) is a known entity by construction — not a
+    // registered contact. Return it without a DB lookup so agent contact
+    // checks never treat auto mails as unknown senders.
+    if address.trim().to_lowercase() == state.config.system_sender().to_lowercase() {
+        return Ok(Json(
+            serde_json::json!({
+                "address": address,
+                "profile": {"type": "system", "auto_mail": true},
+            }),
+        ));
+    }
     match db
         .agent_state_get(agent_addr, &format!("profile:{}", address))
         .await
