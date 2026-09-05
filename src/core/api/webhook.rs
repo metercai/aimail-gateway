@@ -129,7 +129,7 @@ pub async fn process_email_webhook(
     // ── 2. Build payload once (same for all endpoints) ──────────────
     // Forwarder address: use relay.username if set (the mailbox that
     // actually relays outbound mail), otherwise a fixed local placeholder.
-    // (The system auto-reply sender is postman@{domain} via
+    // (The system auto-reply sender is noreply@{domain} via
     // config.system_sender(); it is not a relay identity.)
     let forwarder = config
         .relay

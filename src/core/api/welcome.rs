@@ -2,7 +2,7 @@
 //!
 //! Single parameter: `to` (agent address). Everything else is fixed in
 //! code:
-//!   from     = postman@{smtp.hostname} (system sender, fixed)
+//!   from     = noreply@{smtp.hostname} (system sender, fixed)
 //!   subject  = "Welcome to AIMail world!"
 //!   body     = fixed text (reply-all instructions + project homepage)
 //!   cc       = reverse-looked-up from the agent's manager_address
@@ -23,7 +23,7 @@
 //! receives both the original welcome (as cc) and the agent's reply — two
 //! threaded mails.
 //!
-//! Storm safety: replies addressed back to the system sender (postman@)
+//! Storm safety: replies addressed back to the system sender (noreply@)
 //! are absorbed by the system-sink bucket in `send.rs` — no
 //! unregistered-address notification, no re-delivery.
 
@@ -57,11 +57,9 @@ pub struct WelcomeResponse {
     pub cc: Vec<String>,
 }
 
-const WELCOME_SUBJECT: &str = "Welcome to AIMail world!";
-
 /// Fixed welcome body template. Placeholders:
 ///   {domain}    — gateway domain (system sender's domain)
-///   {timestamp} — server time at send (UTC RFC3339)
+///   {timestamp} — server local time at send (human-readable, gateway tz)
 const WELCOME_BODY: &str = r#"Welcome to the AIMail world!
 
 Your AIMail address has been activated. This is the first welcome email
@@ -77,11 +75,11 @@ project homepage:
 https://github.com/metercai/aimail
 
 Best regards,
-Postman@{domain}
+noreply@{domain}
 {timestamp}
 "#;
 
-/// POST /api/v1/system/welcome — send a system welcome mail (from postman@).
+/// POST /api/v1/system/welcome — send a system welcome mail (from noreply@).
 pub async fn send_welcome(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
@@ -206,14 +204,21 @@ pub async fn send_welcome(
         .or_else(|| state.config.http.hostname.as_deref())
         .unwrap_or("amail-relay");
     let message_id = format!("<{}@{}>", Uuid::new_v4(), domain);
-    let timestamp = chrono::Utc::now().to_rfc3339();
+    // Human-readable local time (gateway tz), e.g. 2026-09-05 08:49:40 +0800.
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
     let mut headers: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     headers.insert("Message-ID".into(), message_id.clone());
     headers.insert("X-AIMail-Welcome".into(), "1".into());
     let headers_json = serde_json::to_string(&headers).unwrap_or_default();
 
-    let subject = WELCOME_SUBJECT;
+    // Personalised subject: first recipient's agent name + send date.
+    let agent = internal
+        .first()
+        .map(|(e, _)| e.split('@').next().unwrap_or(e))
+        .unwrap_or("Agent");
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let subject = format!("Welcome to AIMail, {agent} — your address is active ({date})");
     let body = WELCOME_BODY
         .replace("{domain}", domain)
         .replace("{timestamp}", &timestamp);
@@ -251,7 +256,7 @@ pub async fn send_welcome(
                 &api_key.system_id,
                 &from,
                 &recipients_json,
-                subject,
+                &subject,
                 &body,
                 Some(&endpoints_str),
                 attachments_json.as_deref(),
@@ -336,7 +341,7 @@ pub async fn send_welcome(
                 &record_system,
                 &from,
                 &recipients_json,
-                subject,
+                &subject,
                 &body,
                 endpoints.as_deref(),
                 attachments_json.as_deref(),

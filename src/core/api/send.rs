@@ -523,7 +523,7 @@ pub async fn send_email_core(
     let mut filtered: Vec<String> = Vec::new();
     let mut valid_recipients: Vec<String> = Vec::new();
 
-    // Fixed system auto-reply sender (postman@{domain}). When it appears as a
+    // Fixed system auto-reply sender (noreply@{domain}). When it appears as a
     // RECIPIENT (e.g. an agent reply-all to a welcome mail), it is a system
     // sink — not a deliverable mailbox — so it is never whitelist-checked and
     // never triggers an unregistered-address notification (a reply-storm
@@ -566,7 +566,7 @@ pub async fn send_email_core(
     // (email, domain, webhook_url, webhook_secret)
     let mut external: Vec<String> = Vec::new();
     let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
-    // System sink: the fixed auto-reply sender (postman@{domain}) appearing
+    // System sink: the fixed auto-reply sender (noreply@{domain}) appearing
     // as a recipient. Never delivered (no MX, no webhook, no notification) —
     // recorded in the to/cc display list only (section 7).
     let mut system_sink: Vec<String> = Vec::new();
@@ -577,7 +577,7 @@ pub async fn send_email_core(
 
     for recipient in &valid_recipients {
         let env = &state.factories.email.env_factory;
-        // ── System sink (postman@{domain} as recipient) — not deliverable ──
+        // ── System sink (noreply@{domain} as recipient) — not deliverable ──
         // Reply-all to a welcome mail lands here: absorbed silently, so the
         // unregistered-address auto-reply (the storm seed) is never sent.
         if recipient.to_lowercase() == system_sender {
@@ -1153,7 +1153,7 @@ async fn send_filtered_notification(
         "Some recipients were filtered by whitelist"
     );
 
-    // System FROM address (fixed: postman@{smtp.hostname})
+    // System FROM address (fixed: noreply@{smtp.hostname})
     let auto_reply_from = config.system_sender();
 
     // Build markdown body
@@ -1239,7 +1239,7 @@ async fn send_unregistered_notification(
         "Recipients matched domain but address not registered — auto-reply sent"
     );
 
-    // System FROM address (fixed: postman@{smtp.hostname})
+    // System FROM address (fixed: noreply@{smtp.hostname})
     let auto_reply_from = config.system_sender();
 
     let body = format!(

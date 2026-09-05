@@ -1095,7 +1095,7 @@ impl ConnectionHandler {
     ) -> Option<String> {
         let notif_id = format!("bn-{}", Uuid::new_v4());
 
-        // System FROM address (fixed: postman@{smtp.hostname})
+        // System FROM address (fixed: noreply@{smtp.hostname})
         let auto_reply_from = self.config.system_sender();
 
         let body_prefix = self

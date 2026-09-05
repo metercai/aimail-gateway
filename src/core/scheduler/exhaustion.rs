@@ -54,7 +54,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         return;
     }
 
-    // System FROM address (fixed: postman@{smtp.hostname})
+    // System FROM address (fixed: noreply@{smtp.hostname})
     let auto_reply_from = config.system_sender();
 
     let auto_reply_id = format!("ar-{}", uuid::Uuid::new_v4());
@@ -114,7 +114,7 @@ pub(crate) async fn insert_exhaustion_auto_reply(
 /// Guards against recursive cascade (system-generated records don't create more notifications).
 ///
 /// Semantics: the system notifies the agent that their outbound email delivery exhausted.
-///   FROM: system (fixed: postman@{smtp.hostname} via config.system_sender())
+///   FROM: system (fixed: noreply@{smtp.hostname} via config.system_sender())
 ///   TO:   agent (record.sender)
 ///   Subject: {auto_reply_subject_prefix}[Overlimit] {original_subject}
 ///   Body: markdown (auto_reply_body + detail + original body + attachment filenames)
@@ -136,7 +136,7 @@ pub(crate) async fn insert_exhaustion_notification(
         return;
     }
 
-    // System FROM address (fixed: postman@{smtp.hostname})
+    // System FROM address (fixed: noreply@{smtp.hostname})
     let auto_reply_from = config.system_sender();
 
     let webhook_url = resolve_webhook_url(email_factory, &record.sender).await;

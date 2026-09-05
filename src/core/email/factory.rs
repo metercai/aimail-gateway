@@ -13,7 +13,7 @@ use crate::core::storage::SystemDomainRecord;
 use crate::core::strategy::SystemStore;
 
 use crate::core::email::storage::{
-    AttachmentMetaRecord, AttachmentPermissionRecord, EmailRecord, Recipients,
+    AttachmentMetaRecord, AttachmentPermissionRecord, EmailRecord,
 };
 
 /// Email CRUD factory backed by `Arc<Database>`.

@@ -359,7 +359,7 @@ impl Config {
     }
 
     /// Fixed system auto-reply / system-mail sender identity:
-    /// `postman@{smtp.hostname}`.
+    /// `noreply@{smtp.hostname}`.
     ///
     /// This is NOT a registered mailbox — it is the sender used for all
     /// system-generated mail (welcome, unregistered-addr notice, filtered
@@ -368,7 +368,7 @@ impl Config {
     /// recognize as system mail and must not reply-loop on.
     ///
     /// `smtp.hostname` is a required field (enforced in `validate`), so the
-    /// fallback to `postman@amail-relay` only exists for pre-validation
+    /// fallback to `noreply@amail-relay` only exists for pre-validation
     /// test configs.
     pub fn system_sender(&self) -> String {
         let domain = self
@@ -377,7 +377,7 @@ impl Config {
             .as_deref()
             .filter(|h| !h.trim().is_empty())
             .unwrap_or("amail-relay");
-        format!("postman@{}", domain)
+        format!("noreply@{}", domain)
     }
 }
 

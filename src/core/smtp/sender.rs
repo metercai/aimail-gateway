@@ -27,7 +27,7 @@ pub struct SmtpRelay {
     transport: SmtpTransportMode,
     email_factory: Arc<EmailFactory>,
     outbound: Arc<dyn OutboundTransform>,
-    /// Fixed system auto-reply sender (postman@{gateway domain}). The system
+    /// Fixed system auto-reply sender (noreply@{gateway domain}). The system
     /// sender is never a deliverable mailbox — if it ever appears as a
     /// recipient (e.g. a reply-all to a welcome mail), it is excluded from
     /// SMTP envelope delivery unconditionally: when the gateway domain's MX
@@ -100,7 +100,7 @@ impl SmtpRelay {
             transport,
             email_factory,
             outbound,
-            system_sender: format!("postman@{}", hostname.unwrap_or("amail-relay")),
+            system_sender: format!("noreply@{}", hostname.unwrap_or("amail-relay")),
         })
     }
 
@@ -364,7 +364,7 @@ impl SmtpRelay {
             if !seen.insert(lower.clone()) {
                 continue;
             }
-            // System sender (postman@{domain}) as a recipient is a sink,
+            // System sender (noreply@{domain}) as a recipient is a sink,
             // never deliverable — exclude from the envelope unconditionally
             // (see `system_sender` field docs for the storm rationale).
             if lower == self.system_sender {
