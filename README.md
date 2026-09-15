@@ -1,31 +1,29 @@
-[English](README.md) | [🇨🇳 中文](README_zh.md)
+English | [🇨🇳 中文](README_zh.md)
 
 # aimail-gateway
 
-![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
+![Rust](https://img.shields.io/badge/Rust-orange) ![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-969696) ![License](https://img.shields.io/badge/License-MPL--2.0-blue)
 
 
-**A bidirectional mail gateway purpose-built for AI Agents** — providing instant SMTP inbound and HTTP outbound mail channels so every Agent can seamlessly join the global email network.
+This is **the bidirectional mail gateway built for AI Agents** — it gives Agents a two-way SMTP/HTTP channel for inbound and outbound mail forwarding, so an Agent joins the global email network over plain HTTP and uses email freely for conversation and collaboration.
 
 ---
 
 ## 1. What is aimail-gateway
 
-aimail-gateway is a lightweight, high-performance Rust mail gateway that solves the core problems of Agent email sending and receiving:
+aimail-gateway is a lightweight, high-performance bidirectional Rust mail gateway. It shields Agents from a crowd of legacy mail protocols (SMTP/POP3/IMAP) and sends and receives mail through a native REST API instead:
 
-- **Inbound:** Traditional solutions rely on IMAP/POP3 polling — high latency, wasted resources. aimail-gateway pushes inbound mail to Agents in real-time via Webhook. No polling required.
-- **Outbound:** A standard HTTP API lets Agents send mail with a single toolset call. Same-gateway recipients go through internal Webhook direct delivery; external addresses go through SMTP relay — fast and efficient.
+- **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook and drives the mail pipeline with message events. Inbound mail is stored and searched on the Agent side; the gateway keeps nothing.
+- **Outbound:** aimail-gateway exposes an HTTP `send_mail` API. An Agent sends mail with a single toolset call. Same-gateway recipients are delivered by an internal Webhook; external addresses go out over SMTP. Two routes in, two routes out — fast and efficient.
 
-Beyond these fundamentals, aimail-gateway is purpose-built for how AI Agents actually use email:
+On top of native mail send/receive, aimail-gateway is purpose-built for what Agent mail actually looks like:
 
-- **Security:** Agents shouldn't be exposed to spam and attacks on the open mail network. The default whitelist enforces bidirectional control — unauthorized senders cannot reach Agents, and Agents cannot send to unauthorized addresses. Every Agent has a designated security officer to gatekeep critical operations and provide a safety net.
-- **Content:** Traditional LLMs struggle with raw HTML/MIME email — inefficient and severely token-wasteful. aimail-gateway includes a content processing pipeline that extracts key information, strips styling noise, and uniformly converts to clean Markdown optimized for LLM consumption.
-- **Collaboration:** Email for Agents goes beyond message delivery — it's about human-like conversation and coordination. aimail-gateway has several built-in capabilities for this:
-  - **Contact profiling and session memory** — multi-party conversations stay clear and natural.
-  - **Stranger [WHOAMI]** — Agents can publicly declare their role for easy discovery and efficient role-based interaction.
-  - **A2A Board engine** — autonomous heterogeneous multi-Agent collaboration via standard mail protocols.
+- **Security:** Agent mail addresses are fully exposed on the open mail network and will attract spam and other malicious traffic. aimail-gateway enables bidirectional whitelist control by default and binds a human manager to every Agent, building a security boundary for each Agent, governing critical operations, and eliminating any risk of losing control.
+- **Content:** raw HTML/MIME mail is inefficient for LLMs and badly token-wasteful. aimail-gateway ships a built-in content pipeline that extracts the key information, strips styling noise, and hands clean Markdown to the Agent.
 
-**aimail-gateway is the core infrastructure of AgentMail.** The [AgentMail](https://github.com/metercai/agentmail) toolchain integrates different Agent systems, enabling heterogeneous multi-Agent human-like conversation and collaboration over email.
+Once an Agent holds a globally unique mail address, its identity is globally identifiable and its messages can be routed and delivered. Sending and receiving mail then stops being plain message transport and becomes an ongoing multi-party conversation with the outside world — and **collaboration**. aimail-gateway therefore also provides the tooling teamwork needs: **contact profiling**, **session summaries**, **identity cards**, and the **A2A board & task engine**.
+
+**aimail-gateway connects different Agent systems with the traditional mail network — the infrastructure of a hybrid human–Agent internet** — while [AIMail](https://github.com/metercai/aimail) provides the aimail CLI and SDK that onboard and maintain the various Agent systems. Together they form a human-led network where cross-platform Agents converse and collaborate freely.
 
 ---
 
@@ -37,52 +35,50 @@ Beyond these fundamentals, aimail-gateway is purpose-built for how AI Agents act
 - **Webhook push** — real-time HTTP POST to Agent Webhook URL
 - **Multi-address aggregation** — batch push to multiple recipients at once
 - **Webhook hybrid mode** — push/pull mixed delivery for the same email
-- **Derived address support** — compatible with multi-identity addresses derived from an agent's primary address:
-  -  `{role_name}.{agent_name}@{mx_domain}`
-- **Immediate rejection** — invalid recipients, oversized mail, internal-sender-as-external rejected instantly to save resources
-- **Push scheduling** — async queue, auto-retry on failure, expired resource cleanup
+- **Instant rejection of invalid inbound** — invalid recipients, oversized mail, internal-address senders rejected instantly to save resources
+- **Push scheduling** — async queue push, auto-retry on failure, expired resource cleanup
 
 **Outbound:**
 - **Pre-upload attachments** — dedicated upload endpoint for higher delivery success
-- **HTTP send API** — JSON-format mail via HTTP, Agent-friendly
-- **SMTP outbound** — direct delivery to target mail domains, or via configured external relay
-- **Internal forwarding** — same-gateway recipients delivered directly, no public network loop
-- **Derived address support** — compatible with multi-identity addresses derived from an agent's primary address
-- **Outbound scheduling** — async queue, auto-retry on failure, expired resource cleanup
-- **Bounce handling** — RFC 3464 compliant automatic bounce recognition and processing
+- **HTTP send API** — JSON-format mail over HTTP, Agent-friendly
+- **SMTP outbound** — direct delivery to the target mail domain, or through a configured external relay
+- **Internal forwarding** — same-gateway recipients delivered internally, no detour across the public network
+- **Outbound scheduling** — async queue delivery, auto-retry on failure, expired resource cleanup
+- **Bounce handling** — RFC 3464 compliant automatic post-send bounce recognition and processing
 
 **Security:**
-- **Default bidirectional whitelist** — unauthorized senders can't reach Agents; Agents can't send to unauthorized addresses
-- **Security officer** — every Agent has a security officer address; critical operations require officer approval as a safety net
-- **API Key authentication** — independent keys per Agent with multi-scope management
-- **Tiered API keys** — separate system/domain/agent key levels, isolated per scenario
-- **Behavior scoping** — role and scope-based behavior limitation to prevent out-of-bounds actions
-- **Loop prevention** — internal recipients never relayed externally, internal senders never accepted as inbound, auto-reply suppression to avoid cycles
-- **Audit logging** — critical operations fully recorded and traceable
+- **Default bidirectional whitelist** — unauthorized senders cannot get in; outbound content cannot reach unauthorized recipients
+- **Bound manager** — a manager address per Agent; mail commands govern critical operations and act as a safety net
+- **API Key authentication** — independent key per Agent, multi-scope management
+- **Tiered API keys** — system/domain/agent key levels, isolated per scenario and never exposed to each other
+- **Behavior scoping** — role and scope-based behavior limits that avoid risky actions
+- **Loop prevention** — internal recipients never relayed externally, internal senders never accepted inbound, auto-replies never retried, so no cycles can form
+- **Audit logging** — critical operations fully recorded and auditable
 
 **Content:**
-- **Encoding detection** — auto-detect mail encoding and convert to UTF-8
-- **Attachment management** — auto-extract attachments for download, metadata flows with email
-- **Format conversion** — body cleaning and conversion to Markdown, ready for LLM consumption
+- **Encoding detection** — detect mail encoding automatically and convert to UTF-8
+- **Attachment management** — attachments extracted and served for download, metadata travels with the mail
+- **Format conversion** — body cleaned and converted to Markdown, directly consumable by LLMs
 - **Information extraction** — sender signature extraction for identity recognition
 - **Thread tracking** — automatic In-Reply-To / References chain maintenance
-- **Thread summary** — persistent thread context, Agents retain memory across sessions
-- **Raw snapshots** — optional raw email preservation for future mining and audit
+- **Mail snapshots** — raw mail is not retained; the Agent stores, searches, and audits on its own
 
 **Collaboration:**
-- **Contact profiling** — build dynamic profiles for contacts, making replies more targeted
-- **Session summary** — build session summaries per contact, keeping conversations organized
-- **Identity self-declaration** — tiered `[WHOAMI]` instruction response for strangers and contacts, enabling role discovery
-- **A2A Board** — pipeline view + task dependencies + assignee tracing, at a glance
-- **A2A Task engine** — instruction flow + session flow + notification flow, event-driven autonomous collaboration
-- **Definable roles** — roles and behaviors customized through config data and prompts, an LLM-native workflow engine
-- **Human-in-the-loop** — human-Agent hybrid workflows, with objectives and deliverables controlled by humans
+- **Contact profiling** — dynamic profiles per contact, so replies land better
+- **Session summary** — topic summaries per session, keeping conversations coherent and orderly
+- **Identity cards** — a tiered identity-card response flow for the public (strangers) and acquaintances (contacts): secure, trustworthy, low-cost role discovery that helps task collaboration
+- **A2A board** — pipeline view + task dependencies + assignee tracing, all at a glance
+- **A2A task engine** — instruction flow + session flow + notification flow, event-driven autonomous collaboration
+- **Definable roles and behaviors** — roles and behaviors defined by config data and prompts; an LLM-native workflow engine
+- **Owner-controlled goals & deliverables** — human–Agent hybrid workflows where goals and outputs are solely controlled by the human (Owner)
 
 ---
 
 ## 3. Quick Start
 
-aimail-gateway needs to connect to the external mail network. Prepare a VPS with firewall ports open for SMTP and HTTP.
+aimail-gateway must interconnect with the external mail system. Prepare a VPS and open the configured smtp and http ports in the firewall.
+
+The gateway has exactly one runtime config file, `config.toml` (read from `./config.toml` by default; use `-c/--config` to point elsewhere). The repository-root `.env` only serves the deploy scripts below (SSH connection details) — it is not the gateway's runtime config.
 
 ```bash
 cp .env.example .env
@@ -90,27 +86,51 @@ cp .env.example .env
 #   AIMAIL_DEPLOY_HOST    — VPS IP address
 #   AIMAIL_DEPLOY_USER    — SSH login user
 #   AIMAIL_DEPLOY_KEY     — SSH private key path (optional)
+#   AIMAIL_DEPLOY_PORT    — SSH port (optional, default 22)
 ```
 
 ### Option A: Binary Deployment
 
 ```bash
-# Build, upload and install systemd service
+# 1) Prepare the runtime config (smtp.hostname is required and must match the VPS PTR record)
+cp config.toml.example config.toml   # edit config.toml before uploading
+
+# 2) Build and upload the binary (→ /usr/local/bin/aimail-gateway), install the systemd unit
 bash deploy-bin.sh build
-bash deploy-bin.sh setup-systemd
+bash deploy-bin.sh upload
+bash deploy-bin.sh setup-systemd     # the unit's ExecStart reads /etc/aimail/config.toml
+
+# 3) Upload the runtime config (the deploy script ships the binary and the systemd unit, not the config)
+set -a; . ./.env; set +a
+ssh -p "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" \
+  "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}" "mkdir -p /etc/aimail /var/aimail"
+scp -P "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" config.toml \
+  "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}:/etc/aimail/config.toml"
+
+# 4) Start and check health
 bash deploy-bin.sh start
-bash deploy-bin.sh health
+bash deploy-bin.sh health            # probes http://127.0.0.1:8080/health
 ```
 
 ### Option B: Docker Deployment
 
 ```bash
-# Build image with commit hash
-bash deploy-docker.sh build
+# 1) Build the image (.git is not in the build context — pass the version via GIT_COMMIT;
+#    the build needs access to crates.io)
+TAG=$(git rev-parse --short HEAD)
+docker build --build-arg "GIT_COMMIT=${TAG}" -t "aimail-gateway:${TAG}" .
 
-# Push to remote server and run
-bash deploy-docker.sh push
-bash deploy-docker.sh run
+# 2) Run as root: the image ships a non-root user, but port 25 and the data directory
+#    both require root. config.toml is the same file as in Option A; with the default
+#    storage path (./data) the container stores into /data, so mounting it persists state.
+docker run -d --name aimail-gateway --restart unless-stopped --user 0:0 \
+  -p 25:25 -p 8080:8080 \
+  -v /etc/aimail/config.toml:/etc/aimail/config.toml:ro \
+  -v /var/aimail:/data \
+  "aimail-gateway:${TAG}" --config /etc/aimail/config.toml
+
+# 3) Health check (the image has no shell — probe from the host)
+curl -sf http://127.0.0.1:8080/health
 ```
 
 ---
@@ -122,7 +142,7 @@ bash deploy-docker.sh run
 | Field | Section | Description |
 |------|---------|-------------|
 | `bind` | `[smtp]` | Inbound SMTP listen address, default `0.0.0.0:25` |
-| `hostname` | `[smtp]` | EHLO hostname, should match PTR record (e.g. `amail.token.tm`) |
+| `hostname` | `[smtp]` | **Required.** EHLO hostname and PTR name for outbound connections; must match the VPS PTR record (e.g. `mail.example.com`); startup fails without it |
 | `bind` | `[http]` | HTTP API listen address, default `0.0.0.0:8080` |
 | `smtp_server` | `[relay]` | External relay address (e.g. `smtp://smtp.example.com:587`) |
 | `username / password` | `[relay]` | Relay authentication credentials |
@@ -140,7 +160,7 @@ bind = "0.0.0.0:8080"
 
 [smtp]
 bind = "0.0.0.0:25"
-# hostname = "mail.yourdomain.com"
+hostname = "mail.example.com"           # Required: EHLO/PTR name, must match the VPS PTR record
 # max_message_size = 10485760
 # max_connections = 100
 
@@ -189,8 +209,22 @@ path = "./data"
 # archive_retention_days = 90
 ```
 
+### Environment Variable Overrides
+
+The following environment variables override the matching settings. Precedence: built-in defaults < `config.toml` < environment variables (handy for container/CI deployments where you'd rather not edit the config file):
+
+| Environment variable | Overrides |
+|---------|---------|
+| `AIMAILGW_HTTP_ADDR` | `[http] bind` |
+| `AIMAILGW_SMTP_ADDR` | `[smtp] bind` |
+| `AIMAILGW_STORAGE_PATH` | `[storage] path` |
+| `AIMAILGW_RELAY_SMTP_SERVER` | `[relay] smtp_server` |
+| `AIMAILGW_RELAY_USERNAME` | `[relay] username` |
+| `AIMAILGW_RELAY_PASSWORD` | `[relay] password` |
+| `AIMAILGW_LOGGING_LEVEL` | `[logging] level` |
+
 ---
 
 ## 5. Related Projects
 
-- [agentmail](https://github.com/metercai/agentmail) — Agent integration toolchain (one-click deploy with patch/skill/toolset)
+- [AIMail](https://github.com/metercai/aimail) — the AIMail main repository, containing the aimail CLI and the aimail SDK: it connects different Agent systems to aimail-gateway and handles day-to-day maintenance on the host.

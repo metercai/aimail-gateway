@@ -100,7 +100,7 @@ impl SmtpRelay {
             transport,
             email_factory,
             outbound,
-            system_sender: format!("noreply@{}", hostname.unwrap_or("amail-relay")),
+            system_sender: format!("noreply@{}", hostname.unwrap_or("aimail-relay")),
         })
     }
 

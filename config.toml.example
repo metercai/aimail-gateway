@@ -17,7 +17,7 @@ bind = "0.0.0.0:8080"                    # listen address (host:port, default 0.
 
 [smtp]
 bind = "0.0.0.0:25"                      # listen address (host:port, default 0.0.0.0:25)
-# hostname = "mail.yourdomain.com"        # EHLO/HELO banner and PTR name for outbound connections
+hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR name for outbound connections
 # max_message_size = 10485760             # max inbound message size in bytes (default 10 MB)
 # max_connections = 100                   # max concurrent SMTP connections (default 100)
 # channel_capacity = 1000                 # internal channel buffer size (default 1000)

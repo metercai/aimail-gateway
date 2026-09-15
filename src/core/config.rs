@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 /// Full application configuration loaded via: Defaults → TOML → Env Override.
 ///
-/// Environment variables use the prefix `AIMAILGW_` and map to nested fields
-/// using double underscores (e.g. `AIMAILGW_HTTP_ADDR` → `http.addr`).
+/// Environment variables use the prefix `AIMAILGW_`; the supported set is a
+/// fixed list (see `apply_env_overrides`), e.g. `AIMAILGW_HTTP_ADDR` → `http.bind`.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Config {
     #[serde(default)]
@@ -74,8 +74,8 @@ pub struct SmtpConfig {
     #[serde(default = "default_channel_capacity")]
     pub channel_capacity: usize,
     /// EHLO/HELO hostname for outbound connections and SMTP banner.
-    /// Should match the PTR record (e.g. "amail.token.tm") for deliverability.
-    /// Default: system hostname (or "amail-relay").
+    /// Should match the PTR record (e.g. "aimail.token.tm") for deliverability.
+    /// Default: system hostname (or "aimail-relay").
     #[serde(default)]
     pub hostname: Option<String>,
     /// Maximum concurrent SMTP connections. (default: 100)
@@ -368,7 +368,7 @@ impl Config {
     /// recognize as system mail and must not reply-loop on.
     ///
     /// `smtp.hostname` is a required field (enforced in `validate`), so the
-    /// fallback to `noreply@amail-relay` only exists for pre-validation
+    /// fallback to `noreply@aimail-relay` only exists for pre-validation
     /// test configs.
     pub fn system_sender(&self) -> String {
         let domain = self
@@ -376,7 +376,7 @@ impl Config {
             .hostname
             .as_deref()
             .filter(|h| !h.trim().is_empty())
-            .unwrap_or("amail-relay");
+            .unwrap_or("aimail-relay");
         format!("noreply@{}", domain)
     }
 }

@@ -294,7 +294,7 @@ impl Handler for ConnectionHandler {
         }
 
         // ── Resolve system / domain from recipient address ────────────
-        // Try exact match first (shared domain: ql-biopharm.tow@amail.token.tm
+        // Try exact match first (shared domain: ql-biopharm.tow@aimail.token.tm
         // IS the domain record).  Fall back to persona-stripped base address
         // (non-shared domain: sales.bob@company.com → bob@company.com).
         let full_lower = to.to_lowercase();
@@ -1196,7 +1196,7 @@ pub fn handle_smtp_session_blocking<H: Handler>(
     use std::io::{BufRead, BufReader, Write};
 
     let peer_ip = peer_addr.ip();
-    let banner_hostname = config.smtp.hostname.as_deref().unwrap_or("amail-relay");
+    let banner_hostname = config.smtp.hostname.as_deref().unwrap_or("aimail-relay");
     let session_builder = crate::SessionBuilder::new(banner_hostname);
     let mut session = session_builder.build(peer_ip, handler);
 

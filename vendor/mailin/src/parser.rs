@@ -319,10 +319,10 @@ mod tests {
     #[test]
     fn rcpt_to_with_notify() {
         // RCPT TO with DSN parameters (RFC 3461)
-        let res = parse(b"RCPT TO:<tow@amail.token.tm> NOTIFY=SUCCESS,FAILURE\r\n");
+        let res = parse(b"RCPT TO:<tow@aimail.token.tm> NOTIFY=SUCCESS,FAILURE\r\n");
         match res {
             Ok(Cmd::Rcpt { forward_path }) => {
-                assert_eq!(forward_path, "tow@amail.token.tm");
+                assert_eq!(forward_path, "tow@aimail.token.tm");
             }
             _ => panic!("RCPT TO with NOTIFY param incorrectly parsed"),
         };

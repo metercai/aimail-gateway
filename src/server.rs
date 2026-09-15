@@ -6,13 +6,13 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use amail_base::core::config::Config;
-use amail_base::core::errors::AppResult;
-use amail_base::core::storage::Database;
+use aimail_base::core::config::Config;
+use aimail_base::core::errors::AppResult;
+use aimail_base::core::storage::Database;
 
-use amail_base::core::api::http::create_router;
-use amail_base::core::api::monitor::Metrics;
-use amail_base::core::strategy::RouterHook;
+use aimail_base::core::api::http::create_router;
+use aimail_base::core::api::monitor::Metrics;
+use aimail_base::core::strategy::RouterHook;
 
 /// aimail-gateway server: SMTP, HTTP, and retry worker.
 pub struct Server {
@@ -52,10 +52,10 @@ impl Server {
 
     /// Generate and persist the admin API key. Returns the cleartext key.
     pub async fn setup_admin_key(&self) -> AppResult<String> {
-        amail_base::core::server::setup_admin_key(
+        aimail_base::core::server::setup_admin_key(
             &self.db,
             &self.config,
-            Arc::new(amail_base::base::strategy::BaseSystemStore),
+            Arc::new(aimail_base::base::strategy::BaseSystemStore),
         )
         .await
     }
@@ -83,18 +83,18 @@ impl Server {
         let metrics = self.metrics;
         let config = self.config;
 
-        let endpoint = amail_base::core::server::api_endpoint_url(&config);
+        let endpoint = aimail_base::core::server::api_endpoint_url(&config);
         info!(%endpoint, "HTTP API endpoint");
 
         let db_arc = Arc::new(db.clone());
 
-        let system_store: Arc<dyn amail_base::core::strategy::SystemStore> =
-            Arc::new(amail_base::base::strategy::BaseSystemStore);
+        let system_store: Arc<dyn aimail_base::core::strategy::SystemStore> =
+            Arc::new(aimail_base::base::strategy::BaseSystemStore);
 
-        let dns_resolver = amail_base::core::server::create_dns_resolver(&config)?;
-        let extensions = Arc::new(amail_base::core::strategy::ExtensionProviders::base());
-        let http_state = amail_base::core::api::types::HttpState {
-            factories: amail_base::core::email::factory::MailFactories::new(
+        let dns_resolver = aimail_base::core::server::create_dns_resolver(&config)?;
+        let extensions = Arc::new(aimail_base::core::strategy::ExtensionProviders::base());
+        let http_state = aimail_base::core::api::types::HttpState {
+            factories: aimail_base::core::email::factory::MailFactories::new(
                 db_arc.clone(),
                 &config.storage.path,
                 system_store.clone(),
@@ -104,49 +104,49 @@ impl Server {
             trigger_tx: trigger_tx.clone(),
             extensions: extensions.clone(),
             dns_resolver: Some(dns_resolver.clone()),
-            send_deduper: amail_base::core::api::dedup::SendDeduper::new(
+            send_deduper: aimail_base::core::api::dedup::SendDeduper::new(
                 std::time::Duration::from_secs(config.retry.send_dedupe_window_secs),
                 4096,
             ),
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──
-        amail_base::core::server::register_stranger_interceptor(&http_state);
-        amail_base::core::server::register_board_interceptors(&http_state);
-        let base_hook: Arc<dyn RouterHook> = Arc::new(amail_base::base::strategy::BaseRouterHook(
+        aimail_base::core::server::register_stranger_interceptor(&http_state);
+        aimail_base::core::server::register_board_interceptors(&http_state);
+        let base_hook: Arc<dyn RouterHook> = Arc::new(aimail_base::base::strategy::BaseRouterHook(
             http_state.clone(),
         ));
         let router_hook: Arc<dyn RouterHook> = base_hook;
         // Base SMTP inbound handler: pure business logic, no security, no
         // rate/limits, no TLS (the base edition stays free of those concerns).
-        let smtp_handler = amail_base::core::smtp::receiver::ConnectionHandler::new(
+        let smtp_handler = aimail_base::core::smtp::receiver::ConnectionHandler::new(
             Arc::new(config.clone()),
             http_state.factories.email.clone(),
             http_state.factories.attachment.clone(),
             http_state.trigger_tx.clone(),
             http_state.metrics.clone(),
         );
-        let smtp_handle = amail_base::core::server::spawn_smtp(&http_state, smtp_handler, cancel.clone())?;
+        let smtp_handle = aimail_base::core::server::spawn_smtp(&http_state, smtp_handler, cancel.clone())?;
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();
         let router = create_router(http_state, router_hook, None, None, None, None);
 
-        let retry_handle = amail_base::core::server::spawn_retry_worker(
+        let retry_handle = aimail_base::core::server::spawn_retry_worker(
             &http_state_for_worker,
             trigger_rx,
             cancel.clone(),
         );
         let http_handle =
-            amail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
+            aimail_base::core::server::spawn_http_single_port(router, &config, cancel.clone());
 
-        let cleanup_handle = amail_base::core::server::spawn_cleanup_worker(
+        let cleanup_handle = aimail_base::core::server::spawn_cleanup_worker(
             db_arc.clone(),
             config.webhook.pending_ttl_hours,
             cancel.clone(),
         );
 
-        amail_base::core::cli::graceful::wait_for_services(
+        aimail_base::core::cli::graceful::wait_for_services(
             cancel,
             http_handle,
             smtp_handle,

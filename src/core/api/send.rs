@@ -750,7 +750,7 @@ pub async fn send_email_core(
     // ── [P0] Ping-pong interception ────────────────────────────
     // When send_mail sends a pong, redirect as inbound instead of
     // creating an outbound record for external SMTP delivery.
-    if subject.starts_with("__amail_pong__:") && !external.is_empty() {
+    if subject.starts_with("__aimail_pong__:") && !external.is_empty() {
         let new_id = Uuid::new_v4().to_string();
         let new_sender = external[0].clone();
         let new_recipient = sender.to_string();
@@ -1113,7 +1113,7 @@ pub async fn send_email_core(
 ///      fallback callers that don't set their own Message-ID).
 ///   ② smtp.hostname — required (validation fails if missing)
 ///   ③ http.hostname — optional
-///   ④ "amail.local" — dead fallback, unreachable in practice since ② is required
+///   ④ "aimail.local" — dead fallback, unreachable in practice since ② is required
 fn resolve_fallback_domain(
     sender: &str,
     smtp_hostname: Option<&str>,
@@ -1127,7 +1127,7 @@ fn resolve_fallback_domain(
     }
     smtp_hostname
         .or(http_hostname)
-        .unwrap_or("amail.local")
+        .unwrap_or("aimail.local")
         .to_string()
 }
 
@@ -1177,7 +1177,7 @@ async fn send_filtered_notification(
     );
 
     let subject = format!(
-        "{}[AmailGW] Filtered recipients: {} recipient(s) not delivered",
+        "{}[AimailGW] Filtered recipients: {} recipient(s) not delivered",
         config.relay.auto_reply_subject_prefix,
         filtered.len()
     );
@@ -1255,7 +1255,7 @@ async fn send_unregistered_notification(
     );
 
     let subject = format!(
-        "{}[AmailGW] Unregistered addresses: {} address(es) not deliverable",
+        "{}[AimailGW] Unregistered addresses: {} address(es) not deliverable",
         config.relay.auto_reply_subject_prefix,
         unregistered.len()
     );
@@ -1319,8 +1319,8 @@ mod tests {
         );
         // ② missing → ③ http.hostname
         assert_eq!(resolve_fallback_domain("", None, Some("http.example")), "http.example");
-        // ③ missing → ④ amail.local
-        assert_eq!(resolve_fallback_domain("", None, None), "amail.local");
+        // ③ missing → ④ aimail.local
+        assert_eq!(resolve_fallback_domain("", None, None), "aimail.local");
         // sender has @ but empty domain → falls back to hostname chain
         assert_eq!(resolve_fallback_domain("alice@", Some("relay.example"), None), "relay.example");
     }

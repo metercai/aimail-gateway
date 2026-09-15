@@ -12,7 +12,7 @@ name = "aimail-gateway"
 path = "src/main.rs"
 
 [lib]
-name = "amail_base"
+name = "aimail_base"
 path = "src/lib.rs"
 
 [dependencies]

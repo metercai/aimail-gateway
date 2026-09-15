@@ -135,7 +135,7 @@ pub async fn process_email_webhook(
         .relay
         .username
         .as_deref()
-        .unwrap_or("relay@amail-relay.local");
+        .unwrap_or("relay@aimail-relay.local");
 
     let mut payload =
         build_webhook_payload_from_record(record, forwarder, record.sender_signature.as_deref());
@@ -923,12 +923,12 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("amailgw-wb-approval-{ts}"));
+        let dir = std::env::temp_dir().join(format!("aimailgw-wb-approval-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
         let arc = std::sync::Arc::new(db);
         let env = EnvFactory::new(arc.clone(), std::sync::Arc::new(BaseSystemStore));
-        let ef = EmailFactory::new(arc, std::path::PathBuf::from("/tmp/amailgw-wb-att"), std::sync::Arc::new(BaseSystemStore));
+        let ef = EmailFactory::new(arc, std::path::PathBuf::from("/tmp/aimailgw-wb-att"), std::sync::Arc::new(BaseSystemStore));
         (env, ef)
     }
 

@@ -5,14 +5,14 @@ mod server;
 use clap::Parser;
 use std::fs;
 
-use amail_base::core::cli::daemon;
-use amail_base::core::cli::{cmd_status, cmd_stop, init_tracing, Cli, Commands};
-use amail_base::core::errors::{AppError, AppResult};
+use aimail_base::core::cli::daemon;
+use aimail_base::core::cli::{cmd_status, cmd_stop, init_tracing, Cli, Commands};
+use aimail_base::core::errors::{AppError, AppResult};
 
-pub use amail_base::core::config::Config;
-pub use amail_base::core::email::factory::{AttachmentFactory, EmailFactory};
-pub use amail_base::core::factory::EnvFactory;
-pub use amail_base::core::storage::Database;
+pub use aimail_base::core::config::Config;
+pub use aimail_base::core::email::factory::{AttachmentFactory, EmailFactory};
+pub use aimail_base::core::factory::EnvFactory;
+pub use aimail_base::core::storage::Database;
 pub use server::Server;
 
 #[tokio::main]
@@ -47,7 +47,7 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
 
     // Load configuration
     let config_path = cli.config.to_string_lossy().to_string();
-    let mut config = amail_base::core::config::load(&config_path)?;
+    let mut config = aimail_base::core::config::load(&config_path)?;
 
     // Apply CLI overrides
     if let Some(ref db_path) = cli.db {

@@ -46,8 +46,8 @@ pub(crate) async fn insert_exhaustion_auto_reply(
         || record.id.starts_with("bn-")
         || record.id.starts_with("sr-")
         || record.subject.contains("[Overlimit]")
-        || record.subject.contains("[AmailGW]")
-        || record.subject.starts_with("__amail_pong__:")
+        || record.subject.contains("[AimailGW]")
+        || record.subject.starts_with("__aimail_pong__:")
         || record.id.starts_with("exp-")
     {
         info!(email_id = %record.id, "Suppressing recursive auto-reply — system-generated record");
@@ -129,7 +129,7 @@ pub(crate) async fn insert_exhaustion_notification(
     // (auto-replies, filtered notifications) should not recursively create
     // more notifications when they themselves exhaust.
     if record.subject.contains("[Overlimit]")
-        || record.subject.contains("[AmailGW]")
+        || record.subject.contains("[AimailGW]")
         || record.id.starts_with("wn-")
     {
         info!(email_id = %record.id, "Suppressing recursive exhaustion notification");

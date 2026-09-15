@@ -288,7 +288,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("amailgw-sweep-{ts}"));
+        let dir = std::env::temp_dir().join(format!("aimailgw-sweep-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
         let arc = std::sync::Arc::new(db.clone());

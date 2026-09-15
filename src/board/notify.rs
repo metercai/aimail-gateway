@@ -479,7 +479,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -503,7 +503,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -526,7 +526,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -549,7 +549,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -572,7 +572,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -595,7 +595,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -618,7 +618,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -641,7 +641,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -664,7 +664,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -688,7 +688,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,
@@ -710,7 +710,7 @@ mod tests {
         let board = make_board();
         let notifier = Notifier {
             board_db_path: std::env::temp_dir()
-                .join("amail-notify-test")
+                .join("aimail-notify-test")
                 .to_string_lossy()
                 .into_owned(),
             email_factory: None,

@@ -1741,7 +1741,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("amailgw-test-{}", ts));
+        let dir = std::env::temp_dir().join(format!("aimailgw-test-{}", ts));
         std::fs::create_dir_all(&dir).unwrap();
         // Database::open expects the SQLite FILE path (like main.rs passes
         // config.storage.db_path() = <dir>/aimail.db), not a directory.

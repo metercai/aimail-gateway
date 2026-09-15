@@ -202,7 +202,7 @@ pub async fn send_welcome(
         .hostname
         .as_deref()
         .or_else(|| state.config.http.hostname.as_deref())
-        .unwrap_or("amail-relay");
+        .unwrap_or("aimail-relay");
     let message_id = format!("<{}@{}>", Uuid::new_v4(), domain);
     // Human-readable local time (gateway tz), e.g. 2026-09-05 08:49:40 +0800.
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();

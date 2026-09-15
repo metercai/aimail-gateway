@@ -370,7 +370,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("amailgw-act-test-{ts}"));
+        let dir = std::env::temp_dir().join(format!("aimailgw-act-test-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
         let factory = crate::core::factory::EnvFactory::new(

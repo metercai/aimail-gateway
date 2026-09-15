@@ -472,7 +472,7 @@ async fn register_address(
     // Verify the domain anchor exists under this system.
     // Lookup key: non-shared → bare domain (e.g. "company.com");
     // shared → system anchor "system_name@bare_domain" (e.g.
-    // "vfy@amail.token.tm"), derived from the address's system_name
+    // "vfy@aimail.token.tm"), derived from the address's system_name
     // segment. Both modes resolve through the same table lookup and
     // the same system_id equality check below — only the key differs.
     let lookup_key = if tid.starts_with("shared-") {
@@ -2900,7 +2900,7 @@ fn preprocess_pending_filter(raw: &[String]) -> Vec<String> {
 // ── Email address validation ──────────────────────────────────────────
 
 /// RFC 5321 `atext` characters excluding '.' (dot).
-/// Dot is reserved as persona/system-id separator in amail addresses.
+/// Dot is reserved as persona/system-id separator in AIMail addresses.
 fn is_atext_no_dot(b: u8) -> bool {
     matches!(b,
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'

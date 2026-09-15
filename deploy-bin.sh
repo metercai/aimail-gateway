@@ -8,14 +8,14 @@
 #   # SSH key path (optional, default ~/.ssh/id_rsa)
 #   export AIMAIL_DEPLOY_KEY="$HOME/.ssh/id_deploy"
 #
-#   bash amail-bin.sh build        # Build binary
-#   bash amail-bin.sh upload       # Upload binary
-#   bash amail-bin.sh start        # Start
-#   bash amail-bin.sh stop         # Stop
-#   bash amail-bin.sh restart      # Restart
-#   bash amail-bin.sh status       # Status
-#   bash amail-bin.sh logs         # View logs
-#   bash amail-bin.sh health       # Health check
+#   bash deploy-bin.sh build        # Build binary
+#   bash deploy-bin.sh upload       # Upload binary
+#   bash deploy-bin.sh start        # Start
+#   bash deploy-bin.sh stop         # Stop
+#   bash deploy-bin.sh restart      # Restart
+#   bash deploy-bin.sh status       # Status
+#   bash deploy-bin.sh logs         # View logs
+#   bash deploy-bin.sh health       # Health check
 
 set -eo pipefail
 

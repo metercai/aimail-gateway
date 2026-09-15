@@ -311,18 +311,18 @@ mod tests {
     #[test]
     fn test_derive_board_id_shared_domain_embeds_system_name() {
         // Shared-domain layout: {short}.{system_name}.a2a@{shared_domain}
-        let a = derive_board_id("proj.xianlin.a2a@amail.token.tm");
-        let b = derive_board_id("proj.wguo.a2a@amail.token.tm");
+        let a = derive_board_id("proj.xianlin.a2a@aimail.token.tm");
+        let b = derive_board_id("proj.wguo.a2a@aimail.token.tm");
         assert_ne!(a, b, "same short_id on different shared systems must not collide");
     }
 
     #[test]
     fn test_parse_board_email_shared_layout() {
         let (short, bid, domain) =
-            parse_board_email("proj.xianlin.a2a@amail.token.tm").unwrap();
+            parse_board_email("proj.xianlin.a2a@aimail.token.tm").unwrap();
         assert_eq!(short, "proj");
-        assert_eq!(domain, "amail.token.tm");
-        assert_eq!(bid, derive_board_id("proj.xianlin.a2a@amail.token.tm"));
+        assert_eq!(domain, "aimail.token.tm");
+        assert_eq!(bid, derive_board_id("proj.xianlin.a2a@aimail.token.tm"));
     }
 
     #[test]
