@@ -13,8 +13,8 @@
 
 aimail-gateway 是一个轻量而高性能的 Rust 双向邮件网关。它为 Agent 屏蔽了复杂的SMTP/POP3/IMAP等众多传统邮件协议，而以原生的REST API来收发邮件：
 
-- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，以消息事件驱动邮件处理流程。入站邮件存于 Agent 本地并可检索，gateway侧不留存。
-- **发信：** aimail-gateway 提供 HTTP 的 `send_mail` API。 Agent 调用 toolset 即可完成发信任务。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发。内外双路由，高效快捷。
+- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，以消息事件驱动邮件处理流程。邮件正文与头部存于 Agent 本地并可检索，gateway 侧只保留传输与审计所必需的内容（未投递拉取条目最长 72 小时、已投递投递记录保留 7 天、附件文件默认最长 30 天，可配置）。
+- **发信：** aimail-gateway 提供 JSON HTTP 发信接口（`POST /api/v1/send`）。 Agent 调用 toolset 即可完成发信任务。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发。内外双路由，高效快捷。
 
 aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景特点做了专属优化，包括：
 
@@ -47,12 +47,12 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 - 退信处理 — 兼容RFC 3464标准的发信后自动退信识别和处理
 
 **安全：**
-- 默认双向白名单 — 非授权发件人无法入站，出站内容无法外发未授权收件地址
+- 默认双向白名单 — 默认拒绝非授权发件人（仅 `[WHOAMI]` 等通用身份查询会被应答），出站内容无法外发未授权收件地址
 - 绑定安全员 — 为每 Agent 配置安全员地址，配套指令邮件管控关键操作，做安全兜底
-- API Key 认证 — 每 Agent 独立 Key，多 scope 管理
+- API Key 认证（HMAC 请求签名） — 每 Agent 独立 Key，多 scope 管理；明文 Key 不过网，协议见 `docs/API-SIGNATURE-PROTOCOL.md`
 - 分级API key — 区分 system/domain/agent 等不同级别的key，各场景独立，互不见面
 - 行为限定 — 基于角色和作用域的行为限定，规避行为风险
-- 回还阻断 — 内收件人地址不外发，内发件人地址不入站，自动回复邮件不重试，避免循环调用
+- 回环阻断 — 内收件人地址不外发，内发件人地址不入站，自动回复邮件不重试，避免循环调用
 - 审计日志 — 关键操作全记录，可审计追溯
 
 **内容：**
@@ -61,7 +61,7 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 - 格式转换 — 正文格式清洗和转换到Markdown, LLM 可直接消费
 - 信息提取 — 发件人签名提取, 有效识别和发现身份
 - 线程追踪 — 自动维护 In-Reply-To / References 链路
-- 邮件快照 — 原始邮件不留存，由Agent自行存储、检索和审计回溯
+- 不长期归档 — 原始邮件不留存，由Agent自行存储、检索和审计回溯，附件保留窗口见 `[storage] attachment_lifetime_hours`
 
 **协作：**
 - 联系人画像 — 为联系人建立动态画像，让回复更善解人意
@@ -69,14 +69,14 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 - 身份卡片 — 面向公众（陌生人）和熟人（联系人）的分级身份卡片响应流程，确保安全、可信和低资源消耗的角色发现，有利于任务协作
 - A2A 看板 — 流程视图 + 任务依赖 + 责任人追溯，一目了然
 - A2A 任务引擎 — 指令流 + 会话流 + 通知流，事件驱动的自主协作任务
-- 角色行为可定义 — 角色与行为通过配置数据和prompt自定义，LLM 原生驱动的工作流引擎
+- 角色行为可定义 — 角色与权限模型由配置数据定义（网关自身不含 LLM；LLM 侧行为在 Agent 系统）
 - 目标产出专属控制 — 人与 Agent 混合的工作流，目标和产出由人类（Owner）唯一主控
 
 ---
 
 ## 3. 快速开始
 
-aimail-gateway 需要与外网邮件系统互联，建议先准备好一台 VPS，防火墙打开配置的 smtp 和 http 端口。
+aimail-gateway 需要与外网邮件系统互联，需先准备一台 VPS，并在防火墙放行配置的 smtp 与 http 端口。
 
 网关自身的运行时配置只有一份 `config.toml`（默认读当前目录的 `./config.toml`，可用 `-c/--config` 指定）；仓库根的 `.env` 只服务于下方的部署脚本（SSH 连接信息），不是网关的运行时配置。
 
@@ -102,6 +102,7 @@ bash deploy-bin.sh setup-systemd     # 服务单元的 ExecStart 读 /etc/aimail
 
 # 3) 上传运行时配置（部署脚本只分发二进制与 systemd 单元，不分发配置）
 set -a; . ./.env; set +a
+# 若 ~/.ssh/id_deploy 不存在，脚本会省略 -i 并使用你的 ssh-agent
 ssh -p "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" \
   "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}" "mkdir -p /etc/aimail /var/aimail"
 scp -P "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" config.toml \
@@ -151,7 +152,10 @@ curl -sf http://127.0.0.1:8080/health
 
 ### config.toml 示例
 
+下方为常用键的节选，完整带注释的文件见 `config.toml.example`。
+
 ```toml
+# 节选 —— 完整带注释的文件见 config.toml.example
 [http]
 bind = "0.0.0.0:8080"
 # hostname = "mail.yourdomain.com"
@@ -161,6 +165,7 @@ bind = "0.0.0.0:25"
 hostname = "mail.example.com"           # 必填：EHLO/PTR 名，须与 VPS 的 PTR 记录一致
 # max_message_size = 10485760
 # max_connections = 100
+# channel_capacity = 1000
 
 [relay]
 # smtp_server = "smtp://smtp.example.com:587"
@@ -168,6 +173,7 @@ hostname = "mail.example.com"           # 必填：EHLO/PTR 名，须与 VPS 的
 # password = "your-password"
 # dns_server = "127.0.0.1:53"
 # auto_reply_subject_prefix = "[Auto-Reply] "
+# auto_reply_body = "This is an automated message from the aimail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
 # delivery_window_secs = 7200
 # mx_dns_override = { "example.com" = "127.0.0.1:25" }
 
@@ -182,6 +188,7 @@ hostname = "mail.example.com"           # 必填：EHLO/PTR 名，须与 VPS 的
 # max_backoff_secs = 300
 # poll_interval_secs = 5
 # batch_size = 50
+# readying_stuck_secs = 30
 
 [storage]
 path = "./data"

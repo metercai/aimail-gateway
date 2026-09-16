@@ -1,4 +1,4 @@
-# agent-mail HTTP API Signature Protocol v1
+# AIMail HTTP API Signature Protocol v1
 
 Replaces the plaintext `X-Api-Key` header with (a) an identity header and
 (b) an HMAC-SHA256 request signature, so the **raw API key never crosses the
