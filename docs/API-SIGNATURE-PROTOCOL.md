@@ -109,8 +109,8 @@ api POST /api/v1/whitelists '{"direction":"to","domain_addr":"a@x.com","value":"
 File upload: build the `multipart/form-data` body with a **fixed** boundary
 into a temp file, sign that exact byte sequence, and send it with
 `--data-binary @file` (curl's random `-F` boundary cannot be pre-hashed). The
-e2e suite's `tests/lib/aimail-sign.sh` (`aimail_curl` / `aimail_upload`) does
-this; `tests/lib/aimail_sign.py` is the equivalent for Python.
+e2e suite's `aimail-advanced/tests/lib/aimail-sign.sh` (`aimail_curl` / `aimail_upload`) does
+this; `aimail-advanced/tests/lib/aimail_sign.py` is the equivalent for Python.
 
 ## Replay posture
 
