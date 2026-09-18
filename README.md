@@ -14,7 +14,7 @@ This is **the bidirectional mail gateway built for AI Agents** — it gives Agen
 aimail-gateway is a lightweight, high-performance bidirectional Rust mail gateway. It shields Agents from a crowd of legacy mail protocols (SMTP/POP3/IMAP) and sends and receives mail through a native REST API instead:
 
 - **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook and drives the mail pipeline with message events. Mail bodies and headers live in the Agent's local store and stay searchable there; the gateway itself retains nothing — what it holds between delivery and retry is temporary staging, cleared in the end whether delivery succeeded or not.
-- **Outbound:** aimail-gateway exposes a JSON HTTP send API (`POST /api/v1/send`). An Agent sends mail with a single toolset call. Same-gateway recipients are delivered by an internal Webhook; external addresses go out over SMTP. Two routes in, two routes out — fast and efficient.
+- **Outbound:** aimail-gateway provides a general-purpose JSON HTTP send API. An Agent sends mail with a single toolset call. Same-gateway recipients are delivered by an internal Webhook; external addresses go out over SMTP. Two routes in, two routes out — fast and efficient.
 
 On top of native mail send/receive, aimail-gateway is purpose-built for what Agent mail actually looks like:
 
@@ -47,9 +47,9 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 - **Bounce handling** — RFC 3464 compliant automatic post-send bounce recognition and processing
 
 **Security:**
-- **Default bidirectional whitelist** — unauthorized senders are refused by default (only generic identity queries such as `[WHOAMI]` are answered); outbound content cannot reach unauthorized recipients
+- **Default bidirectional whitelist** — unauthorized senders are refused by default; outbound content cannot reach unauthorized recipients
 - **Bound manager** — a manager address per Agent; mail commands govern critical operations and act as a safety net
-- **API key authentication via HMAC request signing** — independent key per Agent, multi-scope management; the plaintext key never crosses the network (see `docs/API-SIGNATURE-PROTOCOL.md`)
+- **API key authentication** — an independent key per Agent, HMAC request signing, the plaintext key never crosses the network
 - **Tiered API keys** — system/domain/agent key levels, isolated per scenario and never exposed to each other
 - **Behavior scoping** — role and scope-based behavior limits that avoid risky actions
 - **Loop prevention** — internal recipients never relayed externally, internal senders never accepted inbound, auto-replies never retried, so no cycles can form
@@ -61,7 +61,7 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 - **Format conversion** — body cleaned and converted to Markdown, directly consumable by LLMs
 - **Information extraction** — sender signature extraction for identity recognition
 - **Thread tracking** — automatic In-Reply-To / References chain maintenance
-- **No long-term archiving** — raw mail is not retained; the Agent stores, searches, and audits on its own; the attachment retention window follows `[storage] attachment_lifetime_hours`
+- **No long-term archiving** — raw mail is not retained; the Agent stores, searches, and audits on its own
 
 **Collaboration:**
 - **Contact profiling** — dynamic profiles per contact, so replies land better
@@ -69,7 +69,6 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 - **Identity cards** — a tiered identity-card response flow for the public (strangers) and acquaintances (contacts): secure, trustworthy, low-cost role discovery that helps task collaboration
 - **A2A board** — pipeline view + task dependencies + assignee tracing, all at a glance
 - **A2A task engine** — instruction flow + session flow + notification flow, event-driven autonomous collaboration
-- **Definable roles and behaviors** — role and permission model defined by configuration data (the gateway itself embeds no LLM; LLM-side behavior lives in the Agent system)
 - **Owner-controlled goals & deliverables** — human–Agent hybrid workflows where goals and outputs are solely controlled by the human (Owner)
 
 ---
