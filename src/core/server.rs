@@ -342,6 +342,7 @@ pub fn register_board_interceptors(http_state: &HttpState) {
         &endpoint,
         admission_gate,
         Some(http_state.trigger_tx.clone()),
+        crate::board::notify::ReplyPolicy::parse(&http_state.config.board.command_reply),
     );
 }
 

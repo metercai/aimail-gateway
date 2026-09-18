@@ -3,7 +3,7 @@
 use crate::board::commands;
 use crate::board::db;
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
-use crate::board::notify::Notifier;
+use crate::board::notify::{Notifier, ReplyPolicy};
 use crate::core::email::factory::AttachmentFactory;
 use crate::core::strategy::AdmissionGate;
 use crate::core::email::factory::EmailFactory;
@@ -20,6 +20,8 @@ pub struct A2aInterceptor {
     pub gateway_url: String,
     pub admission_gate: Arc<dyn AdmissionGate>,
     pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    /// 命令结果回投策略(board.command_reply)
+    pub reply_policy: ReplyPolicy,
 }
 
 impl A2aInterceptor {
@@ -30,6 +32,7 @@ impl A2aInterceptor {
         gateway_url: &str,
         admission_gate: Arc<dyn AdmissionGate>,
         trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
+        reply_policy: ReplyPolicy,
     ) -> Self {
         Self {
             email_factory,
@@ -38,6 +41,7 @@ impl A2aInterceptor {
             gateway_url: gateway_url.to_string(),
             admission_gate,
             trigger_tx,
+            reply_policy,
         }
     }
 
@@ -488,6 +492,7 @@ impl InboundInterceptor for A2aInterceptor {
                     gateway_url: self.gateway_url.clone(),
                     attachments_json: None,
                     trigger_tx: self.trigger_tx.clone(),
+                    reply_policy: self.reply_policy,
                     tasks: RefCell::new(Vec::new()),
                 };
                 // Group-whitelist header: full list of newly invited members.
@@ -639,6 +644,7 @@ impl InboundInterceptor for A2aInterceptor {
                 attachments_json: attachments_json.clone(),
                 trigger_tx: self.trigger_tx.clone(),
                 tasks: RefCell::new(Vec::new()),
+                reply_policy: self.reply_policy,
             };
 
             // Auto-inject board_id into params so commands don't need it in body
@@ -670,6 +676,23 @@ impl InboundInterceptor for A2aInterceptor {
                         sender,
                         response.status
                     );
+                    // 0+B: 结果回投(仅板成员; 主题 [A2A-RESULT] 不以 [A2A] 开头 ⇒ 不回环)
+                    let is_member = db::get_member(&conn, &board_id, &sender)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    let mut line = format!("status={}", response.status);
+                    if let Some(t) = &response.task {
+                        line.push_str(&format!(" task={} summary={}", t.short_id, t.summary));
+                    }
+                    notifier.notify_command_result(
+                        &sender,
+                        &cmd.verb,
+                        true,
+                        &line,
+                        response.data.as_ref(),
+                        is_member,
+                    );
                     // Await notification tasks spawned by the command
                     let tasks = notifier.take_tasks();
                     for task in tasks {
@@ -683,7 +706,20 @@ impl InboundInterceptor for A2aInterceptor {
                         sender,
                         e
                     );
-                    // TODO: send SMTP error reply to sender
+                    // 0+B: 失败回执(原 TODO)。只回板成员 —— 非成员(含把通知邮件误当命令
+                    // 投回来的对端看板)只写日志, 既防 backscatter 也防自我放大。
+                    let is_member = db::get_member(&conn, &board_id, &sender)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    notifier.notify_command_result(
+                        &sender,
+                        &cmd.verb,
+                        false,
+                        &format!("{e}"),
+                        None,
+                        is_member,
+                    );
                 }
             }
 
@@ -999,6 +1035,7 @@ pub fn register(
     gateway_url: &str,
     admission_gate: Arc<dyn AdmissionGate>,
     trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    reply_policy: ReplyPolicy,
 ) {
     use crate::core::strategy::InboundInterceptor;
     let a2a = std::sync::Arc::new(A2aInterceptor::new(
@@ -1008,6 +1045,7 @@ pub fn register(
         gateway_url,
         admission_gate.clone(),
         trigger_tx,
+        reply_policy,
     ));
     email_factory
         .env_factory

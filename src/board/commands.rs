@@ -5,7 +5,7 @@
 
 use crate::board::db;
 use crate::board::models::*;
-use crate::board::notify::Notifier;
+use crate::board::notify::{Notifier, ReplyPolicy};
 use crate::core::errors::AppResult;
 use chrono::Utc;
 use rusqlite::Connection;
@@ -1198,6 +1198,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
 
         (conn, board_id.to_string(), notifier)

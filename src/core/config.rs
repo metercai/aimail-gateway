@@ -545,6 +545,9 @@ pub struct BoardConfig {
     pub sweeper_interval_seconds: u64,
     pub max_active_boards: Option<usize>,
     pub archive_retention_days: Option<u64>,
+    /// 命令结果回投(0+B): off | read_only_and_errors(默认) | all
+    #[serde(default = "default_command_reply")]
+    pub command_reply: String,
 }
 
 impl Default for BoardConfig {
@@ -555,8 +558,13 @@ impl Default for BoardConfig {
             sweeper_interval_seconds: default_sweeper_interval(),
             max_active_boards: Some(5),
             archive_retention_days: None,
+            command_reply: default_command_reply(),
         }
     }
+}
+
+fn default_command_reply() -> String {
+    "read_only_and_errors".to_string()
 }
 
 fn default_heartbeat_stale() -> u64 {

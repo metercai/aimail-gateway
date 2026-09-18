@@ -36,12 +36,116 @@ pub struct Notifier {
     pub attachments_json: Option<String>,
     pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
     pub tasks: RefCell<Vec<JoinHandle<()>>>,
+    /// 命令结果回投策略(config: board.command_reply)
+    pub reply_policy: ReplyPolicy,
+}
+
+/// 命令结果回投策略(0+B)。配置项 `board.command_reply`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyPolicy {
+    /// 完全不回执
+    Off,
+    /// 只读 verb 的成功 + 所有 verb 的失败(默认档)
+    ReadOnlyAndErrors,
+    /// 所有 verb 都回执(变更类成功也回)
+    All,
+}
+
+impl ReplyPolicy {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" => Self::Off,
+            "all" => Self::All,
+            _ => Self::ReadOnlyAndErrors,
+        }
+    }
+
+    /// 该结果是否回执(与"是否板成员"无关, 成员门槛由调用方把关)
+    pub fn allows(self, verb: &str, ok: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::All => true,
+            Self::ReadOnlyAndErrors => !ok || is_read_only_verb(verb),
+        }
+    }
+}
+
+/// 只读 verb: 变更类 verb 的成功已有业务通知, 重复回执=噪音
+pub fn is_read_only_verb(verb: &str) -> bool {
+    matches!(
+        verb,
+        "show" | "list" | "status" | "members" | "roles" | "gateway-info"
+    )
+}
+
+/// 回执里 json 段的上限
+pub const COMMAND_REPLY_JSON_CAP: usize = 16 * 1024;
+
+fn truncate_on_char_boundary(s: &str, cap: usize) -> &str {
+    if s.len() <= cap {
+        return s;
+    }
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if i >= cap {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &s[..end]
+}
+
+/// 构造回执 (subject, body)。主题**绝不以 `[A2A] ` 开头** ——
+/// interceptor 用 `subject.strip_prefix("[A2A] ")` 识别命令, 否则回执会被当成新命令(回环)。
+pub fn format_command_result(
+    verb: &str,
+    ok: bool,
+    summary: &str,
+    data: Option<&serde_json::Value>,
+    api_hint: &str,
+) -> (String, String) {
+    let status = if ok { "ok" } else { "error" };
+    let subject = format!("[A2A-RESULT] {verb} {status}");
+    let mut body = format!("[A2A-RESULT] verb={verb} status={status}\n{summary}\n");
+    if let Some(d) = data {
+        let pretty = serde_json::to_string_pretty(d).unwrap_or_else(|_| "{}".to_string());
+        if pretty.len() > COMMAND_REPLY_JSON_CAP {
+            body.push_str(&format!(
+                "\n```json\n{}\n… 已截断(共 {} 字节)\n```\n全量: GET {}\n",
+                truncate_on_char_boundary(&pretty, COMMAND_REPLY_JSON_CAP),
+                pretty.len(),
+                api_hint
+            ));
+        } else {
+            body.push_str(&format!("\n```json\n{pretty}\n```\n"));
+        }
+    }
+    (subject, body)
 }
 
 impl Notifier {
     /// Collect all spawned notification tasks for awaiting.
     pub fn take_tasks(&self) -> Vec<JoinHandle<()>> {
         self.tasks.borrow_mut().drain(..).collect()
+    }
+
+    /// 命令结果回投(0+B): 只回**板成员**(非成员失败只写日志, 防 backscatter 与自我放大),
+    /// 且按 reply_policy 决定是否回该 verb/结果。
+    pub fn notify_command_result(
+        &self,
+        to: &str,
+        verb: &str,
+        ok: bool,
+        summary: &str,
+        data: Option<&serde_json::Value>,
+        is_member: bool,
+    ) {
+        if !is_member || !self.reply_policy.allows(verb, ok) {
+            return;
+        }
+        let hint = format!("{}/api/v1/board/{}/tasks", self.gateway_url, self.board_id);
+        let (subject, body) = format_command_result(verb, ok, summary, data, &hint);
+        self.create_email(to, &subject, &body, None);
     }
     fn format_body(&self, cn: bool, label: &str, task: &Task, context: &str, action: &str) -> String {
         let (task_l, board_l, ctx_l, act_l) = if cn {
@@ -492,6 +596,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         // Just verify it doesn't panic (no email sent since factory is None)
@@ -516,6 +621,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_review_needed(&task);
@@ -539,6 +645,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_approved(&task);
@@ -562,6 +669,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_rejected(&task, "need more data");
@@ -585,6 +693,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_blocked(&task, "worker@t.io");
@@ -608,6 +717,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_unblocked(&task, "orch@t.io");
@@ -631,6 +741,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_cancelled(&task);
@@ -654,6 +765,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_comment(&task, "veri@t.io", "looks good");
@@ -677,6 +789,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         // assignee comments -> notification goes to reviewer
@@ -701,6 +814,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
     }
@@ -723,8 +837,54 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn test_reply_policy_parse_and_allows() {
+        assert_eq!(ReplyPolicy::parse("off"), ReplyPolicy::Off);
+        assert_eq!(ReplyPolicy::parse("ALL"), ReplyPolicy::All);
+        assert_eq!(ReplyPolicy::parse("weird-value"), ReplyPolicy::ReadOnlyAndErrors);
+        let p = ReplyPolicy::ReadOnlyAndErrors;
+        assert!(p.allows("show", true));
+        assert!(!p.allows("complete", true), "变更类成功默认不回执(已有业务通知)");
+        assert!(p.allows("complete", false));
+        assert!(p.allows("anything", false));
+        assert!(!ReplyPolicy::Off.allows("show", false));
+        assert!(ReplyPolicy::All.allows("complete", true));
+    }
+
+    #[test]
+    fn test_reply_subject_never_looks_like_a_command() {
+        let (s, _b) = format_command_result("show", true, "status=ok", None, "http://x/tasks");
+        assert_eq!(s, "[A2A-RESULT] show ok");
+        assert!(!s.starts_with("[A2A] "), "主题不得以 [A2A] 开头, 否则 interceptor 会当命令(回环)");
+    }
+
+    #[test]
+    fn test_reply_body_carries_json_and_caps_it() {
+        let data = serde_json::json!({"task": {"short_id": "T1"},
+                                      "parent_summaries": [{"summary": "60%"}]});
+        let (_s, b) = format_command_result("show", true, "status=ok", Some(&data), "http://x/tasks");
+        assert!(b.contains("parent_summaries") && b.contains("60%"));
+        let big = serde_json::json!({"items": "x".repeat(COMMAND_REPLY_JSON_CAP + 500)});
+        let (_s2, b2) = format_command_result("list", true, "status=ok", Some(&big), "http://x/tasks");
+        assert!(b2.contains("已截断") && b2.contains("http://x/tasks"));
+        assert!(b2.len() < COMMAND_REPLY_JSON_CAP + 4096, "截断后不应远超上限: {}", b2.len());
+    }
+
+    #[test]
+    fn test_reply_truncation_is_char_boundary_safe() {
+        let big = serde_json::json!({"items": "汉".repeat(COMMAND_REPLY_JSON_CAP)});
+        let (_s, b) = format_command_result("list", true, "ok", Some(&big), "hint");
+        assert!(b.contains("已截断"));
     }
 }
