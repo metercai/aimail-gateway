@@ -412,6 +412,7 @@ fn handle_continue(
 ) -> AppResult<CommandResponse> {
     let task_id = extract_task_id(cmd)?;
     let mut task = db::get_task(conn, &task_id)?;
+    require_role(conn, &task.board_id, sender, "continue")?;
     require_assignee(&task, sender)?;
     let progress = cmd
         .params
@@ -1666,6 +1667,40 @@ mod tests {
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
         let cmd = make_cmd("continue", Some(&tid), None);
         assert!(execute_command(&conn, &notifier, &cmd, "worker@t.io").is_err());
+    }
+
+    /// role 化生效: 删掉 worker 的 continue 权限后该 verb 必须被拒
+    #[test]
+    fn test_continue_enforces_role_permission() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        conn.execute(
+            "DELETE FROM role_permissions WHERE role='worker' AND verb='continue'",
+            [],
+        )
+        .unwrap();
+        let cmd = make_cmd(
+            "continue",
+            Some(&tid),
+            Some(serde_json::json!({"progress": "10%"})),
+        );
+        let err = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap_err();
+        assert!(
+            format!("{err:?}").contains("not permitted"),
+            "删掉角色权限后必须 403, 实际: {err:?}"
+        );
+    }
+
+    /// 四个角色的默认播种都要含 continue(与 comment 同级)
+    #[test]
+    fn test_seed_grants_continue_to_all_roles() {
+        let (conn, _board_id, _notifier) = setup();
+        for role in db::KNOWN_ROLES {
+            assert!(
+                db::check_role_permission(&conn, role, "continue").unwrap(),
+                "角色 {role} 缺少 continue 默认权限"
+            );
+        }
     }
 
     #[test]

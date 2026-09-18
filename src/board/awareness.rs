@@ -197,6 +197,33 @@ mod tests {
         (conn, board_id.to_string())
     }
 
+    /// show 的 parent_summaries 必须反映父任务**最新**摘要(不是建链快照), 无父为空
+    #[test]
+    fn test_parent_summaries_reflect_latest_summary() {
+        let (conn, board_id) = setup();
+        let pid = make_task(&conn, &board_id, "P1", "a@t.io", TaskStatus::Running);
+        let cid = make_task(&conn, &board_id, "C1", "a@t.io", TaskStatus::Todo);
+        let mut child = db::get_task(&conn, &cid).unwrap();
+        child.parent_ids = vec!["P1".to_string()];
+        db::update_task(&conn, &child).unwrap();
+
+        let mut parent = db::get_task(&conn, &pid).unwrap();
+        parent.summary = "10%".to_string();
+        db::update_task(&conn, &parent).unwrap();
+        let (_, ps) = get_task(&conn, &cid).unwrap();
+        assert_eq!(ps.len(), 1, "父链应有一条");
+        assert_eq!(ps[0]["summary"], "10%");
+
+        parent.summary = "60%".to_string();
+        db::update_task(&conn, &parent).unwrap();
+        let (_, ps2) = get_task(&conn, &cid).unwrap();
+        assert_eq!(ps2[0]["summary"], "60%", "parent_summaries 必须取最新值");
+
+        let solo = make_task(&conn, &board_id, "S1", "a@t.io", TaskStatus::Todo);
+        let (_, ps3) = get_task(&conn, &solo).unwrap();
+        assert!(ps3.is_empty(), "无父任务必须是空数组");
+    }
+
     fn make_task(
         conn: &Connection,
         board_id: &str,
