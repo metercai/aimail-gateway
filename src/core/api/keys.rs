@@ -163,20 +163,9 @@ pub async fn create_api_key(
         .iter()
         .filter_map(|s| Scope::from_str(s.trim()))
         .collect();
-    if parsed.len() != scopes.len() {
-        let bad = scopes
-            .iter()
-            .find(|s| Scope::from_str(s.trim()).is_none())
-            .cloned()
-            .unwrap_or_default();
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("invalid scope '{bad}'"),
-                detail: Some("allowed: platform, system, agent_admin, agent".to_string()),
-            }),
-        ));
-    }
+    // 注意: 不能拒收"解析不出 Scope"的串 —— scopes 里还有功能性标记(如 "send",
+    // 发送路径按字面串判定), 历史 key 也在用。层级比较只认解析得出的那几个即可,
+    // 别名("system_admin" → PlatformAdmin)因此不再绕过层级。
     let target_level = if parsed.iter().any(|s| matches!(s, Scope::PlatformAdmin)) {
         3
     } else if parsed.iter().any(|s| matches!(s, Scope::SystemAdmin)) {
