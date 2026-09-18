@@ -256,6 +256,51 @@ pub async fn create_api_key(
     let key_prefix = &raw_key[..8];
     let expires_at = req.expires_at.as_deref();
 
+    // ── system 键: '' 身份槽唯一(UNIQUE(system_id, domain_addr)) ⇒ 已存在时"创建"即轮换 ──
+    // domain_addr 就是身份列, system 键没有地址语义("" 槽只有一行); 点"生成 Key"的语义是
+    // "给我一把能用的新键", 所以这里对已存在的系统键做轮换并使旧键立即失效, 而不是 500。
+    if req.category == "system" {
+        if let Ok(existing) = state
+            .factories
+            .email
+            .env_factory
+            .list_api_keys_by_system(&req.system_id, "system")
+            .await
+        {
+            if let Some(row) = existing.into_iter().find(|k| k.email_address.is_empty()) {
+                match state
+                    .factories
+                    .email
+                    .env_factory
+                    .rotate_api_key(row.id, &key_hash, key_prefix)
+                    .await
+                {
+                    Ok(Some(record)) => {
+                        info!(
+                            operation = "api_key_rotated",
+                            api_key_id = %record.id,
+                            system_id = %req.system_id,
+                            "system API key rotated on create (one system key per system)"
+                        );
+                        let mut response: ApiKeyResponse = record.into();
+                        response.raw_key = Some(raw_key);
+                        return Ok((StatusCode::CREATED, Json(response)));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "Database error".to_string(),
+                                detail: Some(e.to_string()),
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let record = match state
         .factories
         .email
