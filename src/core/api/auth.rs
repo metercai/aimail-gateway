@@ -297,22 +297,16 @@ pub fn require_agent_match(
 pub fn check_whitelist_access(
     key: &ApiKeyRecord,
     domain_addr: &str,
+    target_system: Option<&str>,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // ── Admin-level: PlatformAdmin + SystemAdmin → full pass ──
     if is_platform_admin_scope(key) || is_system_admin_scope(key) {
         return Ok(());
     }
 
-    // ── AgentAdmin: domain suffix match ──
+    // ── AgentAdmin: 自己系统内的 agent(授权对象是 agent, 与域名/共享域无关) ──
     if is_agent_admin_scope(key) {
-        let domain_suffix = format!(
-            "@{}",
-            key.email_address
-                .rsplit('@')
-                .next()
-                .unwrap_or(&key.email_address)
-        );
-        if domain_addr.ends_with(&domain_suffix) {
+        if target_system == Some(key.system_id.as_str()) {
             return Ok(());
         }
     }

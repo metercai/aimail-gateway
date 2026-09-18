@@ -501,6 +501,23 @@ impl EnvFactory {
         self.db.get_api_key_by_email(email).await
     }
 
+    /// 该域(agent 地址或裸域)归属的 system —— agent_admin 的授权对象是 agent
+    /// (与是否共享域无关), 所以权限判定要落到"同 system", 这里给出解析结果。
+    /// 解析不到(未注册的地址/域)返回 None, 调用方按无权处理。
+    pub async fn owning_system_of(&self, domain_addr: &str) -> Option<String> {
+        if domain_addr.contains('@') {
+            if let Ok(Some(k)) = self.resolve_api_key_by_email(domain_addr).await {
+                return Some(k.system_id);
+            }
+        }
+        self.db
+            .get_active_system_domain_by_domain(domain_addr)
+            .await
+            .ok()
+            .flatten()
+            .map(|d| d.system_id)
+    }
+
     /// Create a whitelist entry with explicit category and api_key_id.
 
     pub async fn create_whitelist_entry_full(

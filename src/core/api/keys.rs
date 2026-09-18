@@ -13,6 +13,7 @@ use crate::core::api::auth::{
     require_agent_match, require_domain_match, require_scope_any, sha256_hex,
 };
 use crate::core::api::types::*;
+use crate::core::scope::Scope;
 use crate::core::storage::ApiKeyRecord;
 
 /// POST /api/v1/api-keys — Create a new API key.
@@ -156,9 +157,29 @@ pub async fn create_api_key(
         1
     };
 
-    let target_level = if scopes.iter().any(|s| s == "platform") {
+    // 层级必须按 Scope 解析后的结果算: 字面串比较会漏掉别名
+    // ("system_admin" → PlatformAdmin), 让 system 管理员造出 platform key。
+    let parsed: Vec<Scope> = scopes
+        .iter()
+        .filter_map(|s| Scope::from_str(s.trim()))
+        .collect();
+    if parsed.len() != scopes.len() {
+        let bad = scopes
+            .iter()
+            .find(|s| Scope::from_str(s.trim()).is_none())
+            .cloned()
+            .unwrap_or_default();
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("invalid scope '{bad}'"),
+                detail: Some("allowed: platform, system, agent_admin, agent".to_string()),
+            }),
+        ));
+    }
+    let target_level = if parsed.iter().any(|s| matches!(s, Scope::PlatformAdmin)) {
         3
-    } else if scopes.iter().any(|s| s == "system") {
+    } else if parsed.iter().any(|s| matches!(s, Scope::SystemAdmin)) {
         2
     } else {
         1
@@ -303,6 +324,17 @@ pub async fn list_api_keys(
             .resolve_api_key_by_email(email)
             .await
         {
+            // 非平台 scope 只能查本系统的键: 这条分支以前直接走全局解析,
+            // agent_admin / system_admin 能跨租户读到别家地址的键元数据。
+            Ok(Some(k)) if !is_platform_admin_scope(&api_key) && k.system_id != api_key.system_id => {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "forbidden".to_string(),
+                        detail: Some("cross-system key lookup denied".to_string()),
+                    }),
+                ))
+            }
             Ok(Some(k)) => vec![k],
             Ok(None) => vec![],
             Err(e) => {

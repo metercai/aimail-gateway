@@ -1241,7 +1241,7 @@ pub async fn create_whitelist(
                 })?
                 .map(|k| k.id)
         } else {
-            check_whitelist_access(&api_key, &req.domain_addr)?;
+            check_whitelist_access(&api_key, &req.domain_addr, state.factories.email.env_factory.owning_system_of(&req.domain_addr).await.as_deref())?;
             Some(api_key.id)
         };
         // Whitelist per-key limit enforced by advanced edition
@@ -1279,7 +1279,7 @@ pub async fn create_whitelist(
         }
     } else if is_system_admin_scope(&api_key) {
         // SystemAdmin: can create DOMAIN-level whitelist entries only
-        check_whitelist_access(&api_key, &req.domain_addr)?;
+        check_whitelist_access(&api_key, &req.domain_addr, state.factories.email.env_factory.owning_system_of(&req.domain_addr).await.as_deref())?;
         match state
             .factories
             .email
@@ -1626,7 +1626,7 @@ async fn update_whitelist(
                         ));
                     }
                 }
-                check_whitelist_access(&api_key, &entry.domain_addr)?;
+                check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?;
             }
             Ok(None) => {
                 return Err((
@@ -1795,7 +1795,7 @@ async fn delete_whitelist_by_params(
         }
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
-        check_whitelist_access(&api_key, &query.domain_addr)?;
+        check_whitelist_access(&api_key, &query.domain_addr, state.factories.email.env_factory.owning_system_of(&query.domain_addr).await.as_deref())?;
         let entries = state
             .factories
             .email
@@ -1980,7 +1980,7 @@ async fn update_whitelist_by_params(
         }
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
-        check_whitelist_access(&api_key, &query.domain_addr)?;
+        check_whitelist_access(&api_key, &query.domain_addr, state.factories.email.env_factory.owning_system_of(&query.domain_addr).await.as_deref())?;
         let entries = state
             .factories
             .email
@@ -2127,7 +2127,7 @@ async fn delete_whitelist(
                         ));
                     }
                 }
-                check_whitelist_access(&api_key, &entry.domain_addr)?;
+                check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?;
             }
             Ok(None) => {
                 return Err((
@@ -2166,7 +2166,7 @@ async fn delete_whitelist(
                 )
             })?;
         match existing {
-            Some(ref entry) => check_whitelist_access(&api_key, &entry.domain_addr)?,
+            Some(ref entry) => check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?,
             None => {
                 return Err((
                     StatusCode::NOT_FOUND,
