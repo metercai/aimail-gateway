@@ -5,7 +5,7 @@
 
 use crate::board::db;
 use crate::board::models::*;
-use crate::board::notify::{Notifier, ReplyPolicy};
+use crate::board::notify::Notifier;
 use crate::core::errors::AppResult;
 use chrono::Utc;
 use rusqlite::Connection;
@@ -1128,7 +1128,7 @@ fn promote_children(conn: &Connection, notifier: &Notifier, parent: &Task) {
 mod tests {
     use super::*;
     use crate::board::db;
-    use crate::board::notify::Notifier;
+    use crate::board::notify::{Notifier, ReplyPolicy};
     use rusqlite::Connection;
     use std::cell::RefCell;
 
