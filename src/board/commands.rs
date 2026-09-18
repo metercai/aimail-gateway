@@ -20,6 +20,7 @@ pub fn execute_command(
 ) -> AppResult<CommandResponse> {
     match cmd.verb.as_str() {
         "complete" => handle_complete(conn, notifier, cmd, sender),
+        "continue" => handle_continue(conn, notifier, cmd, sender),
         "approve" => handle_approve(conn, notifier, cmd, sender),
         "review" => handle_review(conn, notifier, cmd, sender),
         // Q2: "verify" is deliberately the same handler as "approve" —
@@ -401,6 +402,51 @@ fn handle_comment(
 
     notifier.notify_comment(&task, sender, comment);
     Ok(ok_response(None))
+}
+
+fn handle_continue(
+    conn: &Connection,
+    notifier: &Notifier,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
+    let task_id = extract_task_id(cmd)?;
+    let mut task = db::get_task(conn, &task_id)?;
+    require_assignee(&task, sender)?;
+    let progress = cmd
+        .params
+        .as_ref()
+        .and_then(|p| p.get("progress").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    if progress.is_empty() {
+        return Err(crate::core::errors::AppError::BadRequest(
+            "continue: progress is required".to_string(),
+        ));
+    }
+    let note = cmd
+        .params
+        .as_ref()
+        .and_then(|p| p.get("note").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+    let ts = now();
+    task.summary = progress.clone();
+    task.updated_at = ts.clone();
+    db::update_task(conn, &task)?;
+    db::insert_event(
+        conn,
+        &TaskEvent {
+            id: 0,
+            task_id: task_id.clone(),
+            event_type: "continue_request".to_string(),
+            actor: sender.to_string(),
+            payload: Some(json!({"progress": progress, "note": note})),
+            created_at: ts,
+        },
+    )?;
+    notifier.notify_assigned(&task);
+    Ok(ok_response(Some(task)))
 }
 
 fn handle_cancel(
@@ -1587,6 +1633,67 @@ mod tests {
             "S4: non-owner refresh must not change the goal"
         );
         assert_eq!(after.status, before.status, "S4: status must stay untouched");
+    }
+
+    // ── continue: 跨会话进度汇报(恢复 362f18e 误删的 verb) ──────────
+    #[test]
+    fn test_continue_updates_summary_and_emits_event() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd(
+            "continue",
+            Some(&tid),
+            Some(serde_json::json!({"progress": "60%", "note": "need more sessions"})),
+        );
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let task = db::get_task(&conn, &tid).unwrap();
+        assert_eq!(task.summary, "60%");
+        assert_eq!(task.status, TaskStatus::Running, "continue 不得改任务状态");
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM task_events WHERE task_id=?1 AND event_type='continue_request'",
+                [&tid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "continue 必须落一条 continue_request 事件");
+    }
+
+    #[test]
+    fn test_continue_requires_progress() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("continue", Some(&tid), None);
+        assert!(execute_command(&conn, &notifier, &cmd, "worker@t.io").is_err());
+    }
+
+    #[test]
+    fn test_continue_rejected_for_non_assignee() {
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd(
+            "continue",
+            Some(&tid),
+            Some(serde_json::json!({"progress": "10%"})),
+        );
+        assert!(execute_command(&conn, &notifier, &cmd, "orch@t.io").is_err());
+    }
+
+    /// 'continue' 必须同时挂在**分发臂**和 **KNOWN_VERBS**(角色权限表可授予)两处:
+    /// b633e5b 加了 KNOWN_VERBS 校验却没加条目、362f18e 又整段删了实现 ——
+    /// 这条断言把"两处都得有"钉死, 任一缺失立刻红。
+    #[test]
+    fn test_continue_verb_registered_everywhere() {
+        assert!(
+            db::KNOWN_VERBS.contains(&"continue"),
+            "continue 不在 db::KNOWN_VERBS(角色权限表将无法授予它)"
+        );
+        let src = include_str!("commands.rs");
+        assert!(
+            src.contains("\"continue\" => handle_continue"),
+            "commands.rs 缺少 continue 分发臂"
+        );
     }
 
     // ── S5: role/verb whitelists and member/deadline validation ────

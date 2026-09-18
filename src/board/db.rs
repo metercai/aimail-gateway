@@ -370,7 +370,7 @@ pub const KNOWN_VERBS: &[&str] = &[
     "tasks", "create", "assign", "review", "block", "unblock",
     "cancel", "reassign", "edit", "deadline", "output", "notify", "members",
     "roles", "config", "arbitrate", "comment", "list", "show", "status",
-    "heartbeat", "verify", "approve", "reject", "complete", "commit", "reopen",
+    "heartbeat", "verify", "approve", "reject", "complete", "continue", "commit", "reopen",
 ];
 
 /// Single source of truth for default role→verb permissions (L3 fix:
