@@ -13,7 +13,7 @@ This is **the bidirectional mail gateway built for AI Agents** — it gives Agen
 
 aimail-gateway is a lightweight, high-performance bidirectional Rust mail gateway. It shields Agents from a crowd of legacy mail protocols (SMTP/POP3/IMAP) and sends and receives mail through a native REST API instead:
 
-- **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook and drives the mail pipeline with message events. Mail bodies and headers live in the Agent's local store and stay searchable there; the gateway keeps only what transit and audit need (undelivered pull entries up to 72 hours, delivered delivery records 7 days, attachment files up to 30 days by default, configurable).
+- **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook and drives the mail pipeline with message events. Mail bodies and headers live in the Agent's local store and stay searchable there; the gateway itself retains nothing — what it holds between delivery and retry is temporary staging, cleared in the end whether delivery succeeded or not.
 - **Outbound:** aimail-gateway exposes a JSON HTTP send API (`POST /api/v1/send`). An Agent sends mail with a single toolset call. Same-gateway recipients are delivered by an internal Webhook; external addresses go out over SMTP. Two routes in, two routes out — fast and efficient.
 
 On top of native mail send/receive, aimail-gateway is purpose-built for what Agent mail actually looks like:

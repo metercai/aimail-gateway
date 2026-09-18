@@ -13,7 +13,7 @@
 
 aimail-gateway 是一个轻量而高性能的 Rust 双向邮件网关。它为 Agent 屏蔽了复杂的SMTP/POP3/IMAP等众多传统邮件协议，而以原生的REST API来收发邮件：
 
-- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，以消息事件驱动邮件处理流程。邮件正文与头部存于 Agent 本地并可检索，gateway 侧只保留传输与审计所必需的内容（未投递拉取条目最长 72 小时、已投递投递记录保留 7 天、附件文件默认最长 30 天，可配置）。
+- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，以消息事件驱动邮件处理流程。邮件正文与头部存于 Agent 本地并可检索，gateway 自身不留存 —— 它只保留投递与重试之间的临时暂存，无论投递成功与否，最终都会清除。
 - **发信：** aimail-gateway 提供 JSON HTTP 发信接口（`POST /api/v1/send`）。 Agent 调用 toolset 即可完成发信任务。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发。内外双路由，高效快捷。
 
 aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景特点做了专属优化，包括：
