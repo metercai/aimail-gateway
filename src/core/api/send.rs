@@ -665,6 +665,10 @@ pub async fn send_email_core(
 
     // ── 6. Inbound whitelist: for internal recipients, verify sender against their "from"/"all" rules ──
     let mut final_internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
+    // A recipient that has `sender` in its "from" whitelist makes this a
+    // KNOWN-sender message — the universal-command detection below uses it to
+    // decide the identity-card tier.
+    let mut sender_known_to_internal = false;
     for (recipient, domain, webhook_url, webhook_secret) in internal {
         let allowed = match state
             .factories
@@ -673,7 +677,10 @@ pub async fn send_email_core(
             .check_whitelisted(&recipient, sender, "from")
             .await
         {
-            Ok(true) => true,
+            Ok(true) => {
+                sender_known_to_internal = true;
+                true
+            }
             Ok(false) => {
                 // Board recipient + stranger command: same allowance as the
                 // SMTP deferred-whitelist check (shared predicate).
@@ -690,6 +697,29 @@ pub async fn send_email_core(
         }
     }
 
+    // ── 6b. Universal-command markers for the INBOUND record ──
+    // StrangerInterceptor reads the RECORD's headers, so the identity-card
+    // markers must be on the inbound record — and they must be decided here,
+    // before the records are serialized (the previous placement, after
+    // `headers_json` was built, meant they never reached any record). Tiering:
+    // a sender the recipient KNOWS (step 6 whitelist) is not a stranger — the
+    // mail goes to the agent, whose host renders the LLM identity card; only
+    // an unknown sender gets the gateway's static-persona auto-reply. Same
+    // rule as the SMTP entry (receiver.rs), shared command list so the two
+    // entry points cannot drift. The outbound record keeps its own headers
+    // (it goes over the wire), hence a copy.
+    let mut inbound_headers = merged_headers.clone();
+    if let Some(cmd_name) = crate::board::addr::STRANGER_COMMANDS
+        .iter()
+        .find(|cmd| subject.to_uppercase().starts_with(**cmd))
+        .map(|cmd| cmd.trim_start_matches('[').trim_end_matches(']').to_lowercase())
+    {
+        if !sender_known_to_internal && !inbound_headers.contains_key("x-mail-stranger") {
+            inbound_headers.insert("x-mail-stranger".into(), "true".into());
+        }
+        inbound_headers.insert("x-mail-command".into(), cmd_name);
+    }
+
     // ── 7. Generate DB records ──
     let mut created_ids: Vec<String> = Vec::new();
     let attachments_json: Option<String> = req
@@ -698,6 +728,8 @@ pub async fn send_email_core(
         .map(|a| serde_json::to_string(a).unwrap_or_default());
     let headers_json: Option<String> =
         Some(serde_json::to_string(&merged_headers).unwrap_or_default());
+    let inbound_headers_json: Option<String> =
+        Some(serde_json::to_string(&inbound_headers).unwrap_or_default());
 
     // ── Full post-filter recipient list (external ∪ internal) ──────────
     // Identical across both direction records: this is what the final
@@ -726,26 +758,6 @@ pub async fn send_email_core(
         .filter(|e| cc_set.contains(*e))
         .map(|e| full_addr(e))
         .collect();
-
-    // ── Stranger detection for universal commands ──
-    // For internal delivery, headers are read by StrangerInterceptor
-    {
-        let stranger_commands = ["[WHOAMI]"];
-        let subj_upper = subject.to_uppercase();
-        for cmd in &stranger_commands {
-            if subj_upper.starts_with(cmd) {
-                if !merged_headers.contains_key("x-mail-stranger") {
-                    merged_headers.insert("x-mail-stranger".into(), "true".into());
-                }
-                let cmd_name = cmd
-                    .trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_lowercase();
-                merged_headers.insert("x-mail-command".into(), cmd_name);
-                break;
-            }
-        }
-    }
 
     // ── [P0] Ping-pong interception ────────────────────────────
     // When send_mail sends a pong, redirect as inbound instead of
@@ -965,7 +977,7 @@ pub async fn send_email_core(
                 &markdown_body,
                 endpoints.as_deref(),
                 attachments_json.as_deref(),
-                headers_json.as_deref(),
+                inbound_headers_json.as_deref(),
                 state.config.retry.max_attempts as i32,
             )
             .await
