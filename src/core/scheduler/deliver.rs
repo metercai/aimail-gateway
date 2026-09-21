@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tracing::{debug, error, info, warn};
 
 use crate::core::api::monitor::Metrics;
@@ -38,15 +40,33 @@ pub(crate) async fn deliver_smtp(
 
     let attachment_data = load_attachment_data(record, config, email_factory).await;
 
-    match relay.send_email(record, attachment_data.as_deref()).await {
-        Ok(()) => {
+    // 硬超时: 单次投递尝试最多占用 config.smtp.delivery_timeout_secs 秒。超时按"本次失败"
+    // 处理(重试由既有 retry 流程接管), 从而不再拖住其后的投递(队头阻塞)。
+    let timeout_secs = config.smtp.delivery_timeout_secs;
+    match tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        relay.send_email(record, attachment_data.as_deref()),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
             metrics.inc_relay_sent();
             None
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             error!(operation = "delivery_retry", email_id = %record.id, error = %e, "SMTP delivery failed");
             metrics.inc_relay_failed();
             Some(format!("smtp error: {}", e))
+        }
+        Err(_elapsed) => {
+            warn!(
+                operation = "delivery_timeout",
+                email_id = %record.id,
+                timeout_secs,
+                "SMTP delivery attempt timed out — releasing the delivery path"
+            );
+            metrics.inc_relay_failed();
+            Some(format!("smtp timeout after {}s", timeout_secs))
         }
     }
 }

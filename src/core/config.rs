@@ -81,6 +81,12 @@ pub struct SmtpConfig {
     /// Maximum concurrent SMTP connections. (default: 100)
     #[serde(default = "default_smtp_max_connections")]
     pub max_connections: usize,
+    /// Hard cap on a single outbound SMTP delivery attempt, in seconds.
+    /// Head-of-line protection: the scheduler is a single task, so one slow or
+    /// unreachable MX must not be able to occupy the delivery path forever.
+    /// (default: 30)
+    #[serde(default = "default_delivery_timeout_secs")]
+    pub delivery_timeout_secs: u64,
 }
 
 impl Default for SmtpConfig {
@@ -91,6 +97,7 @@ impl Default for SmtpConfig {
             channel_capacity: default_channel_capacity(),
             hostname: None,
             max_connections: default_smtp_max_connections(),
+            delivery_timeout_secs: default_delivery_timeout_secs(),
         }
     }
 }
@@ -322,6 +329,9 @@ impl Config {
         if self.webhook.timeout_secs == 0 {
             errors.push("webhook.timeout_secs must be > 0".to_string());
         }
+        if self.smtp.delivery_timeout_secs == 0 {
+            errors.push("smtp.delivery_timeout_secs must be > 0".to_string());
+        }
         if self.webhook.pending_ttl_hours == 0 {
             errors.push("webhook.pending_ttl_hours must be > 0".to_string());
         }
@@ -454,6 +464,11 @@ fn default_max_message_size() -> usize {
     10 * 1024 * 1024
 }
 
+/// 单次出站 SMTP 投递的硬超时(秒)。见 `SmtpConfig::delivery_timeout_secs`。
+fn default_delivery_timeout_secs() -> u64 {
+    30
+}
+
 fn default_webhook_timeout() -> u64 {
     10
 }
@@ -575,4 +590,41 @@ fn default_task_timeout() -> u64 {
 }
 fn default_sweeper_interval() -> u64 {
     900
+}
+
+#[cfg(test)]
+mod smtp_delivery_timeout_tests {
+    use super::*;
+
+    /// 既有配置(未写新键)必须仍能加载并取默认 30s —— 生产 config.toml 是长期演进的手写文件,
+    /// 新增 serde 字段漏 default 会导致启动即失败。
+    #[test]
+    fn defaults_when_key_absent() {
+        let s: SmtpConfig = toml::from_str("").expect("SmtpConfig must load from empty table");
+        assert_eq!(s.delivery_timeout_secs, 30, "default must be 30s");
+        assert_eq!(SmtpConfig::default().delivery_timeout_secs, 30);
+    }
+
+    #[test]
+    fn is_configurable() {
+        let s: SmtpConfig = toml::from_str("delivery_timeout_secs = 7").expect("load");
+        assert_eq!(s.delivery_timeout_secs, 7);
+    }
+
+    /// 0 = "没有超时" ⇒ 必须被校验拒绝(否则队头阻塞复现)。
+    #[test]
+    fn zero_is_rejected_by_validation() {
+        let toml_src = r#"
+[storage]
+path = "/tmp/x.db"
+[smtp]
+delivery_timeout_secs = 0
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("Config parse");
+        let err = cfg
+            .validate()
+            .expect_err("zero delivery timeout must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("smtp.delivery_timeout_secs"), "got {msg}");
+    }
 }
