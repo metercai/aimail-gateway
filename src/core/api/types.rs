@@ -27,6 +27,49 @@ pub struct HttpState {
     pub send_deduper: SendDeduper,
 }
 
+// ── First-delivery dispatch (single authority) ──────────────────────
+
+/// Fire the first-delivery trigger for an email whose payload is COMPLETE.
+///
+/// Every email is born `readying` (`core/storage.rs`) and the scheduler's
+/// periodic tick reads `ready` only — this trigger is the *only* first-delivery
+/// claimant (`core/scheduler/entry.rs`). A caller that queues an email and
+/// forgets this call leaves it structurally invisible to the tick until Flow 0
+/// (`core/scheduler/batch.rs::sweep_stuck_readying`) flips it, i.e. after
+/// `retry.readying_stuck_secs` (default 30s) **plus** up to one
+/// `retry.poll_interval_secs` (default 5s).
+///
+/// Call it AFTER the payload is complete. For an email with attachments that
+/// means after the attachment write loop — firing earlier delivers an empty
+/// attachment set, which is the entire reason the `readying` state exists.
+/// Attachment-less emails (API notifications, codes, notices) are complete the
+/// moment `create_outbound`/`create_inbound` returns.
+///
+/// A full channel is a supported degradation, not an error path: the email is
+/// already durable and the sweep picks it up (at the cost of the delay above).
+pub fn dispatch_first_delivery(
+    trigger_tx: &mpsc::Sender<String>,
+    metrics: &Metrics,
+    email_id: &str,
+) {
+    if let Err(e) = trigger_tx.try_send(email_id.to_string()) {
+        metrics.inc_trigger_dropped();
+        tracing::warn!(
+            operation = "dispatch_trigger_dropped",
+            email_id = %email_id,
+            error = %e,
+            "First-delivery trigger dropped (channel full) — the readying sweep will pick this email up"
+        );
+    }
+}
+
+impl HttpState {
+    /// [`dispatch_first_delivery`] for callers holding the HTTP state.
+    pub fn dispatch_first_delivery(&self, email_id: &str) {
+        dispatch_first_delivery(&self.trigger_tx, &self.metrics, email_id);
+    }
+}
+
 // ── Request/Response types ──
 
 /// Request body for creating an API key.
