@@ -192,12 +192,18 @@ fn parse_bounce_dsn(raw: &[u8]) -> Option<BounceDsn> {
 
     // ── message/rfc822 (original email) ──
     let orig_part = find_mime_part(&parsed, "message/rfc822")?;
+    // message/rfc822 的 *分段头部* 只有 Content-Type 之类; 原始邮件的 From/To/Subject/
+    // Message-ID 在**嵌套报文**里 —— 直接读 orig_part.headers 会全取空串, 导致
+    // verify_bounce 永远匹配不上出站记录、NDR 通知不可达(2026-09-22 单测实证:
+    // textbook RFC 3464 DSN 解析成功但 orig_message_id == "")。
+    let orig_raw = orig_part.get_body_raw().ok()?;
+    let orig = mailparse::parse_mail(&orig_raw).ok()?;
 
     Some(BounceDsn {
-        original_from: get_header_value(orig_part, "from"),
-        original_to: get_header_value(orig_part, "to"),
-        original_subject: get_header_value(orig_part, "subject"),
-        orig_message_id: get_header_value(orig_part, "message-id"),
+        original_from: get_header_value(&orig, "from"),
+        original_to: get_header_value(&orig, "to"),
+        original_subject: get_header_value(&orig, "subject"),
+        orig_message_id: get_header_value(&orig, "message-id"),
         dsn_status,
         dsn_diagnostic,
     })
@@ -1371,4 +1377,57 @@ fn write_response_blocking(
     let buf = response.buffer()?;
     writer.write_all(&buf)?;
     writer.flush()
+}
+
+
+#[cfg(test)]
+mod bounce_dsn_format_tests {
+    use super::*;
+
+    /// 教科书式 RFC 3464 退信(真实 MTA 形态)。
+    const DSN: &[u8] = concat!(
+        "From: MAILER-DAEMON@mx.recipient.com\r\n",
+        "To: admin@admin.relay\r\n",
+        "Subject: Mail delivery failed\r\n",
+        "Message-ID: <dsn-1@mx.recipient.com>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/report; report-type=delivery-status; boundary=\"DSN-BOUND\"\r\n",
+        "\r\n",
+        "--DSN-BOUND\r\n",
+        "Content-Type: text/plain; charset=us-ascii\r\n",
+        "\r\n",
+        "Your message could not be delivered.\r\n",
+        "\r\n",
+        "--DSN-BOUND\r\n",
+        "Content-Type: message/delivery-status\r\n",
+        "\r\n",
+        "Reporting-MTA: dns; mx.recipient.com\r\n",
+        "\r\n",
+        "Final-Recipient: rfc822; recipient@test.aimail.tm\r\n",
+        "Action: failed\r\n",
+        "Status: 5.1.1\r\n",
+        "Diagnostic-Code: smtp; 550 5.1.1 User unknown\r\n",
+        "\r\n",
+        "--DSN-BOUND\r\n",
+        "Content-Type: message/rfc822\r\n",
+        "\r\n",
+        "From: admin@admin.relay\r\n",
+        "To: recipient@test.aimail.tm\r\n",
+        "Subject: MX Direct E2E Test\r\n",
+        "Message-ID: <orig-1@admin.relay>\r\n",
+        "\r\n",
+        "Original body.\r\n",
+        "--DSN-BOUND--\r\n",
+    )
+    .as_bytes();
+
+    #[test]
+    fn textbook_rfc3464_dsn_parses() {
+        let dsn = parse_bounce_dsn(DSN).expect("RFC 3464 DSN must parse");
+        assert_eq!(dsn.dsn_status, "5.1.1");
+        assert!(dsn.dsn_diagnostic.contains("550"));
+        assert_eq!(dsn.orig_message_id, "<orig-1@admin.relay>");
+        assert_eq!(dsn.original_from, "admin@admin.relay");
+        assert_eq!(dsn.original_subject, "MX Direct E2E Test");
+    }
 }
