@@ -87,6 +87,12 @@ pub struct SmtpConfig {
     /// (default: 30)
     #[serde(default = "default_delivery_timeout_secs")]
     pub delivery_timeout_secs: u64,
+    /// Maximum number of outbound deliveries running concurrently. The
+    /// scheduler awaits nothing long anymore (see `delivery_timeout_secs`),
+    /// but a burst of slow targets would still serialise; this bounds how
+    /// many run in parallel. (default: 4)
+    #[serde(default = "default_max_concurrent_deliveries")]
+    pub max_concurrent_deliveries: usize,
 }
 
 impl Default for SmtpConfig {
@@ -98,6 +104,7 @@ impl Default for SmtpConfig {
             hostname: None,
             max_connections: default_smtp_max_connections(),
             delivery_timeout_secs: default_delivery_timeout_secs(),
+            max_concurrent_deliveries: default_max_concurrent_deliveries(),
         }
     }
 }
@@ -332,6 +339,9 @@ impl Config {
         if self.smtp.delivery_timeout_secs == 0 {
             errors.push("smtp.delivery_timeout_secs must be > 0".to_string());
         }
+        if self.smtp.max_concurrent_deliveries == 0 {
+            errors.push("smtp.max_concurrent_deliveries must be > 0".to_string());
+        }
         if self.webhook.pending_ttl_hours == 0 {
             errors.push("webhook.pending_ttl_hours must be > 0".to_string());
         }
@@ -462,6 +472,11 @@ fn default_db_pool_size() -> u32 {
 
 fn default_max_message_size() -> usize {
     10 * 1024 * 1024
+}
+
+/// 并发出站投递的上限。见 `SmtpConfig::max_concurrent_deliveries`。
+fn default_max_concurrent_deliveries() -> usize {
+    4
 }
 
 /// 单次出站 SMTP 投递的硬超时(秒)。见 `SmtpConfig::delivery_timeout_secs`。
@@ -603,6 +618,30 @@ mod smtp_delivery_timeout_tests {
         let s: SmtpConfig = toml::from_str("").expect("SmtpConfig must load from empty table");
         assert_eq!(s.delivery_timeout_secs, 30, "default must be 30s");
         assert_eq!(SmtpConfig::default().delivery_timeout_secs, 30);
+    }
+
+    #[test]
+    fn concurrency_defaults_to_4_and_is_configurable() {
+        let s: SmtpConfig = toml::from_str("").expect("load");
+        assert_eq!(s.max_concurrent_deliveries, 4);
+        let s2: SmtpConfig = toml::from_str("max_concurrent_deliveries = 8").expect("load");
+        assert_eq!(s2.max_concurrent_deliveries, 8);
+    }
+
+    #[test]
+    fn zero_concurrency_is_rejected_by_validation() {
+        let cfg: Config = toml::from_str(
+            r#"
+[storage]
+path = "/tmp/x.db"
+[smtp]
+max_concurrent_deliveries = 0
+"#,
+        )
+        .expect("Config parse");
+        let err = cfg.validate().expect_err("zero concurrency must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("smtp.max_concurrent_deliveries"), "got {msg}");
     }
 
     #[test]

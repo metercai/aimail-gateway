@@ -518,6 +518,15 @@ impl ConnectionHandler {
     /// before any per-message processing.
     pub fn check_deferred_whitelist(&self) -> Result<(), Response> {
         if !self.sender_whitelisted {
+            // 空信封(MAIL FROM:<>)是退信/DSN 的唯一合法形态: 必须放行到后续 bounce 处理
+            // 分支, 否则真实退信会被 550 拒掉、NDR 通知永不可达。
+            // 实测: category-23 B.2 打印 "SMTP ERROR: (550, 'Sender not whitelisted')"。
+            // 安全性: 仅放行到 bounce 分支, 该分支还要 verify_bounce 匹配本地出站记录
+            // 才会生成通知(未匹配的记 bounce_unverified), 不会投递到 agent 收件箱。
+            // None(尚未解析出 MAIL FROM) 不算空信封, 保持原有严格性。
+            if matches!(self.sender.as_deref(), Some(s) if s.trim().is_empty()) {
+                return Ok(());
+            }
             let is_stranger_cmd = match mailparse::parse_headers(&self.message_data) {
                 Ok((headers, _)) => {
                     let subject = headers
