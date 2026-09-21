@@ -187,9 +187,21 @@ impl Database {
                 tracing::error!(operation="pool_connection_error", error = %e, "Pool connection error");
                 AppError::Internal(format!("Pool error: {}", e))
             })?;
-            let tx = conn.transaction().map_err(|e| {
-                AppError::Internal(format!("Transaction begin failed: {}", e))
-            })?;
+            // BEGIN IMMEDIATE: every `call_tx` body is a read-then-write
+            // transaction (see the address-activation path). With the default
+            // DEFERRED behaviour the first SELECT pins a WAL snapshot; if any
+            // other connection commits before this tx writes, SQLite refuses the
+            // write with SQLITE_BUSY ("database is locked") — a stale-snapshot
+            // condition `busy_timeout` cannot wait out, since only replaying the
+            // transaction can succeed. Acquiring the write lock up front makes
+            // the per-connection busy_timeout (5s) actually apply and removes
+            // the read-then-upgrade failure (2026-09-21; reproduced by
+            // advanced/e2e-open-apply.py's renewal step under scheduler writes).
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(|e| {
+                    AppError::Internal(format!("Transaction begin failed: {}", e))
+                })?;
             let result = f(&tx)?;
             tx.commit().map_err(|e| {
                 AppError::Internal(format!("Transaction commit failed: {}", e))
