@@ -525,15 +525,78 @@ enum ManagerCommand {
     RemoveContact(String),              // email to remove
 }
 
-/// Parse the `persona:` / `signature:` sections of an approval email.
-/// Both sections are optional (at least one required); a section's text
-/// may span multiple lines, ending at the next section marker.
+/// Is this line a marker that ends a persona-approval payload section?
+///
+/// The approval is a **command block**: `persona:` / `signature:` lines plus
+/// their immediate continuation lines. Anything a mail client appends after it
+/// — the quoted thread, the RFC 3676 signature divider (`-- `), a reply
+/// attribution, or trailing draft boilerplate — must not leak into the stored
+/// values. Observed 2026-09-21 on a real approval: the stored signature came
+/// back as `"<sig line>\n---\n<draft note>\n--\n<placeholder>"`.
+fn payload_terminator(line: &str) -> bool {
+    if line.is_empty() {
+        return true; // blank line ends the command block (quoted thread follows)
+    }
+    let lower = line.to_lowercase();
+    // Quote prefix
+    if line.starts_with('>') {
+        return true;
+    }
+    // RFC 3676 signature delimiter (`-- ` / `--`)
+    if line == "--" || line.starts_with("-- ") {
+        return true;
+    }
+    // A rule made only of dashes/underscores (`---`, `—`, `––`, `____`)
+    if line
+        .chars()
+        .all(|c| matches!(c, '-' | '—' | '–' | '_' | ' '))
+    {
+        return true;
+    }
+    // Reply attributions / quoted-message headers
+    if lower.contains("original message") {
+        return true;
+    }
+    if lower.starts_with("on ") && lower.contains("wrote:") {
+        return true;
+    }
+    if lower.contains("写道:") || lower.contains("写道：") {
+        return true;
+    }
+    if lower.starts_with("from:") || lower.starts_with("发件人") || lower.starts_with("sent:") {
+        return true;
+    }
+    false
+}
+
+/// A line that is nothing but a `<...>` placeholder (e.g. `<出站邮件签名>`):
+/// draft boilerplate, never real content.
+fn is_placeholder_line(line: &str) -> bool {
+    line.len() >= 2 && line.starts_with('<') && line.ends_with('>')
+}
+
+fn push_capture(target: &mut String, line: &str) {
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    target.push_str(line);
+}
+
+/// Parse the persona/signature payload out of an approval email body.
+///
+/// Tightened 2026-09-21: capture stops at the first `payload_terminator` **after
+/// a section started** (markers before the first `persona:`/`signature:` line are
+/// just skipped, so a reply that quotes the original above the command still
+/// parses). `<...>` placeholder lines are dropped.
 fn parse_persona_approval(body: &str) -> Option<(String, String)> {
     let mut persona = String::new();
     let mut signature = String::new();
     let mut section = 0usize; // 0 = preamble, 1 = persona, 2 = signature
     for line in body.lines() {
         let trimmed = line.trim();
+        if section != 0 && payload_terminator(trimmed) {
+            break;
+        }
         if let Some(rest) = trimmed.strip_prefix("persona:") {
             section = 1;
             persona = rest.trim().to_string();
@@ -541,15 +604,11 @@ fn parse_persona_approval(body: &str) -> Option<(String, String)> {
             section = 2;
             signature = rest.trim().to_string();
         } else if section == 1 && !trimmed.is_empty() {
-            if !persona.is_empty() {
-                persona.push('\n');
+            if !is_placeholder_line(trimmed) {
+                push_capture(&mut persona, trimmed);
             }
-            persona.push_str(trimmed);
-        } else if section == 2 && !trimmed.is_empty() {
-            if !signature.is_empty() {
-                signature.push('\n');
-            }
-            signature.push_str(trimmed);
+        } else if section == 2 && !trimmed.is_empty() && !is_placeholder_line(trimmed) {
+            push_capture(&mut signature, trimmed);
         }
     }
     if persona.is_empty() && signature.is_empty() {
@@ -787,6 +846,72 @@ mod tests {
     fn test_parse_persona_approval_trigger_without_sections_is_not_command() {
         // Trigger present but no sections → not a command (falls through).
         assert!(super::parse_manager_command("approve persona, please see attached").is_none());
+    }
+
+    // 2026-09-21 生产实测: 真实批准回信的表体形如
+    //   approve persona / persona: … / signature: <sig> / 空行 / --- / 说明 / -- / <占位符>
+    // 修复前 signature 被贪婪吞下 "---"、说明行与占位符。
+    #[test]
+    fn test_parse_persona_approval_stops_at_blank_line() {
+        let body = "approve persona\npersona: 我是 pi\nsignature: — pi · AI Agent\n\n---\n\
+                    以上为 persona 与 signature 草案。审阅后回复 approve persona 即可确认生效。\n\n--\n<出站邮件签名>";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "我是 pi");
+                assert_eq!(signature, "— pi · AI Agent");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_quoted_thread_not_captured() {
+        let body = "approve persona\npersona: p\nsignature: s\n> quoted original\n> more";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "p");
+                assert_eq!(signature, "s");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_persona_approval_placeholder_and_attribution_dropped() {
+        let body = "approve persona\npersona: p1\nsignature: s1\n<出站邮件签名>\nOn 2026-09-21, pi wrote:\nold";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "p1");
+                assert_eq!(signature, "s1");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    // 以破折号开头的**值**要保留(如 "— pi · AI Agent"), 只有整行破折号才是分隔符。
+    #[test]
+    fn test_parse_persona_approval_dash_value_kept() {
+        let body = "approve persona\npersona: p\nsignature:\n— pi · AI Agent\n---\nnote";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "p");
+                assert_eq!(signature, "— pi · AI Agent");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
+    }
+
+    // 回信把原信引在**上方**时仍要解析出指令(终止符只在进入 section 后生效)。
+    #[test]
+    fn test_parse_persona_approval_quote_above_command_still_parses() {
+        let body = "> On 2026-09-21, pi wrote:\n> persona: old\n\napprove persona\npersona: new p\nsignature: new s";
+        match super::parse_manager_command(body) {
+            Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
+                assert_eq!(persona, "new p");
+                assert_eq!(signature, "new s");
+            }
+            _ => panic!("expected PersonaApproval"),
+        }
     }
 
     #[test]
