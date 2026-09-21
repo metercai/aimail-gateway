@@ -52,9 +52,26 @@ impl Database {
             }
         }
 
+        // Write-lock wait applied to *every* pooled connection; mirrors the
+        // startup `PRAGMA busy_timeout` below. SQLite's default is 0 (fail
+        // immediately with SQLITE_BUSY), which is what made concurrent writes
+        // surface as 500 "database is locked".
+        const BUSY_TIMEOUT_MS: i64 = 5000;
+
         let manager = SqliteConnectionManager::file(path_ref);
 
-        // Set SQLCipher key as the first operation on each connection.
+        // Every pooled connection must carry the same pragmas. r2d2 opens
+        // connections lazily and the startup pragmas below (`journal_mode`,
+        // `busy_timeout`) only ever ran on the single connection used during
+        // init — a pooled connection created later kept SQLite's default
+        // `busy_timeout = 0`, so the moment it met a concurrent writer
+        // (scheduler first-delivery claim / mark-completed, retry inspection)
+        // the write failed immediately with SQLITE_BUSY, surfacing as a 500
+        // `{"error":"DB error","detail":"internal error: database is locked"}`
+        // on write endpoints. Reproduced deterministically by
+        // advanced/e2e-open-apply.py's renewal step (2026-09-21); `WAL` itself
+        // is a persistent database property, so only `busy_timeout` needs to be
+        // (re)applied per connection.
         let manager = if let Some(key) = encryption_key {
             // Escape single quotes in the key to prevent SQL injection.
             // Key is derived via HMAC-SHA256 (hex-encoded), so quotes are
@@ -63,10 +80,14 @@ impl Database {
             let key_owned = safe_key;
             manager.with_init(move |conn| {
                 conn.execute_batch(&format!("PRAGMA key = '{}';", key_owned))?;
+                conn.execute_batch(&format!("PRAGMA busy_timeout = {};", BUSY_TIMEOUT_MS))?;
                 Ok(())
             })
         } else {
-            manager
+            manager.with_init(|conn| {
+                conn.execute_batch(&format!("PRAGMA busy_timeout = {};", BUSY_TIMEOUT_MS))?;
+                Ok(())
+            })
         };
 
         let pool = r2d2::Pool::builder()
