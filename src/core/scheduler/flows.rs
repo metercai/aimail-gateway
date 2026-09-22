@@ -148,7 +148,7 @@ pub(crate) async fn periodic_inspection(
 
     // Attempt delivery
     let last_error = match delivery_type {
-        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics).await,
+        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics, None).await,
         _ => deliver_smtp(smtp_relay, record, metrics, config, email_factory).await,
     };
 
@@ -245,7 +245,7 @@ pub(crate) async fn immediate_forward(
 
     // Attempt delivery
     let last_error = match delivery_type {
-        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics).await,
+        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics, None).await,
         _ => deliver_smtp(smtp_relay, record, metrics, config, email_factory).await,
     };
 

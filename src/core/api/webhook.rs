@@ -113,9 +113,10 @@ pub async fn process_email_webhook(
     config: &crate::core::config::Config,
     client: &reqwest::Client,
     record: &crate::core::email::storage::EmailRecord,
+    ack: Option<crate::core::api::outbound::AckCtx<'_>>,
 ) -> bool {
     // ── 0. Handle manager commands ────────────────────────────
-    if handle_manager_commands(record, env_factory, email_factory).await {
+    if handle_manager_commands(record, env_factory, email_factory, ack).await {
         return true; // Email processed by command, don't deliver
     }
 
@@ -683,6 +684,8 @@ async fn handle_manager_commands(
     record: &crate::core::email::storage::EmailRecord,
     env_factory: &crate::core::factory::EnvFactory,
     _email_factory: &crate::core::email::factory::EmailFactory,
+    // 2026-09-22: 指令确认信需要入队+触发投递 ⇒ 需要 HttpState; 单测无 state 时传 None
+    ack: Option<crate::core::api::outbound::AckCtx<'_>>,
 ) -> bool {
     let body = &record.body;
     if body.is_empty() {
@@ -734,9 +737,37 @@ async fn handle_manager_commands(
                     .await
                 {
                     warn!(operation="manager_persona_approval_failed", error = %e, "Failed to apply persona approval");
+                    send_command_ack(
+                        ack,
+                        to_addr,
+                        &record.sender,
+                        &agent_meta.system_id,
+                        "approve persona",
+                        "",
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     return false;
                 }
                 info!(operation="manager_persona_approved", agent = %to_addr, "Manager command: persona and/or signature approved");
+                let applied = format!(
+                    "persona = {per}\n          signature = {sig}{}",
+                    if persona.is_empty() || signature.is_empty() {
+                        "\n          (unchanged: omitted section keeps its previous value)"
+                    } else {
+                        ""
+                    }
+                );
+                send_command_ack(
+                    ack,
+                    to_addr,
+                    &record.sender,
+                    &agent_meta.system_id,
+                    "approve persona",
+                    &applied,
+                    None,
+                )
+                .await;
                 return true;
             }
             ManagerCommand::AddContact(email, description) => {
@@ -746,9 +777,29 @@ async fn handle_manager_commands(
                     .await
                 {
                     warn!(operation="manager_add_contact_failed", error = %e, "Failed to add contact");
+                    send_command_ack(
+                        ack,
+                        to_addr,
+                        &record.sender,
+                        &agent_meta.system_id,
+                        "add contact",
+                        "",
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     return false;
                 }
                 info!(operation="manager_contact_added", domain = %to_addr, email = %email, "Manager command: contact added");
+                send_command_ack(
+                    ack,
+                    to_addr,
+                    &record.sender,
+                    &agent_meta.system_id,
+                    "add contact",
+                    &format!("{email} added to your contacts (direction: all)"),
+                    None,
+                )
+                .await;
                 return true;
             }
             ManagerCommand::RemoveContact(email) => {
@@ -757,14 +808,97 @@ async fn handle_manager_commands(
                     .await
                 {
                     warn!(operation="manager_remove_contact_failed", error = %e, "Failed to remove contact");
+                    send_command_ack(
+                        ack,
+                        to_addr,
+                        &record.sender,
+                        &agent_meta.system_id,
+                        "remove contact",
+                        "",
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     return false;
                 }
                 info!(operation="manager_contact_removed", domain = %to_addr, email = %email, "Manager command: contact removed");
+                send_command_ack(
+                    ack,
+                    to_addr,
+                    &record.sender,
+                    &agent_meta.system_id,
+                    "remove contact",
+                    &format!("{email} removed from your contacts"),
+                    None,
+                )
+                .await;
                 return true;
             }
         }
     }
     false
+}
+
+/// 安全员指令确认信 —— 2026-09-22 用户要求"**指令邮件必有回复**": 成功与失败都回一封。
+///
+/// from `noreply@{domain}`(系统发件人) ⇒ 不满足网关的消费条件(sender == meta.manager_address)
+/// ⇒ 不会把确认信当成新指令消费, 无自激回环。失败也回信: 否则静默失败无从发现。
+async fn send_command_ack(
+    ack: Option<crate::core::api::outbound::AckCtx<'_>>,
+    to_agent: &str,
+    sender: &str,
+    system_id: &str,
+    command: &str,
+    applied: &str,
+    error: Option<&str>,
+) {
+    let Some(ack) = ack else { return };
+    let from = ack.cfg.system_sender();
+    let subject = match error {
+        None => format!("[AIMail] Command applied: {command}"),
+        Some(_) => format!("[AIMail] Command failed: {command}"),
+    };
+    let ts = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string();
+    let body = match error {
+        None => format!(
+            "Your command email for {to_agent} has been received and applied.\n\n\
+             Command : {command}\n\
+             Result  : OK\n\
+             Applied : {applied}\n\
+             Time    : {ts}\n\n\
+             --\n\
+             Automated confirmation from {from}; do not reply.\n"
+        ),
+        Some(e) => format!(
+            "Your command email for {to_agent} was received but NOT applied.\n\n\
+             Command : {command}\n\
+             Result  : FAILED - {e}\n\
+             Time    : {ts}\n\n\
+             --\n\
+             Automated confirmation from {from}; do not reply.\n"
+        ),
+    };
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        ack.cfg,
+        ack.email_factory,
+        ack.metrics,
+        ack.trigger_tx,
+        system_id,
+        &from,
+        sender,
+        &subject,
+        &body,
+    )
+    .await
+    {
+        warn!(
+            operation = "command_ack_enqueue_failed",
+            error = %e,
+            to = %sender,
+            "failed to enqueue command confirmation mail"
+        );
+    }
 }
 
 /// Extract description from email body (line after 'description:' or 'desc:').
@@ -1095,7 +1229,7 @@ mod tests {
         seed_agent(&env).await;
         let rec = approval_record("approve persona\npersona: new persona only");
         assert!(
-            super::handle_manager_commands(&rec, &env, &ef).await,
+            super::handle_manager_commands(&rec, &env, &ef, None).await,
             "approval must be consumed"
         );
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
@@ -1110,7 +1244,7 @@ mod tests {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
         let rec = approval_record("approve persona\nsignature: new sig only");
-        assert!(super::handle_manager_commands(&rec, &env, &ef).await);
+        assert!(super::handle_manager_commands(&rec, &env, &ef, None).await);
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
         assert_eq!(meta.agent_signature, "new sig only");
         assert_eq!(meta.agent_persona, "old persona", "persona must be preserved");
@@ -1122,7 +1256,7 @@ mod tests {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
         let rec = approval_record("approve persona\npersona: p2\nsignature: s2");
-        assert!(super::handle_manager_commands(&rec, &env, &ef).await);
+        assert!(super::handle_manager_commands(&rec, &env, &ef, None).await);
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
         assert_eq!(meta.agent_persona, "p2");
         assert_eq!(meta.agent_signature, "s2");

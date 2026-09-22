@@ -138,6 +138,7 @@ pub(crate) async fn deliver_webhook(
     config: &Config,
     record: &EmailRecord,
     metrics: &Metrics,
+    trigger_tx: Option<&tokio::sync::mpsc::Sender<String>>,
 ) -> Option<String> {
     let all_succeeded = crate::core::api::webhook::process_email_webhook(
         &email_factory.env_factory,
@@ -145,6 +146,12 @@ pub(crate) async fn deliver_webhook(
         config,
         client,
         record,
+        Some(crate::core::api::outbound::AckCtx {
+            cfg: config,
+            email_factory,
+            metrics: Some(metrics),
+            trigger_tx,
+        }),
     )
     .await;
     if all_succeeded {

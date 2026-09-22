@@ -6,6 +6,7 @@ pub mod files;
 pub mod http;
 pub mod keys;
 pub mod monitor;
+pub mod outbound;
 pub mod send;
 pub mod types;
 pub mod webhook;
