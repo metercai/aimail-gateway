@@ -248,7 +248,7 @@ pub async fn setup_admin_key(
     let mut rng = rand::thread_rng();
     let raw_bytes: [u8; 32] = rng.gen();
     let raw_key = hex::encode(raw_bytes);
-    let key_hash = crate::core::api::auth::sha256_hex(&raw_key);
+    let key_hash = crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
     let key_prefix = &raw_key[..8];
 
     factory

@@ -181,7 +181,7 @@ async fn rotate_own_key(
     use crate::core::api::auth::sha256_hex;
     use uuid::Uuid;
     let raw_key = Uuid::new_v4().to_string().replace('-', "");
-    let key_hash = sha256_hex(&raw_key);
+    let key_hash = crate::core::api::seal::store_hash(&sha256_hex(&raw_key));
     let new_prefix = &raw_key[..8];
     match state
         .factories

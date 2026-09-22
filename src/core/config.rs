@@ -118,6 +118,13 @@ pub struct StorageConfig {
     pub pool_size: u32,
     #[serde(default = "default_encryption_enabled")]
     pub encryption: bool,
+    /// 平台 admin-key 文件位置(2026-09-22 加固)。
+    ///
+    /// 生产应指向 DB 目录**之外**的位置(如 `/etc/aimail/admin.key`, 0600 root): 它同时是该部署的
+    /// 根秘密(派生 DB 加密键与凭据密封键), 与 DB 同目录意味着任何目录级备份都同时泄漏 DB 与根密钥。
+    /// 未配置时沿用历史位置 `<db_path>.admin_key`(仅供测试/CI)。
+    #[serde(default)]
+    pub admin_key_file: Option<PathBuf>,
     #[serde(default = "default_attachment_max_size")]
     pub attachment_max_size: usize,
     #[serde(default = "default_attachment_lifetime_hours")]
@@ -152,6 +159,7 @@ impl Default for StorageConfig {
             attachment_lifetime_hours: default_attachment_lifetime_hours(),
             attachment_allowed_types: Vec::new(),
             attachment_max_attachments: default_attachment_max_count(),
+            admin_key_file: None,
         }
     }
 }

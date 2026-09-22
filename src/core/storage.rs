@@ -1303,6 +1303,53 @@ pub fn api_key_row(r: &rusqlite::Row) -> rusqlite::Result<ApiKeyRecord> {
 }
 
 impl Database {
+    /// 库内凭据材料密封(2026-09-22): 把历史明文哈希(`sha256(raw_key)`)就地密封成 `v1:...`。
+    ///
+    /// 幂等 —— 已密封的行跳过, 因此迁移可中断/重复执行; 也意味着可随时回滚(代码两种形态都接受)。
+    /// 返回 (本次新密封数, 跳过数)。
+    pub async fn reseal_api_keys(&self) -> AppResult<(usize, usize)> {
+        use crate::core::api::seal;
+        let key = seal::key_ref().ok_or_else(|| {
+            AppError::Internal("seal key not loaded — refusing to reseal credentials".into())
+        })?;
+        self.call_tx(move |conn| {
+            let rows: Vec<(i64, String)> = {
+                let mut stmt = conn.prepare("SELECT id, key_hash FROM api_keys")?;
+                let it = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                it.collect::<Result<Vec<_>, _>>()?
+            };
+            let (mut done, mut skipped) = (0usize, 0usize);
+            for (id, stored) in rows {
+                if seal::is_sealed(&stored) {
+                    skipped += 1;
+                    continue;
+                }
+                let sealed = seal::seal(key, &stored)
+                    .map_err(|e| AppError::Internal(format!("seal failed: {e}")))?;
+                conn.execute(
+                    "UPDATE api_keys SET key_hash = ?1 WHERE id = ?2",
+                    rusqlite::params![sealed, id],
+                )?;
+                done += 1;
+            }
+            Ok((done, skipped))
+        })
+        .await
+    }
+
+    /// 统计已密封的凭据行(启动时 fail-closed 判定: 有密封材料但 admin-key 不可得 ⇒ 拒绝启动)。
+    pub async fn count_sealed_api_keys(&self) -> AppResult<usize> {
+        self.call_tx(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM api_keys WHERE key_hash LIKE 'v1:%'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok(n as usize)
+        })
+        .await
+    }
+
     pub async fn insert_api_key(
         &self,
         system_id: &str,
@@ -1518,6 +1565,8 @@ impl Database {
     /// Verify an API key hash exists and is active.
     /// Returns the full ApiKeyRecord if valid, None if invalid/expired/deactivated.
     pub async fn verify_api_key(&self, key_hash: &str) -> AppResult<Option<ApiKeyRecord>> {
+        // 库内材料可能是密封的("v1:"): 等值查找需同时尝试**密封形态**与历史明文形态(迁移期/回滚期)。
+        let sealed = crate::core::api::seal::seal_if_loaded(key_hash);
         let key_hash = key_hash.to_string();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.call(move |conn| {
@@ -1526,8 +1575,8 @@ impl Database {
                 // datetime('now') produces "YYYY-MM-DD HH:MM:SS" (space-separated),
                 // while expires_at may be stored in RFC 3339 with T separator,
                 // which makes same-day comparison unreliable.
-                "SELECT id, system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category, activation_code_hash, activation_expires_at, claimed_at FROM api_keys WHERE key_hash = ?1 AND is_active = 1 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) LIMIT 1",
-                params![key_hash],
+                "SELECT id, system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category, activation_code_hash, activation_expires_at, claimed_at FROM api_keys WHERE key_hash IN (?1, ?2) AND is_active = 1 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) LIMIT 1",
+                params![sealed.clone().unwrap_or_else(|| key_hash.clone()), key_hash],
                 api_key_row,
             ).optional()?;
             if let Some(ref record) = row {

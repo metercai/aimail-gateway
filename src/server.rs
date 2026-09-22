@@ -60,6 +60,16 @@ impl Server {
         .await
     }
 
+    /// 启动时把库内历史明文凭据材料就地密封(幂等)。
+    pub async fn reseal_credentials(&self) -> AppResult<(usize, usize)> {
+        self.db.reseal_api_keys().await
+    }
+
+    /// 启动 fail-closed 判定用: 库内已密封的凭据行数。
+    pub async fn count_sealed_credentials(&self) -> AppResult<usize> {
+        self.db.count_sealed_api_keys().await
+    }
+
     pub async fn run(self) -> AppResult<()> {
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();

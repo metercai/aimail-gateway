@@ -138,7 +138,7 @@ pub async fn create_api_key(
     }
 
     let raw_key = Uuid::new_v4().to_string().replace('-', "");
-    let key_hash = sha256_hex(&raw_key);
+    let key_hash = crate::core::api::seal::store_hash(&sha256_hex(&raw_key));
 
     let scopes = if req.scopes.is_empty() {
         vec!["agent".to_string()]
@@ -512,7 +512,7 @@ pub async fn update_api_key(
         // Admin can rotate their own key
         if req.rotate.unwrap_or(false) && id == api_key.id {
             let raw_key = Uuid::new_v4().to_string().replace('-', "");
-            let key_hash = sha256_hex(&raw_key);
+            let key_hash = crate::core::api::seal::store_hash(&sha256_hex(&raw_key));
             let new_prefix = &raw_key[..8];
             match state
                 .factories
@@ -655,7 +655,7 @@ pub async fn update_api_key(
             ));
         }
         let raw_key = Uuid::new_v4().to_string().replace('-', "");
-        let key_hash = sha256_hex(&raw_key);
+        let key_hash = crate::core::api::seal::store_hash(&sha256_hex(&raw_key));
         let new_prefix = &raw_key[..8];
         match state
             .factories

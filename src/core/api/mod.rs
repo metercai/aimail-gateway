@@ -1,3 +1,4 @@
+pub mod seal;
 pub mod activation;
 pub mod auth;
 pub mod dedup;

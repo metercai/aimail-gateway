@@ -78,7 +78,20 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
 
     // Create server
     let db_path = config.storage.db_path();
-    let key_path = format!("{}.admin_key", db_path.display());
+    // 平台 admin-key 文件: 生产应指向 DB 目录之外(如 /etc/aimail/admin.key, 0600 root);
+    // 未配置时沿用历史位置 <db>.admin_key(仅供测试/CI)。
+    let key_path: std::path::PathBuf = config
+        .storage
+        .admin_key_file
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.admin_key", db_path.display())));
+    if key_path.parent() == db_path.parent() {
+        tracing::warn!(
+            operation = "admin_key_colocated",
+            path = %key_path.display(),
+            "platform admin key sits in the same directory as the database — a backup of that              directory would leak both; move it (e.g. /etc/aimail/admin.key, 0600 root)"
+        );
+    }
 
     // Derive DB encryption key from admin key via HMAC-SHA256.
     // Only when SQLCipher is enabled (storage.encryption = true); base defaults
@@ -106,8 +119,42 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     let admin_key = server.setup_admin_key().await?;
     if !admin_key.is_empty() {
         if let Err(e) = std::fs::write(&key_path, &admin_key) {
-            tracing::warn!(operation="admin_key_write_failed", %key_path, %e, "Failed to write admin key file");
+            tracing::warn!(operation="admin_key_write_failed", path = %key_path.display(), %e, "Failed to write admin key file");
         }
+    }
+
+    // ── 库内凭据材料密封(2026-09-22 加固) ──────────────────────────────
+    // 根秘密 = 平台 admin-key; 子密钥 = HMAC-SHA256(admin_key, "aimail-gateway:key-seal:v1")。
+    // 目的: 仅拿到 DB(备份/只读副本/逻辑导出/SQL 注入)的人无法再用 key_hash 冒充签名。
+    let admin_for_seal = if !admin_key.is_empty() {
+        admin_key.clone()
+    } else {
+        std::fs::read_to_string(&key_path).unwrap_or_default()
+    };
+    aimail_base::core::api::seal::init(&admin_for_seal);
+    if !aimail_base::core::api::seal::loaded() {
+        tracing::warn!(
+            operation = "seal_key_unavailable",
+            path = %key_path.display(),
+            "no platform admin key available — credential material cannot be sealed or opened"
+        );
+    }
+    // fail closed: 库里已有密封材料却拿不到 admin-key ⇒ 拒绝启动(否则每个签名都会 401)
+    let sealed_rows = server.count_sealed_credentials().await?;
+    if let Err(e) = aimail_base::core::api::seal::ensure_loaded(sealed_rows > 0) {
+        tracing::error!(operation = "seal_fail_closed", error = %e, "refusing to start");
+        return Err(aimail_base::core::errors::AppError::Internal(e));
+    }
+    // 幂等迁移: 历史明文哈希就地密封(可中断/可重复; 代码两种形态都接受 ⇒ 可回滚)
+    match server.reseal_credentials().await {
+        Ok((done, already)) => tracing::info!(
+            operation = "credential_reseal",
+            sealed = done,
+            already_sealed = already,
+            "credential material sealed at rest"
+        ),
+        Err(e) => tracing::warn!(operation = "credential_reseal_failed", error = %e,
+            "credential reseal skipped (will retry next start)"),
     }
 
     let result = server.run().await;

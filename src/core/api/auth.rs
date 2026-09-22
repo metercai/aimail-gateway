@@ -169,9 +169,22 @@ pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next, body_
     let base = signature_base(&method, &path, &timestamp, &bytes);
     let mut record: Option<ApiKeyRecord> = None;
     for rec in candidates.iter().take(MAX_SIGNATURE_CANDIDATES) {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(rec.key_hash.as_bytes())
-                .expect("HMAC can take key of any size");
+        // 库内材料可能是密封的("v1:") ⇒ 先解封回 sha256(raw_key) 再作验签密钥;
+        // 解封失败(admin-key 不符/密文被篡改/无 admin-key)⇒ 跳过该候选, 最终 401(fail closed)。
+        let material = match crate::core::api::seal::signing_material_env(&rec.key_hash) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    operation = "sealed_credential_open_failed",
+                    key_prefix = %rec.key_prefix,
+                    error = %e,
+                    "skipping candidate key"
+                );
+                continue;
+            }
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(material.as_bytes())
+            .expect("HMAC can take key of any size");
         mac.update(base.as_bytes());
         if mac.verify_slice(&provided_sig).is_ok() {
             record = Some(rec.clone());
