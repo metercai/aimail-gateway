@@ -65,18 +65,21 @@ const WELCOME_BODY: &str = r#"Welcome to the AIMail world!
 Your AIMail address has been activated. This is the first welcome email
 automatically sent by the system, to confirm that your address is now active.
 
-To verify that the full delivery path is working end to end, please
-**reply-all** to this email and include:
-- Your current status
-- The current server time
+To verify that the full delivery path works end to end -- and to have your
+outbound identity approved -- please **reply-all** to this email with the
+following three lines, exactly as labelled:
 
-Thank you for joining the AIMail world. For the latest updates, visit the
-project homepage:
-https://github.com/metercai/aimail
+  persona: <one to three sentences introducing who you are and what you do>
+  signature: <your outbound email signature>
+  current_time: <the current time when you reply, in a human-readable form,
+                 e.g. 2026-09-22 21:05 UTC>
+
+Your manager will review and apply the approved persona and signature to your
+account. Nothing else changes.
 
 Best regards,
 noreply@{domain}
-{timestamp}
+Sent {timestamp}
 "#;
 
 /// POST /api/v1/system/welcome — send a system welcome mail (from noreply@).
@@ -402,4 +405,44 @@ pub async fn send_welcome(
             cc: full_cc,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 用户 2026-09-22 要求: 页脚 `{timestamp}` 由**程序**填充, 且必须是**人类可读**形式;
+    /// 主题标记(小写化后含 "welcome to aimail world")是 agent 侧识别 Role_Calibrator 的稳定锚点。
+    /// 与 body 侧三标签一起构成"同时命中"的识别条件(见 pysdk/aimail_base.py B3 与 tssdk preprocess.ts)。
+    #[test]
+    fn welcome_body_renders_human_readable_footer_and_stable_marker() {
+        // 与 send_welcome() 内**完全相同**的渲染方式(chrono 本地时区)
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
+        let body = WELCOME_BODY
+            .replace("{domain}", "example.tm")
+            .replace("{timestamp}", &ts);
+
+        // 1) 页脚人类可读: "Sent YYYY-MM-DD HH:MM:SS ±ZZZZ"
+        let footer = body.lines().last().unwrap_or("");
+        assert!(footer.starts_with("Sent "), "footer must start with 'Sent ': {footer}");
+        let stamp = footer.trim_start_matches("Sent ");
+        let parts: Vec<&str> = stamp.split(' ').collect();
+        assert_eq!(parts.len(), 3, "footer stamp must be 'date time tz': {stamp}");
+        assert_eq!(parts[0].len(), 10, "date must be YYYY-MM-DD: {}", parts[0]);
+        assert_eq!(parts[1].len(), 8, "time must be HH:MM:SS: {}", parts[1]);
+        assert!(
+            parts[2].starts_with('+') || parts[2].starts_with('-'),
+            "tz must be +/-ZZZZ: {}",
+            parts[2]
+        );
+
+        // 2) 正文三标签齐备(识别条件之正文侧)
+        for k in ["persona:", "signature:", "current_time:"] {
+            assert!(body.contains(k), "body must carry label {k}");
+        }
+
+        // 3) 主题标记稳定: 个人化后缀不影响小写化子串匹配
+        let subject = format!("Welcome to AIMail World, {}, since {}!", "agent1", "2026-09-22");
+        assert!(subject.to_lowercase().contains("welcome to aimail world"));
+    }
 }
