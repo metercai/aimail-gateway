@@ -56,7 +56,10 @@ fn unauthorized(err: &str) -> Response {
 
 /// Canonical v1 API signature base string:
 /// `METHOD\npath_and_query\ntimestamp\nsha256_hex(body)` (no trailing newline).
-fn signature_base(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
+///
+/// **唯一实现**: 基座中间件与 advanced(pull_intercept) 都必须调用它, 不得各自复写
+/// (2026-09-22 曾因 advanced 自建副本导致"密封改造漏修一处" ⇒ agent 自有拉取失效)。
+pub fn signature_base(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
     let body_hash = hex::encode(hasher.finalize());
@@ -81,6 +84,45 @@ pub fn compute_api_signature(
         Hmac::<Sha256>::new_from_slice(key_hash.as_bytes()).expect("HMAC can take key of any size");
     mac.update(signature_base(method, path, timestamp, body).as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+/// 请求验签:**唯一实现**(基座中间件与 advanced `pull_intercept` 共用, 不得各自复写)。
+///
+/// 遍历候选记录: 库内材料可能是密封的(`v1:`) ⇒ 先经 `seal::signing_material` 解封回
+/// `sha256(raw_key)`, 再与 `signature_base(...)` 做常数时间 HMAC 比对; 命中即返回该记录
+/// (含 scopes/category, 供调用方做授权判定)。解封失败只跳过该候选 ⇒ 最终 401(fail closed)。
+pub fn verify_request_signature(
+    candidates: &[crate::core::storage::ApiKeyRecord],
+    method: &str,
+    path: &str,
+    timestamp: &str,
+    body: &[u8],
+    provided_sig: &[u8],
+) -> Option<crate::core::storage::ApiKeyRecord> {
+    let base = signature_base(method, path, timestamp, body);
+    for rec in candidates.iter().take(MAX_SIGNATURE_CANDIDATES) {
+        let material = match crate::core::api::seal::signing_material_env(&rec.key_hash) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    operation = "sealed_credential_open_failed",
+                    error = %e,
+                    key_prefix = %rec.key_prefix,
+                    "skipping candidate key"
+                );
+                continue;
+            }
+        };
+        let mut mac = match Hmac::<Sha256>::new_from_slice(material.as_bytes()) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        mac.update(base.as_bytes());
+        if mac.verify_slice(provided_sig).is_ok() {
+            return Some(rec.clone());
+        }
+    }
+    None
 }
 
 /// Middleware: verify the v1 API signature
@@ -166,31 +208,9 @@ pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next, body_
         }
     };
 
-    let base = signature_base(&method, &path, &timestamp, &bytes);
-    let mut record: Option<ApiKeyRecord> = None;
-    for rec in candidates.iter().take(MAX_SIGNATURE_CANDIDATES) {
-        // 库内材料可能是密封的("v1:") ⇒ 先解封回 sha256(raw_key) 再作验签密钥;
-        // 解封失败(admin-key 不符/密文被篡改/无 admin-key)⇒ 跳过该候选, 最终 401(fail closed)。
-        let material = match crate::core::api::seal::signing_material_env(&rec.key_hash) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    operation = "sealed_credential_open_failed",
-                    key_prefix = %rec.key_prefix,
-                    error = %e,
-                    "skipping candidate key"
-                );
-                continue;
-            }
-        };
-        let mut mac = Hmac::<Sha256>::new_from_slice(material.as_bytes())
-            .expect("HMAC can take key of any size");
-        mac.update(base.as_bytes());
-        if mac.verify_slice(&provided_sig).is_ok() {
-            record = Some(rec.clone());
-            break;
-        }
-    }
+    // 验签走**公共唯一实现**(内部逐候选解封 + 常数时间 HMAC 比对)。
+    let record: Option<ApiKeyRecord> =
+        verify_request_signature(&candidates, &method, &path, &timestamp, &bytes, &provided_sig);
 
     let Some(record) = record else {
         return unauthorized("Invalid X-Api-Signature");
