@@ -114,9 +114,12 @@ pub async fn process_email_webhook(
     client: &reqwest::Client,
     record: &crate::core::email::storage::EmailRecord,
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
+    // 2026-09-23 (方案 §6.3): 非 manager 发件人的失败确认信上下文; None = 静默(单测/flows)。
+    // sender 取 record.sender(收件人=发件人自己), to_agent 在消费点按命中地址覆盖。
+    failed_ack: Option<crate::core::api::outbound::FailedCommandAck<'_>>,
 ) -> bool {
     // ── 0. Handle manager commands ────────────────────────────
-    if handle_manager_commands(record, env_factory, email_factory, ack).await {
+    if handle_manager_commands(record, env_factory, email_factory, ack, failed_ack).await {
         return true; // Email processed by command, don't deliver
     }
 
@@ -686,6 +689,9 @@ async fn handle_manager_commands(
     _email_factory: &crate::core::email::factory::EmailFactory,
     // 2026-09-22: 指令确认信需要入队+触发投递 ⇒ 需要 HttpState; 单测无 state 时传 None
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
+    // 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发件人的失败确认信上下文。
+    // 两路都传 None = 行为与 2026-09-22 之前完全一致(静默); 只有命令路径会同时给两路。
+    failed_ack: Option<crate::core::api::outbound::FailedCommandAck<'_>>,
 ) -> bool {
     let body = &record.body;
     if body.is_empty() {
@@ -708,6 +714,16 @@ async fn handle_manager_commands(
             _ => continue,
         };
         if agent_meta.manager_address.is_empty() || record.sender != agent_meta.manager_address {
+            // 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发的指令邮件不消费、不投 agent
+            // (原行为保留), 但**必须回失败确认信** —— 否则发件方完全无反馈。meta 不动。
+            if let Some(ref fa) = failed_ack {
+                send_failed_command_ack(
+                    fa,
+                    to_addr,
+                    &format!("sender {} is not the manager of {}", record.sender, to_addr),
+                )
+                .await;
+            }
             continue;
         }
 
@@ -836,6 +852,50 @@ async fn handle_manager_commands(
         }
     }
     false
+}
+
+/// 非 manager 发件人的失败确认信(2026-09-23, 方案 §6.3"失败场景 ⇒ 收到失败确认信")。
+/// 与成功确认信同一发出方(`noreply@{domain}`)与同一正文骨架, Result 段固定 FAILED。
+/// 入队失败只 warn —— 确认信失败不影响指令处理路径本身。
+async fn send_failed_command_ack(
+    fa: &crate::core::api::outbound::FailedCommandAck<'_>,
+    to_agent: &str,
+    reason: &str,
+) {
+    let from = fa.cfg.system_sender();
+    let ts = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string();
+    let subject = "[AIMail] Command failed: not authorized".to_string();
+    let body = format!(
+        "Your command email for {to_agent} was received but NOT applied.\n\n\
+         Command : (manager command detected)\n\
+         Result  : FAILED - {reason}\n\
+         Time    : {ts}\n\n\
+         Only the address manager may issue manager commands for this agent.\n\
+         --\n\
+         Automated confirmation from {from}; do not reply.\n",
+    );
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        fa.cfg,
+        fa.email_factory,
+        fa.metrics,
+        fa.trigger_tx,
+        fa.system_id,
+        &from,
+        fa.sender,
+        &subject,
+        &body,
+    )
+    .await
+    {
+        warn!(
+            operation = "command_ack_enqueue_failed",
+            error = %e,
+            to = %fa.sender,
+            "failed to enqueue failed-command confirmation mail"
+        );
+    }
 }
 
 /// 安全员指令确认信 —— 2026-09-22 用户要求"**指令邮件必有回复**": 成功与失败都回一封。
@@ -1229,7 +1289,7 @@ mod tests {
         seed_agent(&env).await;
         let rec = approval_record("approve persona\npersona: new persona only");
         assert!(
-            super::handle_manager_commands(&rec, &env, &ef, None).await,
+            super::handle_manager_commands(&rec, &env, &ef, None, None).await,
             "approval must be consumed"
         );
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
@@ -1244,7 +1304,7 @@ mod tests {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
         let rec = approval_record("approve persona\nsignature: new sig only");
-        assert!(super::handle_manager_commands(&rec, &env, &ef, None).await);
+        assert!(super::handle_manager_commands(&rec, &env, &ef, None, None).await);
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
         assert_eq!(meta.agent_signature, "new sig only");
         assert_eq!(meta.agent_persona, "old persona", "persona must be preserved");
@@ -1256,9 +1316,72 @@ mod tests {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
         let rec = approval_record("approve persona\npersona: p2\nsignature: s2");
-        assert!(super::handle_manager_commands(&rec, &env, &ef, None).await);
+        assert!(super::handle_manager_commands(&rec, &env, &ef, None, None).await);
         let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
         assert_eq!(meta.agent_persona, "p2");
         assert_eq!(meta.agent_signature, "s2");
+    }
+
+    // ── 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发件人也必须收到失败确认信 ──
+
+    /// 构造带 ack 能力的 Config(Default + smtp.hostname)。
+    fn ack_cfg() -> crate::core::config::Config {
+        let mut c = crate::core::config::Config::default();
+        c.smtp.hostname = Some("e2e.local".to_string());
+        c
+    }
+
+    // 非 manager 发指令 ⇒ 不消费(false, 邮件照常投递), 但发件人收到
+    // "Command failed: not authorized" 失败确认信; meta 两个值都不被改写。
+    #[tokio::test]
+    async fn non_manager_command_gets_failed_ack_and_meta_untouched() {
+        let (env, ef) = approval_env();
+        seed_agent(&env).await;
+        let cfg = ack_cfg();
+        // approval_record 固定 sender=mgr@ext.com(= manager);非 manager 场景换发件人。
+        let mut rec = approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
+        rec.sender = "stranger@ext.com".to_string();
+        let fa = Some(crate::core::api::outbound::FailedCommandAck {
+            cfg: &cfg,
+            email_factory: &ef,
+            metrics: None,
+            trigger_tx: None,
+            sender: &rec.sender,
+            system_id: &rec.system_id,
+        });
+        assert!(
+            !super::handle_manager_commands(&rec, &env, &ef, None, fa).await,
+            "non-manager command must NOT be consumed"
+        );
+        // meta 未被改写
+        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        assert_eq!(meta.agent_persona, "old persona", "meta must stay untouched");
+        assert_eq!(meta.agent_signature, "old sig", "meta must stay untouched");
+        // 失败确认信已入队: from noreply@e2e.local → to stranger@ext.com, Command failed
+        let acks = env.db.list_emails(50).await.unwrap();
+        let ack = acks.iter().find(|m| m.subject.starts_with("[AIMail] Command failed"));
+        let ack = ack.expect("non-manager command must get a failed confirmation mail");
+        assert_eq!(ack.sender, "noreply@e2e.local");
+        assert!(ack.recipients.contains("stranger@ext.com"), "ack must go to the command sender");
+        assert!(ack.body.contains("Result  : FAILED"));
+        assert!(ack.body.contains("is not the manager of agent@test.com"));
+    }
+
+    // 无 failed_ack 上下文(如 flows 路径)⇒ 行为与旧版一致: 不消费、无确认信、meta 不动。
+    #[tokio::test]
+    async fn non_manager_command_without_failed_ack_ctx_stays_silent() {
+        let (env, ef) = approval_env();
+        seed_agent(&env).await;
+        let mut rec = approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
+        rec.sender = "stranger@ext.com".to_string();
+        assert!(!super::handle_manager_commands(&rec, &env, &ef, None, None).await);
+        let acks = env.db.list_emails(50).await.unwrap();
+        assert!(
+            !acks.iter().any(|m| m.subject.contains("Command")),
+            "no ack may be enqueued when failed_ack is None"
+        );
+        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        assert_eq!(meta.agent_persona, "old persona");
+        assert_eq!(meta.agent_signature, "old sig");
     }
 }

@@ -152,6 +152,15 @@ pub(crate) async fn deliver_webhook(
             metrics: Some(metrics),
             trigger_tx,
         }),
+        // 失败确认信上下文与成功路共用同一批句柄; 收件人 = record.sender
+        Some(crate::core::api::outbound::FailedCommandAck {
+            cfg: config,
+            email_factory,
+            metrics: Some(metrics),
+            trigger_tx,
+            sender: &record.sender,
+            system_id: &record.system_id,
+        }),
     )
     .await;
     if all_succeeded {

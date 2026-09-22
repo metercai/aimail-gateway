@@ -34,16 +34,47 @@ pub async fn enqueue_outbound_simple(
     let email_id = Uuid::new_v4().to_string();
     let recipients_json = json!({ "to": [to] }).to_string();
 
-    let mut eps = serde_json::Map::new();
-    eps.insert(
-        to.to_lowercase(),
-        json!({ "status": "pending", "protocol": "mx" }),
-    );
-    let endpoints_str = serde_json::to_string(&eps).unwrap_or_default();
+    // Endpoint resolution (2026-09-23, S4 e2e 实证): the original helper
+    // hardcoded `protocol: mx`, so confirmations to INTERNAL recipients
+    // (registered on this gateway) were dropped by loopback prevention in the
+    // SMTP sender and swept away — the ack never reached same-host managers.
+    // Resolve the webhook endpoint like the welcome endpoint does; fall back
+    // to the MX envelope only when the recipient has no webhook (external).
+    let endpoints_str = {
+        let internal = email_factory
+            .env_factory
+            .build_endpoints_for_recipients(&[to.to_string()])
+            .await;
+        if internal == "{}" || internal.is_empty() {
+            let mut eps = serde_json::Map::new();
+            eps.insert(
+                to.to_lowercase(),
+                json!({ "status": "pending", "protocol": "mx" }),
+            );
+            serde_json::to_string(&eps).unwrap_or_default()
+        } else {
+            internal
+        }
+    };
 
-    let domain = from.split('@').nth(1).unwrap_or("aimail-relay");
-    let headers_json =
-        json!({ "Message-ID": format!("<{}@{}>", Uuid::new_v4(), domain) }).to_string();
+    // Delivery-type routing (2026-09-23): for outbound records
+    // `detect_delivery_type` only consults the explicit header override
+    // (body present ⇒ SMTP). An internal recipient must go through the
+    // webhook processor (which consumes the endpoints above), otherwise the
+    // SMTP sender's loopback prevention silently drops the mail.
+    let headers_json = {
+        let is_internal = endpoints_str.contains("\"url\"");
+        let mut h = serde_json::Map::new();
+        if is_internal {
+            h.insert("delivery_type".to_string(), json!("webhook"));
+        }
+        let domain = from.split('@').nth(1).unwrap_or("aimail-relay");
+        h.insert(
+            "Message-ID".to_string(),
+            json!(format!("<{}@{}>", Uuid::new_v4(), domain)),
+        );
+        serde_json::to_string(&h).unwrap_or_default()
+    };
     let max_attempts = cfg.retry.max_attempts as i32;
 
     match email_factory
@@ -97,4 +128,17 @@ pub struct AckCtx<'a> {
     pub email_factory: &'a EmailFactory,
     pub metrics: Option<&'a Metrics>,
     pub trigger_tx: Option<&'a Sender<String>>,
+}
+
+/// 指令处理的失败确认信上下文(2026-09-23): 指令必有回复 ⇒ **非 manager 发件人也必须收到**
+/// "Command failed" 确认信, 否则非 manager 的指令静默无反馈, 发件方无从发现。
+/// sender = 指令邮件发件人(失败确认信收件人); system_id = 目标地址归属系统(路由用);
+/// to_agent(指令目标地址)逐命中不同, 由调用点作参数传入, 不入结构体。
+pub struct FailedCommandAck<'a> {
+    pub cfg: &'a Config,
+    pub email_factory: &'a EmailFactory,
+    pub metrics: Option<&'a Metrics>,
+    pub trigger_tx: Option<&'a Sender<String>>,
+    pub sender: &'a str,
+    pub system_id: &'a str,
 }
