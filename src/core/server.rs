@@ -236,6 +236,13 @@ pub struct AdminKeys {
     /// The instance's bootstrap system id (`<storage>/system.id`) — both keys carry it as
     /// their `system_id`, i.e. it is the identity a client must declare for them.
     pub system_id: String,
+    /// Whether this deployment provisions an agent-side system key AT ALL. False on
+    /// multi-system cloud builds (agent hosts get theirs from `POST /api/v1/activate-system`),
+    /// where the key file is neither written, nor announced, nor expected to exist.
+    /// Callers persist/announce B only when this is true — otherwise a system-category key
+    /// belonging to some other product (e.g. a shared-domain instance key) makes the
+    /// persistence layer emit a bogus "file missing, delete that key" advisory.
+    pub system_key_expected: bool,
 }
 
 /// Reserved `domain_addr` for the agent-side system key.
@@ -272,6 +279,7 @@ pub async fn setup_admin_key(
         admin_key: String::new(),
         system_key: String::new(),
         system_id: bootstrap_id.clone(),
+        system_key_expected: provision_system_key,
     };
 
     // ── Gateway-side admin key (category=platform, scopes=[platform,system]) ──
@@ -400,6 +408,30 @@ pub async fn align_legacy_system_admin_key(
     Ok(legacy)
 }
 
+/// What the persistence step should do about the agent-side system key.
+///
+/// Kept as a pure decision (no IO, no logging) so the cloud-vs-single-system split is
+/// unit-testable: the 2026-09-26 cloud regression was a WARN-only symptom, which a
+/// file-level assertion could not have caught.
+#[derive(Debug, PartialEq, Eq)]
+enum SystemKeyAction {
+    /// This deployment does not provision an agent-side system key at all (multi-system
+    /// cloud build) — no file to write, nothing to announce, nothing to expect on disk.
+    NotProvisioned,
+    /// Freshly minted this boot: write it out and announce it once.
+    WriteNew,
+    /// Already in the database (idempotent restart): its file must hold the raw value.
+    ExpectExisting,
+}
+
+fn system_key_action(system_key_expected: bool, minted: bool) -> SystemKeyAction {
+    match (system_key_expected, minted) {
+        (false, _) => SystemKeyAction::NotProvisioned,
+        (true, true) => SystemKeyAction::WriteNew,
+        (true, false) => SystemKeyAction::ExpectExisting,
+    }
+}
+
 /// Write the provisioned keys to disk and return the one-time console banner.
 ///
 /// Shared by the base and advanced binaries so both announce the same thing: the
@@ -433,6 +465,15 @@ pub fn persist_provisioned_keys(
         }
     }
 
+    // ── Agent-side system key ───────────────────────────────────────
+    // Cloud (multi-system) builds never provision one (agent hosts use
+    // `POST /api/v1/activate-system`), so there is neither a file to write or announce
+    // nor one expected to exist — and a system-category key owned by some other product
+    // (e.g. a shared-domain instance key) must not trigger a bogus advisory.
+    let action = system_key_action(keys.system_key_expected, !keys.system_key.is_empty());
+    if action == SystemKeyAction::NotProvisioned {
+        return String::new();
+    }
     let system_path: std::path::PathBuf = system_key_file
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| storage_dir.join(format!("{}.system.key", keys.system_id)));
@@ -444,28 +485,35 @@ pub fn persist_provisioned_keys(
              /etc/aimail/system.key, 0600 root)"
         );
     }
-    if !keys.system_key.is_empty() {
-        if let Err(e) = std::fs::write(&system_path, format!("{}\n", keys.system_key)) {
-            tracing::warn!(operation = "system_key_write_failed", path = %system_path.display(), %e, "Failed to write system key file");
+    match action {
+        SystemKeyAction::NotProvisioned => String::new(),
+        SystemKeyAction::WriteNew => {
+            if let Err(e) = std::fs::write(&system_path, format!("{}\n", keys.system_key)) {
+                tracing::warn!(operation = "system_key_write_failed", path = %system_path.display(), %e, "Failed to write system key file");
+            }
+            format!(
+                "\n── AIMail system key (agent-side integration) ──\n  system id : {}\n  key       : {}\n  file      : {}\n  use it on an agent host: aimail install -k <key>   (the admin key stays on the gateway side)\n",
+                keys.system_id,
+                keys.system_key,
+                system_path.display()
+            )
         }
-        return format!(
-            "\n── AIMail system key (agent-side integration) ──\n  system id : {}\n  key       : {}\n  file      : {}\n  use it on an agent host: aimail install -k <key>   (the admin key stays on the gateway side)\n",
-            keys.system_id,
-            keys.system_key,
-            system_path.display()
-        );
+        // Nothing minted this boot ⇒ the key already exists in the database, so its file
+        // (which holds the only copy of the raw value) must be here.
+        SystemKeyAction::ExpectExisting => {
+            if !system_path.exists() {
+                tracing::warn!(
+                    operation = "system_key_file_missing",
+                    path = %system_path.display(),
+                    system_id = %keys.system_id,
+                    "a system key exists in the database but its file is missing — the raw key cannot \
+                     be recovered; delete that key (POST /api/v1/admin/api-keys/:id) and restart to \
+                     mint a fresh one"
+                );
+            }
+            String::new()
+        }
     }
-    if !system_path.exists() {
-        tracing::warn!(
-            operation = "system_key_file_missing",
-            path = %system_path.display(),
-            system_id = %keys.system_id,
-            "a system key exists in the database but its file is missing — the raw key cannot \
-             be recovered; delete that key (POST /api/v1/admin/api-keys/:id) and restart to \
-             mint a fresh one"
-        );
-    }
-    String::new()
 }
 
 /// Create a shared DNS resolver.
@@ -569,4 +617,40 @@ fn generate_and_save_bootstrap_id(path: &std::path::Path) -> String {
     let id = format!("system-{:04x}", rand::thread_rng().gen::<u16>());
     let _ = std::fs::write(path, &id);
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{system_key_action, SystemKeyAction};
+
+    // Regression (2026-09-26, found live on a cloud fixture): the persistence step used to
+    // compute the agent-side key path unconditionally, so a multi-system cloud deployment
+    // logged `system_key_colocated` and — because some OTHER product's system-category key
+    // (a shared-domain instance key) existed in the database — a bogus
+    // `system_key_file_missing` advisory telling the operator to delete that key. Cloud
+    // builds never provision B (agent hosts use POST /api/v1/activate-system), so the
+    // decision must be a no-op for them no matter what is in the database.
+    #[test]
+    fn cloud_deployments_never_manage_the_system_key_file() {
+        assert_eq!(
+            system_key_action(false, false),
+            SystemKeyAction::NotProvisioned,
+            "no system key in the database ⇒ nothing to expect on disk"
+        );
+        assert_eq!(
+            system_key_action(false, true),
+            SystemKeyAction::NotProvisioned,
+            "even with a key value at hand, cloud must not write/announce a system key file"
+        );
+    }
+
+    #[test]
+    fn single_system_deployments_write_then_expect_the_system_key_file() {
+        assert_eq!(system_key_action(true, true), SystemKeyAction::WriteNew);
+        assert_eq!(
+            system_key_action(true, false),
+            SystemKeyAction::ExpectExisting,
+            "idempotent restart: the raw value only exists in the file"
+        );
+    }
 }
