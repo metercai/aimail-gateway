@@ -29,6 +29,25 @@ signature + a timestamp go on the wire.
 | `X-Api-Timestamp` | Current time, epoch **milliseconds**, decimal string.                  |
 | `X-Api-Signature` | Lowercase hex of HMAC-SHA256 (see below).                              |
 
+## Which key to use where (bootstrap keys)
+
+A single-system deployment (the OSS base build and the standalone advanced build)
+provisions **two** keys at first start — they are not interchangeable:
+
+| Key | `category` / `scopes` | Identity (`X-Api-Identity`) | File | Who uses it |
+|---|---|---|---|---|
+| gateway-side admin key | `platform` / `["platform","system"]` | the instance id from `<storage>/system.id` (`system-XXXX`) | `<db>.admin_key` | the gateway operator / panel only. It is **also** the deployment root secret (credential sealing + database encryption key derivation), so it is never handed to an agent host. |
+| agent-side system key | `system` / `["system"]` | same instance id (in cloud deployments: the business system id issued by `POST /api/v1/activate-system`) | `<storage>/<system id>.system.key` | agent hosts: `aimail install -k <key>`. Enough for domain/address registration; cannot mint platform or system keys. |
+
+Multi-system cloud builds provision only the first one: an agent host obtains its
+system key through `POST /api/v1/activate-system`.
+
+`aimail install -k` verifies the key against the gateway while installing: the
+gateway-side admin key is **refused** (it belongs on the gateway), and a key that
+belongs to another system is reported as `key/system mismatch` instead of being
+written into the config (where it would only surface later as
+`401 Invalid X-Api-Signature`).
+
 ## Signing base string
 
 Four LF (`\n`)-joined lines, **no trailing newline**:
