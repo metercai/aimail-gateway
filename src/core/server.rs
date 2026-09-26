@@ -456,14 +456,10 @@ pub fn persist_provisioned_keys(
     let admin_path: std::path::PathBuf = admin_key_file
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.admin_key", db_path.display())));
-    if admin_path.parent().map(|p| p.to_path_buf()) == db_parent {
-        tracing::warn!(
-            operation = "admin_key_colocated",
-            path = %admin_path.display(),
-            "platform admin key sits in the same directory as the database — a backup of that \
-             directory would leak both; move it (e.g. /etc/aimail/admin.key, 0600 root)"
-        );
-    }
+    // NOTE: the admin key's colocation advisory is emitted by the binaries' `main.rs`
+    // (which resolves the same path for the DB-encryption-key derivation). It is NOT
+    // repeated here — 2026-09-26 found this block printing a second, identical
+    // `admin_key_colocated` warning on every boot (d835f22). One owner per advisory.
     if !keys.admin_key.is_empty() {
         if let Err(e) = std::fs::write(&admin_path, &keys.admin_key) {
             tracing::warn!(operation = "admin_key_write_failed", path = %admin_path.display(), %e, "Failed to write admin key file");
