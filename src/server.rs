@@ -50,12 +50,14 @@ impl Server {
         &self.db
     }
 
-    /// Generate and persist the admin API key. Returns the cleartext key.
-    pub async fn setup_admin_key(&self) -> AppResult<String> {
+    /// Provision the startup keys: gateway-side admin key + (single-system build)
+    /// agent-side system key. See `aimail_base::core::server::setup_admin_key`.
+    pub async fn setup_admin_key(&self) -> AppResult<aimail_base::core::server::AdminKeys> {
         aimail_base::core::server::setup_admin_key(
             &self.db,
             &self.config,
             Arc::new(aimail_base::base::strategy::BaseSystemStore),
+            true,
         )
         .await
     }

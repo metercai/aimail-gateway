@@ -214,12 +214,47 @@ pub fn spawn_retry_worker(
     })
 }
 
-/// Generate and persist the admin API key.
+/// Keys the gateway provisions at startup (2026-09-26, owner ruling).
+///
+/// Two distinct keys by design:
+///   * `admin_key`  — gateway-side only, `category="platform"`, scopes `["platform","system"]`.
+///     It is ALSO the deployment root secret (credential sealing + DB encryption derive from
+///     it), so it must never be handed to an agent host.
+///   * `system_key` — agent-side integration key, `category="system"`, scopes `["system"]`,
+///     same `system_id`. This is what `aimail install -k` uses on a host: integrating an
+///     agent never requires platform authority.
+///
+/// A field is empty when that key already existed (idempotent restart) or when provisioning
+/// was not requested (`provision_system_key == false` on multi-system cloud builds, where
+/// agent hosts instead obtain a system key from `POST /api/v1/activate-system`).
+#[derive(Clone, Debug, Default)]
+pub struct AdminKeys {
+    /// Freshly minted gateway-side admin key (empty ⇒ already existed).
+    pub admin_key: String,
+    /// Freshly minted agent-side system key (empty ⇒ already existed / not requested).
+    pub system_key: String,
+    /// The instance's bootstrap system id (`<storage>/system.id`) — both keys carry it as
+    /// their `system_id`, i.e. it is the identity a client must declare for them.
+    pub system_id: String,
+}
+
+/// Reserved `domain_addr` for the agent-side system key.
+///
+/// `api_keys` carries `UNIQUE(system_id, domain_addr)` (inline, 2026-09-26), and BOTH
+/// bootstrap keys of a single-system instance share `system_id` and an empty
+/// `domain_addr`. Rather than rebuild the credentials table, the agent-side key is
+/// stored under this reserved, non-domain scope marker — dot-prefixed so it can never
+/// collide with a real (bare) domain. Identity lookup matches `domain_addr = ?1 OR
+/// system_id = ?1`, so a client declaring the instance's system id still resolves it.
+pub const SYSTEM_KEY_DOMAIN_ADDR: &str = ".system";
+
+/// Generate and persist the API keys. Returns the cleartext keys (one-time display).
 pub async fn setup_admin_key(
     db: &crate::core::storage::Database,
     config: &crate::core::config::Config,
     system_store: std::sync::Arc<dyn crate::core::strategy::SystemStore>,
-) -> crate::core::errors::AppResult<String> {
+    provision_system_key: bool,
+) -> crate::core::errors::AppResult<AdminKeys> {
     let db_arc = std::sync::Arc::new(db.clone());
     let factory = crate::core::factory::EnvFactory::new(db_arc, system_store);
 
@@ -233,6 +268,14 @@ pub async fn setup_admin_key(
         generate_and_save_bootstrap_id(&sid_path)
     };
 
+    let mut keys = AdminKeys {
+        admin_key: String::new(),
+        system_key: String::new(),
+        system_id: bootstrap_id.clone(),
+    };
+
+    // ── Gateway-side admin key (category=platform, scopes=[platform,system]) ──
+    // Stays on the gateway: it is the deployment root secret (sealing + DB encryption).
     let existing = factory
         .list_api_keys_by_system(&bootstrap_id, "platform")
         .await
@@ -242,14 +285,13 @@ pub async fn setup_admin_key(
             operation = "admin_bootstrap_skip",
             "Admin key already exists, skipping bootstrap"
         );
-        return Ok(String::new());
-    }
-
+    } else {
     let mut rng = rand::thread_rng();
     let raw_bytes: [u8; 32] = rng.gen();
     let raw_key = hex::encode(raw_bytes);
     let key_hash = crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
     let key_prefix = &raw_key[..8];
+    keys.admin_key = raw_key.clone();
 
     factory
         .create_api_key(
@@ -268,9 +310,162 @@ pub async fn setup_admin_key(
         operation="admin_key_provisioned",
         key_prefix = %key_prefix,
         endpoint = %api_endpoint_url(config),
-        "Admin API key provisioned (PlatformAdmin + SystemAdmin)"
+        "Admin API key provisioned (PlatformAdmin + SystemAdmin; gateway-side only)"
     );
-    Ok(raw_key)
+    }
+
+    // ── Agent-side system key (category=system, scopes=[system], same system_id) ──
+    // Deliberately NOT platform-scoped: an agent host integrating with this instance must
+    // never need platform authority. Written to <storage dir>/<system id>.system.key and
+    // shown once on the console (2026-09-26 owner ruling).
+    if provision_system_key {
+        let existing_system = factory
+            .list_api_keys_by_system(&bootstrap_id, "system")
+            .await
+            .map_err(|e| AppError::Internal(format!("check system key: {e}")))?;
+        if existing_system.is_empty() {
+            let (raw_system_key, system_prefix) = mint_api_key();
+            factory
+                .create_api_key(
+                    &bootstrap_id,
+                    SYSTEM_KEY_DOMAIN_ADDR,
+                    &crate::core::api::seal::store_hash(
+                        &crate::core::api::auth::sha256_hex(&raw_system_key)),
+                    &system_prefix,
+                    &["system".to_string()],
+                    None,
+                    "system",
+                )
+                .await
+                .map_err(|e| AppError::Internal(format!("system api-key: {e}")))?;
+            tracing::info!(
+                operation = "system_key_provisioned",
+                key_prefix = %system_prefix,
+                system_id = %bootstrap_id,
+                "System key provisioned — agent-side integration key (`aimail install -k`); \
+                 the admin key stays on the gateway side"
+            );
+            keys.system_key = raw_system_key;
+        } else {
+            tracing::info!(
+                operation = "system_key_bootstrap_skip",
+                "System key already exists, skipping bootstrap"
+            );
+        }
+    }
+
+    Ok(keys)
+}
+
+/// Mint a fresh 32-byte API key (hex) + its display prefix. No configuration override —
+/// there is deliberately no way to supply a key from config.
+fn mint_api_key() -> (String, String) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let raw_bytes: [u8; 32] = rng.gen();
+    let raw_key = hex::encode(raw_bytes);
+    let prefix = raw_key[..8].to_string();
+    (raw_key, prefix)
+}
+
+/// Align a legacy single-system admin key to the platform-category shape (2026-09-26).
+///
+/// Legacy `standalone` (and pre-ruling single-system) instances provisioned the bootstrap
+/// admin key as `category="system"`, `scopes=["system"]`, `domain_addr=""`. Both bootstrap
+/// paths now use `category="platform"`, `scopes=["platform","system"]` — but a legacy row
+/// must be ALIGNED IN PLACE, never re-minted: the raw key value is the deployment root
+/// secret (credential sealing + DB/base-key derivation), so rotating it would strand every
+/// sealed credential in the database. Only `category`/`scopes` change here.
+///
+/// Returns the pre-migration record when a legacy row was migrated, `None` when there was
+/// nothing to align (fresh install, or already aligned).
+pub async fn align_legacy_system_admin_key(
+    factory: &crate::core::factory::EnvFactory,
+    bootstrap_id: &str,
+) -> crate::core::errors::AppResult<Option<crate::core::storage::ApiKeyRecord>> {
+    let legacy = factory
+        .list_api_keys_by_system(bootstrap_id, "system")
+        .await?
+        .into_iter()
+        .find(|k| k.email_address.is_empty());
+    if let Some(rec) = &legacy {
+        factory
+            .update_api_key_category_and_scopes(
+                rec.id,
+                "platform",
+                &["platform".to_string(), "system".to_string()],
+            )
+            .await?;
+    }
+    Ok(legacy)
+}
+
+/// Write the provisioned keys to disk and return the one-time console banner.
+///
+/// Shared by the base and advanced binaries so both announce the same thing: the
+/// gateway-side admin key file (never handed to agents) and the agent-side system key
+/// file (`<storage dir>/<system id>.system.key`). Colocation with the DB is warned about
+/// for both, for the same reason (a directory backup would leak the deployment root
+/// secret). Paths are passed in because the binaries resolve them before the config is
+/// moved into the server.
+pub fn persist_provisioned_keys(
+    admin_key_file: Option<&std::path::Path>,
+    system_key_file: Option<&std::path::Path>,
+    storage_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    keys: &AdminKeys,
+) -> String {
+    let db_parent = db_path.parent().map(|p| p.to_path_buf());
+    let admin_path: std::path::PathBuf = admin_key_file
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.admin_key", db_path.display())));
+    if admin_path.parent().map(|p| p.to_path_buf()) == db_parent {
+        tracing::warn!(
+            operation = "admin_key_colocated",
+            path = %admin_path.display(),
+            "platform admin key sits in the same directory as the database — a backup of that \
+             directory would leak both; move it (e.g. /etc/aimail/admin.key, 0600 root)"
+        );
+    }
+    if !keys.admin_key.is_empty() {
+        if let Err(e) = std::fs::write(&admin_path, &keys.admin_key) {
+            tracing::warn!(operation = "admin_key_write_failed", path = %admin_path.display(), %e, "Failed to write admin key file");
+        }
+    }
+
+    let system_path: std::path::PathBuf = system_key_file
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| storage_dir.join(format!("{}.system.key", keys.system_id)));
+    if system_path.parent().map(|p| p.to_path_buf()) == db_parent {
+        tracing::warn!(
+            operation = "system_key_colocated",
+            path = %system_path.display(),
+            "system key sits in the same directory as the database — move it out (e.g. \
+             /etc/aimail/system.key, 0600 root)"
+        );
+    }
+    if !keys.system_key.is_empty() {
+        if let Err(e) = std::fs::write(&system_path, format!("{}\n", keys.system_key)) {
+            tracing::warn!(operation = "system_key_write_failed", path = %system_path.display(), %e, "Failed to write system key file");
+        }
+        return format!(
+            "\n── AIMail system key (agent-side integration) ──\n  system id : {}\n  key       : {}\n  file      : {}\n  use it on an agent host: aimail install -k <key>   (the admin key stays on the gateway side)\n",
+            keys.system_id,
+            keys.system_key,
+            system_path.display()
+        );
+    }
+    if !system_path.exists() {
+        tracing::warn!(
+            operation = "system_key_file_missing",
+            path = %system_path.display(),
+            system_id = %keys.system_id,
+            "a system key exists in the database but its file is missing — the raw key cannot \
+             be recovered; delete that key (POST /api/v1/admin/api-keys/:id) and restart to \
+             mint a fresh one"
+        );
+    }
+    String::new()
 }
 
 /// Create a shared DNS resolver.

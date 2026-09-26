@@ -125,6 +125,15 @@ pub struct StorageConfig {
     /// 未配置时沿用历史位置 `<db_path>.admin_key`(仅供测试/CI)。
     #[serde(default)]
     pub admin_key_file: Option<PathBuf>,
+    /// Agent-side integration key file (2026-09-26).
+    ///
+    /// Separate from `admin_key_file` by design: the bootstrap admin key stays on the gateway
+    /// side (it is also the deployment root secret — credential sealing and DB encryption are
+    /// derived from it), while this SYSTEM-scoped key is what an agent host uses to integrate
+    /// (`aimail install -k`). Same hardening advice as the admin key: keep it out of the DB
+    /// directory (0600). Unset ⇒ `<storage dir>/<bootstrap system id>.system.key`.
+    #[serde(default)]
+    pub system_key_file: Option<PathBuf>,
     #[serde(default = "default_attachment_max_size")]
     pub attachment_max_size: usize,
     #[serde(default = "default_attachment_lifetime_hours")]
@@ -155,6 +164,7 @@ impl Default for StorageConfig {
             path: default_storage_dir(),
             pool_size: default_db_pool_size(),
             encryption: false,
+            system_key_file: None,
             attachment_max_size: default_attachment_max_size(),
             attachment_lifetime_hours: default_attachment_lifetime_hours(),
             attachment_allowed_types: Vec::new(),

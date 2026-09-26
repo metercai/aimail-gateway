@@ -113,14 +113,31 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
         None
     };
 
+    // Captured before `config`/`db_path` are moved into the server: the key files live
+    // next to them by default (see the persistence helper below).
+    let system_key_file_cfg = config.storage.system_key_file.clone();
+    let storage_dir = config.storage.path.clone();
+    let db_path_owned = db_path.clone();
+
     let server = server::Server::new(config, db_path, db_key.as_deref())?;
 
     // Provision admin API key and persist to {db_path}.admin_key
-    let admin_key = server.setup_admin_key().await?;
-    if !admin_key.is_empty() {
-        if let Err(e) = std::fs::write(&key_path, &admin_key) {
-            tracing::warn!(operation="admin_key_write_failed", path = %key_path.display(), %e, "Failed to write admin key file");
-        }
+    let keys = server.setup_admin_key().await?;
+    let admin_key = keys.admin_key.clone();
+
+    // ── Persist both keys + announce the agent-side one (2026-09-26 owner ruling) ──
+    // Shared helper (base + advanced) so both binaries behave and speak identically:
+    // the admin key stays on the gateway side, the system key is what an agent host uses
+    // (`aimail install -k`).
+    let banner = aimail_base::core::server::persist_provisioned_keys(
+        Some(&key_path),
+        system_key_file_cfg.as_deref(),
+        &storage_dir,
+        &db_path_owned,
+        &keys,
+    );
+    if !banner.is_empty() {
+        print!("{banner}");
     }
 
     // ── 库内凭据材料密封(2026-09-22 加固) ──────────────────────────────

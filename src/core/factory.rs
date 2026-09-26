@@ -475,6 +475,18 @@ impl EnvFactory {
         self.db.delete_api_key(id).await
     }
 
+    /// Align an existing key's category + scopes in place (standalone bootstrap migration).
+    pub async fn update_api_key_category_and_scopes(
+        &self,
+        id: i64,
+        category: &str,
+        scopes: &[String],
+    ) -> AppResult<()> {
+        self.db
+            .update_api_key_category_and_scopes(id, category, scopes)
+            .await
+    }
+
     /// Rotate an API key: generate a new hash and prefix, update in DB.
     pub async fn rotate_api_key(
         &self,

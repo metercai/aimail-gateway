@@ -1461,6 +1461,31 @@ impl Database {
         .await
     }
 
+    /// Align an existing key's category + scopes in place (2026-09-26).
+    ///
+    /// Used by the advanced standalone bootstrap to bring a legacy system-category admin
+    /// key up to the platform-category shape: the raw key value is untouched, so the
+    /// credential seal (`key_hash`) and every secret derived from the raw key keep working.
+    /// Only `category` and `scopes` change.
+    pub async fn update_api_key_category_and_scopes(
+        &self,
+        id: i64,
+        category: &str,
+        scopes: &[String],
+    ) -> AppResult<()> {
+        let (category, scopes) = (category.to_string(), scopes.to_vec());
+        self.call(move |conn| {
+            let scopes_json = serde_json::to_string(&scopes)
+                .map_err(|e| AppError::Internal(format!("serde_json::to_string failed: {}", e)))?;
+            conn.execute(
+                "UPDATE api_keys SET category = ?1, scopes = ?2 WHERE id = ?3",
+                params![category, scopes_json, id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Rotate an API key: update the key_hash and key_prefix.
     pub async fn rotate_api_key(
         &self,
@@ -2318,5 +2343,75 @@ mod tests {
 
     fn count_rows(conn: &rusqlite::Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    // ── Two-key bootstrap (2026-09-26 owner ruling) ─────────────────────────────
+    // A = gateway-side platform-category admin key, B = agent-side system key. Both share
+    // the instance's bootstrap `system_id`, and `api_keys` carries a UNIQUE index on
+    // (system_id, domain_addr), so B is stored under the reserved `.system` scope marker.
+    #[tokio::test]
+    async fn gateway_and_agent_keys_coexist_for_one_system() {
+        let db = temp_db();
+        db.insert_api_key("system-1", "", "hashA", "prefA", &["platform".to_string(), "system".to_string()], None, "platform")
+            .await
+            .unwrap();
+        // B under the reserved marker — must NOT collide with A's empty domain_addr.
+        db.insert_api_key("system-1", crate::core::server::SYSTEM_KEY_DOMAIN_ADDR, "hashB", "prefB", &["system".to_string()], None, "system")
+            .await
+            .expect("system key must coexist with the platform key of the same system");
+
+        let all = db.list_api_keys().await.unwrap();
+        assert_eq!(all.len(), 2, "both bootstrap keys live in one DB");
+        assert_eq!(all.iter().filter(|k| k.category == "platform").count(), 1);
+        assert_eq!(all.iter().filter(|k| k.category == "system").count(), 1);
+        // Identity lookup matches either column: the shared system id resolves BOTH keys,
+        // the reserved marker resolves the agent-side one.
+        assert_eq!(db.list_api_keys_by_identity("system-1").await.unwrap().len(), 2);
+        assert_eq!(
+            db.list_api_keys_by_identity(crate::core::server::SYSTEM_KEY_DOMAIN_ADDR).await.unwrap().len(),
+            1
+        );
+    }
+
+    // Legacy single-system instances provisioned the admin key as category="system"
+    // (empty domain_addr). Aligning it must be an in-place UPDATE — re-minting would
+    // rotate the deployment root secret and strand every sealed credential.
+    #[tokio::test]
+    async fn legacy_system_admin_key_is_aligned_in_place() {
+        let db = temp_db();
+        db.insert_api_key("system-1", "", "hashLegacy", "prefLegacy", &["system".to_string()], None, "system")
+            .await
+            .unwrap();
+        let factory = crate::core::factory::EnvFactory::new(
+            std::sync::Arc::new(db.clone()),
+            std::sync::Arc::new(crate::base::strategy::BaseSystemStore),
+        );
+
+        let migrated = crate::core::server::align_legacy_system_admin_key(&factory, "system-1")
+            .await
+            .unwrap()
+            .expect("legacy row is found");
+        assert_eq!(migrated.category, "system");
+        assert_eq!(migrated.key_hash, "hashLegacy");
+
+        let platform_rows = db.list_api_keys_by_system("system-1", "platform").await.unwrap();
+        assert_eq!(platform_rows.len(), 1, "row now carries the platform category");
+        assert_eq!(platform_rows[0].key_hash, "hashLegacy", "raw key material untouched");
+        assert_eq!(
+            platform_rows[0].scopes,
+            vec!["platform".to_string(), "system".to_string()]
+        );
+        assert!(
+            db.list_api_keys_by_system("system-1", "system").await.unwrap().is_empty(),
+            "no system-category admin key remains (only the migration target)"
+        );
+
+        // Idempotent: a second pass finds nothing left to align.
+        assert!(
+            crate::core::server::align_legacy_system_admin_key(&factory, "system-1")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
