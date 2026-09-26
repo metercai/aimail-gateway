@@ -147,7 +147,14 @@ impl Notifier {
         let (subject, body) = format_command_result(verb, ok, summary, data, &hint);
         self.create_email(to, &subject, &body, None);
     }
-    fn format_body(&self, cn: bool, label: &str, task: &Task, context: &str, action: &str) -> String {
+    fn format_body(
+        &self,
+        cn: bool,
+        label: &str,
+        task: &Task,
+        context: &str,
+        action: &str,
+    ) -> String {
         let (task_l, board_l, ctx_l, act_l) = if cn {
             ("任务", "看板", "上下文", "操作")
         } else {
@@ -293,7 +300,9 @@ impl Notifier {
             t(task, "分配人", "Assignee"),
             task.assignee,
             t(task, "审阅者", "Reviewer"),
-            task.reviewer.as_deref().unwrap_or(t(task, "(无)", "(none)")),
+            task.reviewer
+                .as_deref()
+                .unwrap_or(t(task, "(无)", "(none)")),
             t(task, "创建人", "Created by"),
             task.created_by,
         );
@@ -315,7 +324,13 @@ impl Notifier {
     pub fn notify_review_needed(&self, task: &Task) {
         let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] review-needed {}: {}", task.short_id, task.title);
-        let context = format!("{}: {}\n{}: {}", t(task, "完成人", "Completed by"), task.assignee, t(task, "产出物", "Output"), task.summary);
+        let context = format!(
+            "{}: {}\n{}: {}",
+            t(task, "完成人", "Completed by"),
+            task.assignee,
+            t(task, "产出物", "Output"),
+            task.summary
+        );
         let body = self.format_body(
             cn,
             t(task, "待审阅", "Pending Review"),
@@ -323,8 +338,10 @@ impl Notifier {
             &context,
             &format!(
                 "[A2A] approve {}  — {}\n  [A2A] reject {}   — {}",
-                task.short_id, t(task, "通过", "Approve"),
-                task.short_id, t(task, "退回", "Reject"),
+                task.short_id,
+                t(task, "通过", "Approve"),
+                task.short_id,
+                t(task, "退回", "Reject"),
             ),
         );
         if let Some(reviewer) = &task.reviewer {
@@ -336,8 +353,20 @@ impl Notifier {
     pub fn notify_approved(&self, task: &Task) {
         let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
-        let context = format!("{}: {}", t(task, "审阅人", "Reviewer"), task.reviewer.as_deref().unwrap_or(t(task, "(无)", "(none)")));
-        let body = self.format_body(cn, t(task, "审阅通过", "Approved"), task, &context, t(task, "已完成，无后续操作", "Completed, no further action"));
+        let context = format!(
+            "{}: {}",
+            t(task, "审阅人", "Reviewer"),
+            task.reviewer
+                .as_deref()
+                .unwrap_or(t(task, "(无)", "(none)"))
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "审阅通过", "Approved"),
+            task,
+            &context,
+            t(task, "已完成，无后续操作", "Completed, no further action"),
+        );
         self.create_email(&task.assignee, &subject, &body, None);
     }
 
@@ -357,7 +386,11 @@ impl Notifier {
             t(task, "审阅退回", "Rejected"),
             task,
             &context,
-            &format!("{} [A2A] complete {}", t(task, "修改后重新", "Revise and re-submit"), task.short_id),
+            &format!(
+                "{} [A2A] complete {}",
+                t(task, "修改后重新", "Revise and re-submit"),
+                task.short_id
+            ),
         );
         self.create_email(&task.assignee, &subject, &body, None);
     }
@@ -371,7 +404,11 @@ impl Notifier {
             t(task, "任务阻塞", "Task Blocked"),
             task,
             &format!("{}: {}", t(task, "阻挡人", "Blocker"), blocker),
-            t(task, "Orchestrator 协调处理", "Orchestrator will coordinate"),
+            t(
+                task,
+                "Orchestrator 协调处理",
+                "Orchestrator will coordinate",
+            ),
         );
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db(&self.board_db_path, &task.board_id).unwrap(),
@@ -417,13 +454,22 @@ impl Notifier {
     pub fn notify_output(&self, task: &Task) {
         let cn = has_cjk(&task.title) || has_cjk(&task.body);
         let subject = format!("[A2A] output: {} {}", self.board_short_id, task.title);
-        let context = format!("{}: {}\nsummary: {}", t(task, "最终输出", "Final Output"), task.title, task.summary);
+        let context = format!(
+            "{}: {}\nsummary: {}",
+            t(task, "最终输出", "Final Output"),
+            task.title,
+            task.summary
+        );
         let body = self.format_body(
             cn,
             t(task, "项目输出", "Project Output"),
             task,
             &context,
-            &format!("[Confirm] output {} — {}", self.board_short_id, t(task, "验收通过", "Accepted")),
+            &format!(
+                "[Confirm] output {} — {}",
+                self.board_short_id,
+                t(task, "验收通过", "Accepted")
+            ),
         );
         if let Ok(members) = crate::board::db::list_members(
             &crate::board::db::open_board_db(&self.board_db_path, &self.board_id).unwrap(),
@@ -446,7 +492,11 @@ impl Notifier {
             t(task, "新评论", "New Comment"),
             task,
             &format!("{}: {}\n{}", t(task, "来自", "From"), commenter, text),
-            t(task, "直接回复邮件参与讨论", "Reply directly to join the discussion"),
+            t(
+                task,
+                "直接回复邮件参与讨论",
+                "Reply directly to join the discussion",
+            ),
         );
         let recipient = if commenter == task.assignee {
             task.reviewer.as_deref().unwrap_or("")
@@ -509,7 +559,7 @@ impl Notifier {
         admin_email: &str,
         dispute: &str,
     ) {
-        let cn = task.map_or(false, |t| has_cjk(&t.title) || has_cjk(&t.body));
+        let cn = task.is_some_and(|t| has_cjk(&t.title) || has_cjk(&t.body));
         let task_label = if cn { "任务" } else { "Task" };
         let task_info = task
             .map(|t| format!("{}: {} ({})", task_label, t.short_id, t.title))
@@ -518,7 +568,12 @@ impl Notifier {
         let (arb_req, from, dispute_l, submitted) = if cn {
             ("仲裁请求", "来自", "争议", "仲裁请求已提交给 Admin。")
         } else {
-            ("Arbitration Request", "From", "Dispute", "Arbitration request submitted to Admin.")
+            (
+                "Arbitration Request",
+                "From",
+                "Dispute",
+                "Arbitration request submitted to Admin.",
+            )
         };
         let body = format!(
             "{}\n{}: {}\n{}\n{}: {}",
@@ -596,7 +651,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         // Just verify it doesn't panic (no email sent since factory is None)
@@ -621,7 +676,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_review_needed(&task);
@@ -645,7 +700,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_approved(&task);
@@ -669,7 +724,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_rejected(&task, "need more data");
@@ -693,7 +748,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_blocked(&task, "worker@t.io");
@@ -717,7 +772,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_unblocked(&task, "orch@t.io");
@@ -741,7 +796,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_cancelled(&task);
@@ -765,7 +820,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_comment(&task, "veri@t.io", "looks good");
@@ -789,7 +844,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         // assignee comments -> notification goes to reviewer
@@ -814,7 +869,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
     }
@@ -837,7 +892,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
         let task = make_task();
         notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
@@ -852,10 +907,16 @@ mod reply_tests {
     fn test_reply_policy_parse_and_allows() {
         assert_eq!(ReplyPolicy::parse("off"), ReplyPolicy::Off);
         assert_eq!(ReplyPolicy::parse("ALL"), ReplyPolicy::All);
-        assert_eq!(ReplyPolicy::parse("weird-value"), ReplyPolicy::ReadOnlyAndErrors);
+        assert_eq!(
+            ReplyPolicy::parse("weird-value"),
+            ReplyPolicy::ReadOnlyAndErrors
+        );
         let p = ReplyPolicy::ReadOnlyAndErrors;
         assert!(p.allows("show", true));
-        assert!(!p.allows("complete", true), "变更类成功默认不回执(已有业务通知)");
+        assert!(
+            !p.allows("complete", true),
+            "变更类成功默认不回执(已有业务通知)"
+        );
         assert!(p.allows("complete", false));
         assert!(p.allows("anything", false));
         assert!(!ReplyPolicy::Off.allows("show", false));
@@ -866,19 +927,28 @@ mod reply_tests {
     fn test_reply_subject_never_looks_like_a_command() {
         let (s, _b) = format_command_result("show", true, "status=ok", None, "http://x/tasks");
         assert_eq!(s, "[A2A-RESULT] show ok");
-        assert!(!s.starts_with("[A2A] "), "主题不得以 [A2A] 开头, 否则 interceptor 会当命令(回环)");
+        assert!(
+            !s.starts_with("[A2A] "),
+            "主题不得以 [A2A] 开头, 否则 interceptor 会当命令(回环)"
+        );
     }
 
     #[test]
     fn test_reply_body_carries_json_and_caps_it() {
         let data = serde_json::json!({"task": {"short_id": "T1"},
                                       "parent_summaries": [{"summary": "60%"}]});
-        let (_s, b) = format_command_result("show", true, "status=ok", Some(&data), "http://x/tasks");
+        let (_s, b) =
+            format_command_result("show", true, "status=ok", Some(&data), "http://x/tasks");
         assert!(b.contains("parent_summaries") && b.contains("60%"));
         let big = serde_json::json!({"items": "x".repeat(COMMAND_REPLY_JSON_CAP + 500)});
-        let (_s2, b2) = format_command_result("list", true, "status=ok", Some(&big), "http://x/tasks");
+        let (_s2, b2) =
+            format_command_result("list", true, "status=ok", Some(&big), "http://x/tasks");
         assert!(b2.contains("已截断") && b2.contains("http://x/tasks"));
-        assert!(b2.len() < COMMAND_REPLY_JSON_CAP + 4096, "截断后不应远超上限: {}", b2.len());
+        assert!(
+            b2.len() < COMMAND_REPLY_JSON_CAP + 4096,
+            "截断后不应远超上限: {}",
+            b2.len()
+        );
     }
 
     #[test]

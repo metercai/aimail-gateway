@@ -269,8 +269,11 @@ pub async fn setup_admin_key(
     let sid_path = config.storage.path.join("system.id");
     let bootstrap_id = if let Ok(s) = std::fs::read_to_string(&sid_path) {
         let trimmed = s.trim();
-        if !trimmed.is_empty() { trimmed.to_string() }
-        else { generate_and_save_bootstrap_id(&sid_path) }
+        if !trimmed.is_empty() {
+            trimmed.to_string()
+        } else {
+            generate_and_save_bootstrap_id(&sid_path)
+        }
     } else {
         generate_and_save_bootstrap_id(&sid_path)
     };
@@ -294,32 +297,33 @@ pub async fn setup_admin_key(
             "Admin key already exists, skipping bootstrap"
         );
     } else {
-    let mut rng = rand::thread_rng();
-    let raw_bytes: [u8; 32] = rng.gen();
-    let raw_key = hex::encode(raw_bytes);
-    let key_hash = crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
-    let key_prefix = &raw_key[..8];
-    keys.admin_key = raw_key.clone();
+        let mut rng = rand::thread_rng();
+        let raw_bytes: [u8; 32] = rng.gen();
+        let raw_key = hex::encode(raw_bytes);
+        let key_hash =
+            crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
+        let key_prefix = &raw_key[..8];
+        keys.admin_key = raw_key.clone();
 
-    factory
-        .create_api_key(
-            &bootstrap_id,
-            "",
-            &key_hash,
-            key_prefix,
-            &["platform".to_string(), "system".to_string()],
-            None,
-            "platform",
-        )
-        .await
-        .map_err(|e| AppError::Internal(format!("admin api-key: {e}")))?;
+        factory
+            .create_api_key(
+                &bootstrap_id,
+                "",
+                &key_hash,
+                key_prefix,
+                &["platform".to_string(), "system".to_string()],
+                None,
+                "platform",
+            )
+            .await
+            .map_err(|e| AppError::Internal(format!("admin api-key: {e}")))?;
 
-    tracing::info!(
-        operation="admin_key_provisioned",
-        key_prefix = %key_prefix,
-        endpoint = %api_endpoint_url(config),
-        "Admin API key provisioned (PlatformAdmin + SystemAdmin; gateway-side only)"
-    );
+        tracing::info!(
+            operation="admin_key_provisioned",
+            key_prefix = %key_prefix,
+            endpoint = %api_endpoint_url(config),
+            "Admin API key provisioned (PlatformAdmin + SystemAdmin; gateway-side only)"
+        );
     }
 
     // ── Agent-side system key (category=system, scopes=[system], same system_id) ──
@@ -337,8 +341,9 @@ pub async fn setup_admin_key(
                 .create_api_key(
                     &bootstrap_id,
                     SYSTEM_KEY_DOMAIN_ADDR,
-                    &crate::core::api::seal::store_hash(
-                        &crate::core::api::auth::sha256_hex(&raw_system_key)),
+                    &crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(
+                        &raw_system_key,
+                    )),
                     &system_prefix,
                     &["system".to_string()],
                     None,
@@ -551,7 +556,14 @@ pub fn register_stranger_interceptor(http_state: &HttpState) {
     let max_attempts = http_state.config.retry.max_attempts as i32;
     let sid_path = http_state.config.storage.path.join("system.id");
     let bootstrap_id = std::fs::read_to_string(&sid_path)
-        .ok().and_then(|s| if s.trim().is_empty() { None } else { Some(s.trim().to_string()) })
+        .ok()
+        .and_then(|s| {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.trim().to_string())
+            }
+        })
         .unwrap_or_else(|| {
             let id = format!("system-{:04x}", rand::random::<u16>());
             let _ = std::fs::write(&sid_path, &id);

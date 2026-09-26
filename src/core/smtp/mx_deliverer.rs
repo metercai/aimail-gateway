@@ -20,11 +20,12 @@ use crate::core::strategy::OutboundTransform;
 ///     may still send it until upgraded)
 ///   - X-Board-Members:  board member set for cross-gateway whitelist sync
 ///   - X-AIMail-AutoReply: system-generated auto-reply marker
+///
 /// Everything else in the record headers is internal (webhook-only) and
 /// must NOT leak into external mail.
 pub const OUTBOUND_PASSTHROUGH_HEADERS: &[&str] = &[
-    "X-AIMail-Agent",     // agent identity (new name)
-    "X-Agentmail-Agent",  // legacy name (transition; removed in cleanup)
+    "X-AIMail-Agent",    // agent identity (new name)
+    "X-Agentmail-Agent", // legacy name (transition; removed in cleanup)
     "X-Board-Members",
     "X-AIMail-AutoReply",
 ];
@@ -54,6 +55,7 @@ impl MxDelivererImpl {
     /// - For pending recipients: resolve MX → try all hosts → re-resolve once → retry.
     /// - Marks individual recipients as "success" on delivery.
     /// - Returns Ok when all pending recipients delivered, Err otherwise.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn deliver_via_mx(
         &self,
         outbound: &Arc<dyn OutboundTransform>,
@@ -91,12 +93,7 @@ impl MxDelivererImpl {
 
         // Build message once (all recipients share same body/headers)
         let raw_to_send = build_mx_message(
-            outbound,
-            from_addr,
-            header_to,
-            header_cc,
-            email_body,
-            record,
+            outbound, from_addr, header_to, header_cc, email_body, record,
         )
         .await?;
 
@@ -104,20 +101,11 @@ impl MxDelivererImpl {
 
         // ── Phase 2: per-domain resolve + send ──
         for (domain, addrs) in &domain_groups {
-            let envelope = lettre::address::Envelope::new(
-                Some(from_addr.clone()),
-                addrs.iter().cloned().collect(),
-            )
-            .map_err(|_| AppError::Smtp("bad envelope".into()))?;
+            let envelope = lettre::address::Envelope::new(Some(from_addr.clone()), addrs.to_vec())
+                .map_err(|_| AppError::Smtp("bad envelope".into()))?;
 
             let delivered = self
-                .try_deliver_domain(
-                    domain,
-                    &envelope,
-                    &raw_to_send,
-                    from_addr,
-                    record,
-                )
+                .try_deliver_domain(domain, &envelope, &raw_to_send, from_addr, record)
                 .await;
 
             for addr in addrs {
@@ -221,7 +209,11 @@ async fn build_mx_message(
             .and_then(|s| {
                 if let Some(pos) = s.find('<') {
                     let n = s[..pos].trim().to_string();
-                    if n.is_empty() { None } else { Some(n) }
+                    if n.is_empty() {
+                        None
+                    } else {
+                        Some(n)
+                    }
                 } else {
                     None
                 }
@@ -231,24 +223,32 @@ async fn build_mx_message(
         .from(lettre::message::Mailbox::new(from_name, from_addr.clone()))
         .subject(subject);
     for addr in header_to {
-        let display = name_map
-            .get(&addr.to_string().to_lowercase())
-            .cloned();
+        let display = name_map.get(&addr.to_string().to_lowercase()).cloned();
         builder = builder.to(lettre::message::Mailbox::new(display, addr.clone()));
     }
     for addr in header_cc {
-        let display = name_map
-            .get(&addr.to_string().to_lowercase())
-            .cloned();
+        let display = name_map.get(&addr.to_string().to_lowercase()).cloned();
         builder = builder.cc(lettre::message::Mailbox::new(display, addr.clone()));
     }
-    if let Some(v) = headers_val.get("message_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = headers_val
+        .get("message_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         builder = builder.header(lettre::message::header::MessageId::from(v.to_string()));
     }
-    if let Some(v) = headers_val.get("in_reply_to").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = headers_val
+        .get("in_reply_to")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         builder = builder.header(lettre::message::header::InReplyTo::from(v.to_string()));
     }
-    if let Some(v) = headers_val.get("references").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    if let Some(v) = headers_val
+        .get("references")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
         builder = builder.header(lettre::message::header::References::from(v.to_string()));
     }
     // ── Custom header passthrough (outbound-only whitelist) ──────────
@@ -256,7 +256,11 @@ async fn build_mx_message(
     // are forwarded verbatim. All other record headers are internal
     // (webhook-only) and must not leak into external mail.
     for hname in OUTBOUND_PASSTHROUGH_HEADERS {
-        if let Some(v) = headers_val.get(*hname).and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+        if let Some(v) = headers_val
+            .get(*hname)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
             builder = builder.header(crate::core::smtp::mime::PassthroughHeader {
                 name: hname.to_string(),
                 value: v.to_string(),

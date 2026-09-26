@@ -181,6 +181,7 @@ pub(crate) async fn deliver_webhook(
 ///
 /// - When `perm_count == 0 && mail_count <= 1`: full cascade (no other references).
 /// - Otherwise: shared attachment — only remove this `mail_id` reference.
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub(crate) async fn cascade_delete_attachment(
     attachment_factory: &AttachmentFactory,
     email_factory: &EmailFactory,
@@ -253,8 +254,8 @@ pub(crate) async fn cascade_delete_attachment(
     } else {
         // ── Shared attachment: only remove this mail_id reference ──
         info!(
-            attachment_id, perm_count, mail_count,
-            "Attachment shared — removing mail_id reference only"
+            attachment_id,
+            perm_count, mail_count, "Attachment shared — removing mail_id reference only"
         );
         if let Err(e) = attachment_factory
             .remove_mail_id(attachment_id, mail_id)

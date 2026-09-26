@@ -18,6 +18,7 @@ use super::flows::immediate_forward;
 
 /// Scheduler that wakes on interval ticks and an mpsc trigger from SMTP receiver
 /// Returns an error if SMTP delivery cannot be initialized — fatal for base edition.
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub async fn run_retry_worker_with_trigger(
     email_factory: EmailFactory,
     attachment_factory: AttachmentFactory,
@@ -54,7 +55,7 @@ pub async fn run_retry_worker_with_trigger(
                 .relay
                 .smtp_server
                 .as_deref()
-                .map_or(false, |s| !s.is_empty())
+                .is_some_and(|s| !s.is_empty())
             {
                 "relay"
             } else {

@@ -22,10 +22,7 @@ pub struct EnvFactory {
 }
 
 impl EnvFactory {
-    pub fn new(
-        db: Arc<Database>,
-        system_store: Arc<dyn SystemStore>,
-    ) -> Self {
+    pub fn new(db: Arc<Database>, system_store: Arc<dyn SystemStore>) -> Self {
         Self {
             db,
             system_store,
@@ -170,7 +167,9 @@ impl EnvFactory {
         webhook_secret: Option<&str>,
         is_active: Option<bool>,
     ) -> AppResult<Option<SystemDomainRecord>> {
-        self.db.update_system_domain(id, webhook_url, webhook_secret, is_active).await
+        self.db
+            .update_system_domain(id, webhook_url, webhook_secret, is_active)
+            .await
     }
 
     /// Delete a domain registration.
@@ -381,7 +380,7 @@ impl EnvFactory {
         // the domain resolver would fail on it (reserved local part). Board
         // members auto-pass via the board group whitelist instead.
         if crate::board::addr::is_board_address(domain_addr) {
-            return Ok(self.db.is_board_member(domain_addr, value).await?);
+            return self.db.is_board_member(domain_addr, value).await;
         }
         let keys = crate::core::whitelist::ExactKeyResolver
             .resolve(&self.db, domain_addr)
@@ -397,7 +396,9 @@ impl EnvFactory {
         }
         // Board group whitelist: when the *value* (sender) is a board
         // address, board members auto-pass (no per-member whitelist storm).
-        if crate::board::addr::is_board_address(value) && self.db.is_board_member(value, domain_addr).await? {
+        if crate::board::addr::is_board_address(value)
+            && self.db.is_board_member(value, domain_addr).await?
+        {
             return Ok(true);
         }
         Ok(false)
@@ -531,7 +532,6 @@ impl EnvFactory {
     }
 
     /// Create a whitelist entry with explicit category and api_key_id.
-
     pub async fn create_whitelist_entry_full(
         &self,
         domain_addr: &str,
@@ -618,7 +618,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("aimailgw-factory-test-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        let db = Database::open(dir.join("aimail.db"), 4, None).unwrap();
         let factory = EnvFactory::new(Arc::new(db.clone()), Arc::new(BaseSystemStore));
         (db, factory)
     }
@@ -632,11 +632,24 @@ mod tests {
 
         // Create an address-type domain with manager, then set signature + persona.
         factory
-            .create_domain("1", "sys1", addr, Some("http://hook"), None, Some("mgr@test.com"))
+            .create_domain(
+                "1",
+                "sys1",
+                addr,
+                Some("http://hook"),
+                None,
+                Some("mgr@test.com"),
+            )
             .await
             .unwrap();
         factory
-            .upsert_domain_addr_meta(addr, "sys1", Some("mgr@test.com"), Some("sig text"), Some("assistant"))
+            .upsert_domain_addr_meta(
+                addr,
+                "sys1",
+                Some("mgr@test.com"),
+                Some("sig text"),
+                Some("assistant"),
+            )
             .await
             .unwrap();
 
@@ -653,9 +666,22 @@ mod tests {
         );
 
         // Meta must be untouched.
-        let meta = factory.resolve_domain_addr_meta(addr).await.unwrap().unwrap();
-        assert_eq!(meta.manager_address, "mgr@test.com", "manager must survive update");
-        assert_eq!(meta.agent_signature, "sig text", "signature must survive update");
-        assert_eq!(meta.agent_persona, "assistant", "persona must survive update");
+        let meta = factory
+            .resolve_domain_addr_meta(addr)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.manager_address, "mgr@test.com",
+            "manager must survive update"
+        );
+        assert_eq!(
+            meta.agent_signature, "sig text",
+            "signature must survive update"
+        );
+        assert_eq!(
+            meta.agent_persona, "assistant",
+            "persona must survive update"
+        );
     }
 }

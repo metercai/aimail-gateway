@@ -394,7 +394,11 @@ fn assemble_layers(layers: &[Layer], cn: bool) -> String {
             }
             // Signature
             if let Some(ref sig) = layer.signature {
-                let label = if cn { "**发件人签名:**" } else { "**Sender Signature:**" };
+                let label = if cn {
+                    "**发件人签名:**"
+                } else {
+                    "**Sender Signature:**"
+                };
                 parts.push(format!("---\n\n{} {}", label, sig.raw));
             }
         } else {
@@ -415,7 +419,7 @@ fn assemble_layers(layers: &[Layer], cn: bool) -> String {
                     .map(|l| {
                         let t = l.trim();
                         if t.is_empty() {
-                            format!(">")
+                            ">".to_string()
                         } else {
                             format!("> {}", l)
                         }
@@ -426,7 +430,11 @@ fn assemble_layers(layers: &[Layer], cn: bool) -> String {
             }
             // Signature
             if let Some(ref sig) = layer.signature {
-                let label = if cn { "**原发件人签名:**" } else { "**Original Sender Signature:**" };
+                let label = if cn {
+                    "**原发件人签名:**"
+                } else {
+                    "**Original Sender Signature:**"
+                };
                 parts.push(format!(
                     "{}> ---\n{}> {} {}",
                     prefix, prefix, label, sig.raw
@@ -641,7 +649,10 @@ mod tests {
         assert!(en.body.contains("**Sender Signature:**"), "en: {}", en.body);
 
         // Chinese reply with a signature → Chinese signature label.
-        let cn = process_email_body("我的回复\n\n在周一 John 写道：\n> 旧内容\n\n-- \n此致敬礼", false);
+        let cn = process_email_body(
+            "我的回复\n\n在周一 John 写道：\n> 旧内容\n\n-- \n此致敬礼",
+            false,
+        );
         assert!(cn.body.contains("**发件人签名:**"), "cn: {}", cn.body);
     }
 }

@@ -188,13 +188,10 @@ mod tests {
     ) -> Result<(String, String, String, Option<String>), BoardAddrError> {
         let (short_id, board_id, domain) =
             parse_board_email(board_email).ok_or(BoardAddrError::Invalid)?;
-        let entry = registry.lookup(board_email).ok_or(BoardAddrError::NotFound)?;
-        Ok((
-            short_id,
-            board_id,
-            domain,
-            entry.system_id,
-        ))
+        let entry = registry
+            .lookup(board_email)
+            .ok_or(BoardAddrError::NotFound)?;
+        Ok((short_id, board_id, domain, entry.system_id))
     }
 
     #[test]
@@ -228,7 +225,10 @@ mod tests {
         assert_eq!(short, "abc");
         // board_id is derived from the address (deterministic hash), not the
         // registry-stored value.
-        assert_eq!(board_id, crate::board::models::derive_board_id("abc.a2a@example.com"));
+        assert_eq!(
+            board_id,
+            crate::board::models::derive_board_id("abc.a2a@example.com")
+        );
         assert_eq!(domain, "example.com");
         assert_eq!(sys.as_deref(), Some("sys-1"));
     }

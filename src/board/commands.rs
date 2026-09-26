@@ -671,7 +671,11 @@ fn handle_roles(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<
     Ok(data_response(json!({"roles": roles})))
 }
 
-fn handle_board_status(conn: &Connection, cmd: &A2aCommand, sender: &str) -> AppResult<CommandResponse> {
+fn handle_board_status(
+    conn: &Connection,
+    cmd: &A2aCommand,
+    sender: &str,
+) -> AppResult<CommandResponse> {
     let board_id = cmd
         .params
         .as_ref()
@@ -866,10 +870,11 @@ fn handle_refresh(
         })?;
     // Existing members keep their tokens; only new members get fresh
     // tokens (so existing credentials stay valid across refreshes).
-    let existing_tokens: std::collections::HashMap<String, String> = db::list_members(conn, &board_id)?
-        .into_iter()
-        .filter_map(|m| m.board_token.clone().map(|t| (m.email, t)))
-        .collect();
+    let existing_tokens: std::collections::HashMap<String, String> =
+        db::list_members(conn, board_id)?
+            .into_iter()
+            .filter_map(|m| m.board_token.clone().map(|t| (m.email, t)))
+            .collect();
     let mut new_members: Vec<(String, String)> = Vec::new(); // (email, token)
     for m in members_arr {
         let email = m.get("email").and_then(|v| v.as_str()).unwrap_or("");
@@ -913,7 +918,7 @@ fn handle_refresh(
 
     // Keep the host gateway's board group whitelist in sync with the
     // current member set (members changed via this refresh command).
-    if let Ok(all_members) = db::list_members(conn, &board_id) {
+    if let Ok(all_members) = db::list_members(conn, board_id) {
         let emails: Vec<String> = all_members.iter().map(|m| m.email.clone()).collect();
         let _ = conn.execute(
             "DELETE FROM board_whitelists WHERE board_email = ?1",
@@ -979,7 +984,7 @@ fn handle_refresh(
     // FULL member set in X-Board-Members); everyone gets a member-list
     // change notice (also full set incl. the new members) so recipient
     // gateways replace their group whitelist consistently.
-    if let Ok(all_members) = db::list_members(conn, &board_id) {
+    if let Ok(all_members) = db::list_members(conn, board_id) {
         let full_csv: String = all_members
             .iter()
             .map(|m| m.email.as_str())
@@ -989,13 +994,16 @@ fn handle_refresh(
             notifier.notify_invite(
                 email,
                 token,
-                &board_id,
+                board_id,
                 &notifier.board_email,
-                &short_id,
+                short_id,
                 &full_csv,
             );
         }
-        notifier.notify_all(board_id, &format!("member list updated ({} members)", all_members.len()));
+        notifier.notify_all(
+            board_id,
+            &format!("member list updated ({} members)", all_members.len()),
+        );
     }
     Ok(ok_response(None))
 }
@@ -1198,7 +1206,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off,   // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
         };
 
         (conn, board_id.to_string(), notifier)
@@ -1241,8 +1249,14 @@ mod tests {
         task.id
     }
 
-    fn make_task_with_reviewer(conn: &Connection, board_id: &str, short_id: &str, assignee: &str, reviewer: &str) -> String {
-        let mut t = Task {
+    fn make_task_with_reviewer(
+        conn: &Connection,
+        board_id: &str,
+        short_id: &str,
+        assignee: &str,
+        reviewer: &str,
+    ) -> String {
+        let t = Task {
             id: db::make_task_id(board_id, short_id),
             short_id: short_id.to_string(),
             board_id: board_id.to_string(),
@@ -1303,7 +1317,7 @@ mod tests {
     fn test_heartbeat_ready_to_running() {
         let (conn, board_id, notifier) = setup();
         // Create a task explicitly in Ready status
-        let mut t = Task {
+        let t = Task {
             id: db::make_task_id(&board_id, "H1"),
             short_id: "H1".to_string(),
             board_id: board_id.to_string(),
@@ -1359,7 +1373,10 @@ mod tests {
         let cmd = make_cmd("block", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Blocked);
+        assert_eq!(
+            db::get_task(&conn, &tid).unwrap().status,
+            TaskStatus::Blocked
+        );
     }
 
     #[test]
@@ -1367,12 +1384,21 @@ mod tests {
         let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
         // block first
-        execute_command(&conn, &notifier, &make_cmd("block", Some(&tid), None), "worker@t.io").unwrap();
+        execute_command(
+            &conn,
+            &notifier,
+            &make_cmd("block", Some(&tid), None),
+            "worker@t.io",
+        )
+        .unwrap();
         // unblock
         let cmd = make_cmd("unblock", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Running);
+        assert_eq!(
+            db::get_task(&conn, &tid).unwrap().status,
+            TaskStatus::Running
+        );
     }
 
     // ── cancel ────────────────────────────────────────────────────
@@ -1380,11 +1406,20 @@ mod tests {
     fn test_cancel_blocked_task() {
         let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        execute_command(&conn, &notifier, &make_cmd("block", Some(&tid), None), "worker@t.io").unwrap();
+        execute_command(
+            &conn,
+            &notifier,
+            &make_cmd("block", Some(&tid), None),
+            "worker@t.io",
+        )
+        .unwrap();
         let cmd = make_cmd("cancel", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Cancelled);
+        assert_eq!(
+            db::get_task(&conn, &tid).unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[test]
@@ -1402,7 +1437,13 @@ mod tests {
         let (conn, board_id, notifier) = setup();
         let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
         // complete first → Reviewing
-        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
+        execute_command(
+            &conn,
+            &notifier,
+            &make_cmd("complete", Some(&tid), None),
+            "worker@t.io",
+        )
+        .unwrap();
         // approve
         let cmd = make_cmd("approve", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
@@ -1414,18 +1455,37 @@ mod tests {
     fn test_reject_by_reviewer() {
         let (conn, board_id, notifier) = setup();
         let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
-        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
-        let cmd = make_cmd("reject", Some(&tid), Some(serde_json::json!({"reason": "needs work"})));
+        execute_command(
+            &conn,
+            &notifier,
+            &make_cmd("complete", Some(&tid), None),
+            "worker@t.io",
+        )
+        .unwrap();
+        let cmd = make_cmd(
+            "reject",
+            Some(&tid),
+            Some(serde_json::json!({"reason": "needs work"})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
         assert_eq!(resp.status, "ok");
-        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Running);
+        assert_eq!(
+            db::get_task(&conn, &tid).unwrap().status,
+            TaskStatus::Running
+        );
     }
 
     #[test]
     fn test_approve_rejected_for_non_reviewer() {
         let (conn, board_id, notifier) = setup();
         let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
-        execute_command(&conn, &notifier, &make_cmd("complete", Some(&tid), None), "worker@t.io").unwrap();
+        execute_command(
+            &conn,
+            &notifier,
+            &make_cmd("complete", Some(&tid), None),
+            "worker@t.io",
+        )
+        .unwrap();
         let cmd = make_cmd("approve", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io");
         assert!(resp.is_err());
@@ -1440,16 +1500,26 @@ mod tests {
         let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
         let cmd = make_cmd("approve", Some(&tid), None);
         let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io");
-        assert!(resp.is_err(), "approve of non-Reviewing task must be rejected");
+        assert!(
+            resp.is_err(),
+            "approve of non-Reviewing task must be rejected"
+        );
     }
 
     #[test]
     fn test_reject_rejected_unless_reviewing() {
         let (conn, board_id, notifier) = setup();
         let tid = make_task_with_reviewer(&conn, &board_id, "T1", "worker@t.io", "veri@t.io");
-        let cmd = make_cmd("reject", Some(&tid), Some(serde_json::json!({"reason": "x"})));
+        let cmd = make_cmd(
+            "reject",
+            Some(&tid),
+            Some(serde_json::json!({"reason": "x"})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io");
-        assert!(resp.is_err(), "reject of non-Reviewing task must be rejected");
+        assert!(
+            resp.is_err(),
+            "reject of non-Reviewing task must be rejected"
+        );
     }
 
     // ── reopen demotes Ready children (L4) ────────────────────────
@@ -1487,7 +1557,11 @@ mod tests {
         board.status = BoardStatus::AwaitingOwner;
         db::update_board(&conn, &board).unwrap();
 
-        let cmd = make_cmd("reopen", None, Some(serde_json::json!({"board_id": board_id})));
+        let cmd = make_cmd(
+            "reopen",
+            None,
+            Some(serde_json::json!({"board_id": board_id})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "human@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let child_after = db::get_task(&conn, &db::make_task_id(&board_id, "T2")).unwrap();
@@ -1517,7 +1591,11 @@ mod tests {
         let (conn, board_id, notifier) = setup();
         make_task(&conn, &board_id, "T1", "worker@t.io");
         make_task(&conn, &board_id, "T2", "worker@t.io");
-        let cmd = make_cmd("list", None, Some(serde_json::json!({"board_id": board_id})));
+        let cmd = make_cmd(
+            "list",
+            None,
+            Some(serde_json::json!({"board_id": board_id})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1534,7 +1612,11 @@ mod tests {
     #[test]
     fn test_status() {
         let (conn, board_id, notifier) = setup();
-        let cmd = make_cmd("status", None, Some(serde_json::json!({"board_id": board_id})));
+        let cmd = make_cmd(
+            "status",
+            None,
+            Some(serde_json::json!({"board_id": board_id})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1542,7 +1624,11 @@ mod tests {
     #[test]
     fn test_members() {
         let (conn, board_id, notifier) = setup();
-        let cmd = make_cmd("members", None, Some(serde_json::json!({"board_id": board_id})));
+        let cmd = make_cmd(
+            "members",
+            None,
+            Some(serde_json::json!({"board_id": board_id})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1550,7 +1636,11 @@ mod tests {
     #[test]
     fn test_roles() {
         let (conn, board_id, notifier) = setup();
-        let cmd = make_cmd("roles", None, Some(serde_json::json!({"board_id": board_id})));
+        let cmd = make_cmd(
+            "roles",
+            None,
+            Some(serde_json::json!({"board_id": board_id})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "orch@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1560,7 +1650,11 @@ mod tests {
     fn test_comment() {
         let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
-        let cmd = make_cmd("comment", Some(&tid), Some(serde_json::json!({"text": "looks good"})));
+        let cmd = make_cmd(
+            "comment",
+            Some(&tid),
+            Some(serde_json::json!({"text": "looks good"})),
+        );
         let resp = execute_command(&conn, &notifier, &cmd, "veri@t.io").unwrap();
         assert_eq!(resp.status, "ok");
     }
@@ -1634,7 +1728,10 @@ mod tests {
             after.goal, before.goal,
             "S4: non-owner refresh must not change the goal"
         );
-        assert_eq!(after.status, before.status, "S4: status must stay untouched");
+        assert_eq!(
+            after.status, before.status,
+            "S4: status must stay untouched"
+        );
     }
 
     // ── continue: 跨会话进度汇报(恢复 362f18e 误删的 verb) ──────────
@@ -1763,7 +1860,10 @@ mod tests {
             })),
         );
         let resp = execute_command(&conn, &notifier, &cmd, "human@t.io");
-        assert!(resp.is_err(), "unknown role in role_permissions must be rejected");
+        assert!(
+            resp.is_err(),
+            "unknown role in role_permissions must be rejected"
+        );
     }
 
     #[test]
@@ -1778,7 +1878,10 @@ mod tests {
             })),
         );
         let resp = execute_command(&conn, &notifier, &cmd, "human@t.io");
-        assert!(resp.is_err(), "unknown verb in role_permissions must be rejected");
+        assert!(
+            resp.is_err(),
+            "unknown verb in role_permissions must be rejected"
+        );
     }
 
     #[test]

@@ -522,6 +522,9 @@ mod tests {
         assert!(conf > 0.9);
         let s = sig.unwrap();
         assert!(s.len() <= 300, "truncated sig too long: {}", s.len());
-        assert!(s.is_char_boundary(s.len()), "truncation must end on a char boundary");
+        assert!(
+            s.is_char_boundary(s.len()),
+            "truncation must end on a char boundary"
+        );
     }
 }

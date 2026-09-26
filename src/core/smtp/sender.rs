@@ -192,7 +192,7 @@ impl SmtpRelay {
                         &header_cc,
                         &email_body,
                         record,
-                        &self.email_factory.as_ref(),
+                        self.email_factory.as_ref(),
                     )
                     .await
             }
@@ -229,6 +229,7 @@ impl SmtpRelay {
     }
 
     /// Relay mode: all recipients via a single upstream SMTP.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     async fn send_via_relay(
         &self,
         transport: &lettre::AsyncSmtpTransport<Tokio1Executor>,
@@ -247,36 +248,35 @@ impl SmtpRelay {
         let headers_val = record.headers_parsed();
         let name_map = Self::name_map_from_headers(&serde_json::Value::Object(headers_val.clone()));
 
-        let from_name: Option<String> =
-            headers_val
-                .get("from")
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    if let Some(pos) = s.find('<') {
-                        let n = s[..pos].trim().to_string();
-                        if n.is_empty() {
-                            None
-                        } else {
-                            Some(n)
-                        }
-                    } else {
+        let from_name: Option<String> = headers_val
+            .get("from")
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                if let Some(pos) = s.find('<') {
+                    let n = s[..pos].trim().to_string();
+                    if n.is_empty() {
                         None
+                    } else {
+                        Some(n)
+                    }
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // No From header (or no display name in it): fall back to a
+                // "Name <addr>" form stored in record.sender, so display
+                // names survive even when only the sender field carries it.
+                let s = record.sender.trim();
+                s.find('<').and_then(|pos| {
+                    let n = s[..pos].trim().to_string();
+                    if n.is_empty() {
+                        None
+                    } else {
+                        Some(n)
                     }
                 })
-                .or_else(|| {
-                    // No From header (or no display name in it): fall back to a
-                    // "Name <addr>" form stored in record.sender, so display
-                    // names survive even when only the sender field carries it.
-                    let s = record.sender.trim();
-                    s.find('<').and_then(|pos| {
-                        let n = s[..pos].trim().to_string();
-                        if n.is_empty() {
-                            None
-                        } else {
-                            Some(n)
-                        }
-                    })
-                });
+            });
 
         let mut builder = Message::builder()
             .from(Mailbox::new(from_name, from_addr.clone()))
@@ -340,7 +340,7 @@ impl SmtpRelay {
             .transform_or_passthrough(&raw, &record.id)
             .await;
 
-        match transport.send_raw(&envelope_obj, &*raw_to_send).await {
+        match transport.send_raw(&envelope_obj, &raw_to_send).await {
             Ok(response) => {
                 info!(operation="smtp_delivery_success", email_id = %record.id, sender = %record.sender, subject = %record.subject, status_code = %response.code(), "SMTP delivery successful");
                 Ok(())

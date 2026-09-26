@@ -149,7 +149,7 @@ pub async fn process_email_webhook(
         .get_interceptors()
         .read()
         .ok()
-        .map(|guard| guard.iter().map(|i| Arc::clone(i)).collect::<Vec<_>>())
+        .map(|guard| guard.iter().map(Arc::clone).collect::<Vec<_>>())
         .unwrap_or_default();
     let mut intercepted = false;
     for interceptor in &interceptors_snapshot {
@@ -231,10 +231,7 @@ pub async fn process_email_webhook(
                 .await
                 .unwrap_or(None);
             if let Some(ref d) = d {
-                let is_pull = d
-                    .webhook_url
-                    .as_deref()
-                    .map_or(true, |u| u.trim().is_empty());
+                let is_pull = d.webhook_url.as_deref().is_none_or(|u| u.trim().is_empty());
                 if is_pull {
                     // Determine the correct key for the endpoints map.
                     let ep_key: String = if endpoints_map.contains_key(addr) {
@@ -392,7 +389,7 @@ pub async fn process_email_webhook(
                 .to
                 .iter()
                 .chain(recipients.cc.iter())
-                .find(|r| r.rsplit('@').next().map_or(false, |d| d == domain.as_str()))
+                .find(|r| r.rsplit('@').next() == Some(domain.as_str()))
                 .cloned()
                 .unwrap_or_else(|| domain.to_string())
         };
@@ -444,7 +441,7 @@ pub async fn process_email_webhook(
             for (domain, _secret, _email) in &entries {
                 if last_error.is_none() {
                     if let Err(e) = email_factory
-                        .update_endpoint_status(&record.id, &domain, "success")
+                        .update_endpoint_status(&record.id, domain, "success")
                         .await
                     {
                         error!(operation="endpoint_status_update_failed", email_id = %record.id, %domain, error = %e,
@@ -524,7 +521,10 @@ pub async fn process_email_webhook(
 /// Manager commands parsed from manager's email.
 enum ManagerCommand {
     /// Composite approval: updates persona and/or signature in one upsert.
-    PersonaApproval { persona: String, signature: String },
+    PersonaApproval {
+        persona: String,
+        signature: String,
+    },
     AddContact(String, Option<String>), // email to add, optional description
     RemoveContact(String),              // email to remove
 }
@@ -983,14 +983,15 @@ fn extract_description_from_body(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::email::utils::sign_payload;
     use crate::core::email::utils::html_to_markdown;
+    use crate::core::email::utils::sign_payload;
 
     // ─── manager command parsing tests ───
 
     #[test]
     fn test_parse_persona_approval_both_sections() {
-        let body = "approve persona\npersona: I am an email assistant.\nsignature: Best regards\nBob";
+        let body =
+            "approve persona\npersona: I am an email assistant.\nsignature: Best regards\nBob";
         match super::parse_manager_command(body) {
             Some(super::ManagerCommand::PersonaApproval { persona, signature }) => {
                 assert_eq!(persona, "I am an email assistant.");
@@ -1132,7 +1133,9 @@ mod tests {
     fn test_parse_remove_contact_still_works() {
         let body = "remove bob@example.com from my contacts";
         match super::parse_manager_command(body) {
-            Some(super::ManagerCommand::RemoveContact(email)) => assert_eq!(email, "bob@example.com"),
+            Some(super::ManagerCommand::RemoveContact(email)) => {
+                assert_eq!(email, "bob@example.com")
+            }
             _ => panic!("expected RemoveContact"),
         }
     }
@@ -1232,10 +1235,10 @@ mod tests {
 
     // ─── P2-1: approve persona merge semantics (integration) ───
 
+    use crate::base::strategy::BaseSystemStore;
     use crate::core::email::factory::EmailFactory;
     use crate::core::email::storage::EmailRecord;
     use crate::core::factory::EnvFactory;
-    use crate::base::strategy::BaseSystemStore;
 
     fn approval_env() -> (EnvFactory, EmailFactory) {
         let ts = std::time::SystemTime::now()
@@ -1244,10 +1247,14 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("aimailgw-wb-approval-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        let db = crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap();
         let arc = std::sync::Arc::new(db);
         let env = EnvFactory::new(arc.clone(), std::sync::Arc::new(BaseSystemStore));
-        let ef = EmailFactory::new(arc, std::path::PathBuf::from("/tmp/aimailgw-wb-att"), std::sync::Arc::new(BaseSystemStore));
+        let ef = EmailFactory::new(
+            arc,
+            std::path::PathBuf::from("/tmp/aimailgw-wb-att"),
+            std::sync::Arc::new(BaseSystemStore),
+        );
         (env, ef)
     }
 
@@ -1258,7 +1265,8 @@ mod tests {
             system_id: "sys1".to_string(),
             direction: "inbound".to_string(),
             sender: "mgr@ext.com".to_string(),
-            recipients: r#"{"to":["agent@test.com"],"cc":[],"rcpt":["agent@test.com"]}"#.to_string(),
+            recipients: r#"{"to":["agent@test.com"],"cc":[],"rcpt":["agent@test.com"]}"#
+                .to_string(),
             endpoints: None,
             subject: "approve persona".to_string(),
             body: body.to_string(),
@@ -1274,12 +1282,25 @@ mod tests {
     }
 
     async fn seed_agent(env: &EnvFactory) {
-        env.create_domain("d1", "sys1", "agent@test.com", Some("http://hook"), None, Some("mgr@ext.com"))
-            .await
-            .unwrap();
-        env.upsert_domain_addr_meta("agent@test.com", "sys1", Some("mgr@ext.com"), Some("old sig"), Some("old persona"))
-            .await
-            .unwrap();
+        env.create_domain(
+            "d1",
+            "sys1",
+            "agent@test.com",
+            Some("http://hook"),
+            None,
+            Some("mgr@ext.com"),
+        )
+        .await
+        .unwrap();
+        env.upsert_domain_addr_meta(
+            "agent@test.com",
+            "sys1",
+            Some("mgr@ext.com"),
+            Some("old sig"),
+            Some("old persona"),
+        )
+        .await
+        .unwrap();
     }
 
     // P2-1: persona-only approval must NOT wipe the existing signature.
@@ -1292,9 +1313,16 @@ mod tests {
             super::handle_manager_commands(&rec, &env, &ef, None, None).await,
             "approval must be consumed"
         );
-        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        let meta = env
+            .resolve_domain_addr_meta("agent@test.com")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.agent_persona, "new persona only");
-        assert_eq!(meta.agent_signature, "old sig", "signature must be preserved");
+        assert_eq!(
+            meta.agent_signature, "old sig",
+            "signature must be preserved"
+        );
         assert_eq!(meta.manager_address, "mgr@ext.com");
     }
 
@@ -1305,9 +1333,16 @@ mod tests {
         seed_agent(&env).await;
         let rec = approval_record("approve persona\nsignature: new sig only");
         assert!(super::handle_manager_commands(&rec, &env, &ef, None, None).await);
-        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        let meta = env
+            .resolve_domain_addr_meta("agent@test.com")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.agent_signature, "new sig only");
-        assert_eq!(meta.agent_persona, "old persona", "persona must be preserved");
+        assert_eq!(
+            meta.agent_persona, "old persona",
+            "persona must be preserved"
+        );
     }
 
     // P2-1: both sections replace both values.
@@ -1317,7 +1352,11 @@ mod tests {
         seed_agent(&env).await;
         let rec = approval_record("approve persona\npersona: p2\nsignature: s2");
         assert!(super::handle_manager_commands(&rec, &env, &ef, None, None).await);
-        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        let meta = env
+            .resolve_domain_addr_meta("agent@test.com")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.agent_persona, "p2");
         assert_eq!(meta.agent_signature, "s2");
     }
@@ -1339,7 +1378,8 @@ mod tests {
         seed_agent(&env).await;
         let cfg = ack_cfg();
         // approval_record 固定 sender=mgr@ext.com(= manager);非 manager 场景换发件人。
-        let mut rec = approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
+        let mut rec =
+            approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
         rec.sender = "stranger@ext.com".to_string();
         let fa = Some(crate::core::api::outbound::FailedCommandAck {
             cfg: &cfg,
@@ -1354,15 +1394,27 @@ mod tests {
             "non-manager command must NOT be consumed"
         );
         // meta 未被改写
-        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
-        assert_eq!(meta.agent_persona, "old persona", "meta must stay untouched");
+        let meta = env
+            .resolve_domain_addr_meta("agent@test.com")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            meta.agent_persona, "old persona",
+            "meta must stay untouched"
+        );
         assert_eq!(meta.agent_signature, "old sig", "meta must stay untouched");
         // 失败确认信已入队: from noreply@e2e.local → to stranger@ext.com, Command failed
         let acks = env.db.list_emails(50).await.unwrap();
-        let ack = acks.iter().find(|m| m.subject.starts_with("[AIMail] Command failed"));
+        let ack = acks
+            .iter()
+            .find(|m| m.subject.starts_with("[AIMail] Command failed"));
         let ack = ack.expect("non-manager command must get a failed confirmation mail");
         assert_eq!(ack.sender, "noreply@e2e.local");
-        assert!(ack.recipients.contains("stranger@ext.com"), "ack must go to the command sender");
+        assert!(
+            ack.recipients.contains("stranger@ext.com"),
+            "ack must go to the command sender"
+        );
         assert!(ack.body.contains("Result  : FAILED"));
         assert!(ack.body.contains("is not the manager of agent@test.com"));
     }
@@ -1372,7 +1424,8 @@ mod tests {
     async fn non_manager_command_without_failed_ack_ctx_stays_silent() {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
-        let mut rec = approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
+        let mut rec =
+            approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
         rec.sender = "stranger@ext.com".to_string();
         assert!(!super::handle_manager_commands(&rec, &env, &ef, None, None).await);
         let acks = env.db.list_emails(50).await.unwrap();
@@ -1380,7 +1433,11 @@ mod tests {
             !acks.iter().any(|m| m.subject.contains("Command")),
             "no ack may be enqueued when failed_ack is None"
         );
-        let meta = env.resolve_domain_addr_meta("agent@test.com").await.unwrap().unwrap();
+        let meta = env
+            .resolve_domain_addr_meta("agent@test.com")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(meta.agent_persona, "old persona");
         assert_eq!(meta.agent_signature, "old sig");
     }

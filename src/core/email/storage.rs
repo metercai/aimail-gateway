@@ -197,14 +197,21 @@ impl Database {
             return Ok(Vec::new());
         }
         // Build dynamic IN (...) clause; parameter count is bounded by caller
-        let placeholders: Vec<String> = ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+        let placeholders: Vec<String> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let sql = format!(
             "SELECT id, filename, content_type, sender_email, mail_id, created_at FROM attachments_meta WHERE id IN ({})",
             placeholders.join(", ")
         );
         let ids = ids.to_vec();
         self.call(move |conn| {
-            let params: Vec<&dyn rusqlite::types::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+            let params: Vec<&dyn rusqlite::types::ToSql> = ids
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect();
             let mut stmt = conn.prepare(&sql)?;
             let rows = stmt.query_map(params.as_slice(), attachment_meta_row)?;
             let mut results = Vec::new();
@@ -212,7 +219,8 @@ impl Database {
                 results.push(row?);
             }
             Ok(results)
-        }).await
+        })
+        .await
     }
 
     /// List attachments associated with a given mail_id.
@@ -304,12 +312,11 @@ impl Recipients {
     /// Parse from a JSON string stored in the emails.recipients column.
     /// Format: `{"to":[...],"cc":[...],"rcpt":[...]}` (cc/rcpt optional).
     pub fn from_json(json: &str) -> Self {
-        serde_json::from_str::<Recipients>(json)
-            .unwrap_or_else(|_| Recipients {
-                to: vec![json.to_string()],
-                cc: vec![],
-                rcpt: vec![],
-            })
+        serde_json::from_str::<Recipients>(json).unwrap_or_else(|_| Recipients {
+            to: vec![json.to_string()],
+            cc: vec![],
+            rcpt: vec![],
+        })
     }
 
     pub fn to_json(&self) -> String {
@@ -364,6 +371,7 @@ const EMAIL_SELECT: &str =
     "SELECT id, status, system_id, direction, sender, recipients, endpoints, subject, body, headers, attachments, send_count, last_sent_at, next_retry_at, max_attempts, created_at, sender_signature FROM emails";
 
 impl Database {
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn insert_email(
         &self,
         id: &str,
@@ -434,7 +442,7 @@ impl Database {
     /// State machine:
     /// - `readying` — preparing (born state; only the first-delivery trigger may claim it)
     /// - `ready`    — payload-complete and retryable (only the tick may claim it;
-    ///                first-delivery emails are claimed from `readying` via trigger)
+    ///   first-delivery emails are claimed from `readying` via trigger)
     /// - `sending`  — in flight
     pub async fn claim_ready(&self, id: &str) -> AppResult<Option<EmailRecord>> {
         let id = id.to_string();
@@ -583,9 +591,12 @@ impl Database {
             ))?;
             let rows = stmt.query_map(params![cutoff, limit], email_row)?;
             let mut results = Vec::new();
-            for row in rows { results.push(row?); }
+            for row in rows {
+                results.push(row?);
+            }
             Ok(results)
-        }).await
+        })
+        .await
     }
 
     /// CAS flip `readying` → `ready` (crash recovery: payload verified complete).
@@ -599,7 +610,8 @@ impl Database {
                 params![id],
             )?;
             Ok(rows > 0)
-        }).await
+        })
+        .await
     }
 
     // ── Scheduler v1.0: periodic inspection queries ──────────────────
@@ -666,11 +678,7 @@ impl Database {
 
     /// Update only send_count without changing status.
     /// Used by exhaustion paths to record the final attempt before marking completed.
-    pub async fn update_email_send_count(
-        &self,
-        id: &str,
-        send_count: i32,
-    ) -> AppResult<()> {
+    pub async fn update_email_send_count(&self, id: &str, send_count: i32) -> AppResult<()> {
         let id = id.to_string();
         self.call(move |conn| {
             conn.execute(

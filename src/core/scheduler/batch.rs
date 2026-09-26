@@ -13,6 +13,7 @@ use super::flows::{handle_overlimit, periodic_inspection, process_expired_attach
 
 /// Run all flows in one batch cycle: readying-sweep, overlimit, retry,
 /// attachment expiry, expired delivered.
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub(crate) async fn process_batch(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
@@ -35,7 +36,15 @@ pub(crate) async fn process_batch(
                 "Overlimit batch — sending auto-replies"
             );
             for record in &records {
-                handle_overlimit(email_factory, attachment_factory, config, record, metrics, Some(trigger)).await;
+                handle_overlimit(
+                    email_factory,
+                    attachment_factory,
+                    config,
+                    record,
+                    metrics,
+                    Some(trigger),
+                )
+                .await;
             }
         }
         Ok(_) => { /* no overlimit emails */ }
@@ -109,8 +118,7 @@ pub(crate) async fn process_batch(
                     if let Err(e) = email_factory.complete(&record.id).await {
                         error!(operation="finalize_expired_failed", email_id = %record.id, %e, "Failed to finalize expired delivered email");
                     } else {
-                        cleanup_completed_email(attachment_factory, email_factory, record)
-                            .await;
+                        cleanup_completed_email(attachment_factory, email_factory, record).await;
                     }
                 }
             }
@@ -154,9 +162,7 @@ async fn sweep_stuck_readying(
     batch_size: i32,
 ) {
     let cutoff = chrono::Utc::now()
-        .checked_sub_signed(chrono::Duration::seconds(
-            config.retry.readying_stuck_secs,
-        ))
+        .checked_sub_signed(chrono::Duration::seconds(config.retry.readying_stuck_secs))
         .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
@@ -179,7 +185,7 @@ async fn sweep_stuck_readying(
         //   JSON missing  → look at attachment_meta rows referencing this
         //                   email: present → save loop was interrupted
         //                   mid-way (partial files/meta on disk) → discard.
-        let json_complete = record.attachments.as_deref().map_or(false, |s| !s.is_empty());
+        let json_complete = record.attachments.as_deref().is_some_and(|s| !s.is_empty());
         let meta_ids: Vec<String> = if json_complete {
             // Delivery reads the JSON, not the meta rows; use JSON ids.
             record.attachment_ids()
@@ -244,8 +250,14 @@ async fn discard_partial_email(
             .flatten()
             .map(|m| m.file_extension().to_string())
             .unwrap_or_else(|| "bin".to_string());
-        let perm_count = attachment_factory.count_permissions(attachment_id).await.unwrap_or(0);
-        let mail_count = attachment_factory.count_mail_ids(attachment_id).await.unwrap_or(0);
+        let perm_count = attachment_factory
+            .count_permissions(attachment_id)
+            .await
+            .unwrap_or(0);
+        let mail_count = attachment_factory
+            .count_mail_ids(attachment_id)
+            .await
+            .unwrap_or(0);
         cascade_delete_attachment(
             attachment_factory,
             email_factory,
@@ -290,7 +302,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("aimailgw-sweep-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        let db = Database::open(dir.join("aimail.db"), 4, None).unwrap();
         let arc = std::sync::Arc::new(db.clone());
         let att_dir = dir.join("attachments");
         std::fs::create_dir_all(&att_dir).unwrap();
@@ -310,13 +322,26 @@ mod tests {
                 rusqlite::params![id],
             )?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     async fn insert_readying(ef: &EmailFactory, id: &str) {
-        ef.create_inbound(id, "sys1", "ext@ext.com",
+        ef.create_inbound(
+            id,
+            "sys1",
+            "ext@ext.com",
             r#"{"to":["a@x.com"],"cc":[],"rcpt":["a@x.com"]}"#,
-            "s", "b", None, None, None, 3).await.unwrap();
+            "s",
+            "b",
+            None,
+            None,
+            None,
+            3,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -326,13 +351,21 @@ mod tests {
         insert_readying(&ctx.ef, "sa").await;
         backdate(&ctx.db, "sa").await;
         // The save loop finished: attachments JSON is present.
-        ctx.ef.update_email_attachments("sa", r#"[{"attachment_id":"att1","filename":"a.txt","content_type":"text/plain"}]"#)
-            .await.unwrap();
+        ctx.ef
+            .update_email_attachments(
+                "sa",
+                r#"[{"attachment_id":"att1","filename":"a.txt","content_type":"text/plain"}]"#,
+            )
+            .await
+            .unwrap();
 
         sweep_stuck_readying(&ctx.ef, &ctx.af, &Config::default(), 10).await;
 
         let rec = ctx.ef.get("sa").await.unwrap().unwrap();
-        assert_eq!(rec.status, "ready", "branch A: complete payload flips to ready");
+        assert_eq!(
+            rec.status, "ready",
+            "branch A: complete payload flips to ready"
+        );
     }
 
     #[tokio::test]
@@ -343,15 +376,27 @@ mod tests {
         insert_readying(&ctx.ef, "sb").await;
         backdate(&ctx.db, "sb").await;
         // A meta row was written but the attachments JSON never landed.
-        ctx.db.insert_attachment_meta("att-b", "b.txt", Some("text/plain"),
-            "ext@ext.com", Some(&["sb".to_string()])).await.unwrap();
+        ctx.db
+            .insert_attachment_meta(
+                "att-b",
+                "b.txt",
+                Some("text/plain"),
+                "ext@ext.com",
+                Some(&["sb".to_string()]),
+            )
+            .await
+            .unwrap();
 
         sweep_stuck_readying(&ctx.ef, &ctx.af, &Config::default(), 10).await;
 
-        assert!(ctx.ef.get("sb").await.unwrap().is_none(),
-            "branch B: partial email is deleted");
-        assert!(ctx.db.get_attachment_meta("att-b").await.unwrap().is_none(),
-            "branch B: partial attachment meta is cascade-deleted");
+        assert!(
+            ctx.ef.get("sb").await.unwrap().is_none(),
+            "branch B: partial email is deleted"
+        );
+        assert!(
+            ctx.db.get_attachment_meta("att-b").await.unwrap().is_none(),
+            "branch B: partial attachment meta is cascade-deleted"
+        );
     }
 
     #[tokio::test]
@@ -364,7 +409,10 @@ mod tests {
         sweep_stuck_readying(&ctx.ef, &ctx.af, &Config::default(), 10).await;
 
         let rec = ctx.ef.get("sc").await.unwrap().unwrap();
-        assert_eq!(rec.status, "ready", "branch C: attachment-less flips to ready");
+        assert_eq!(
+            rec.status, "ready",
+            "branch C: attachment-less flips to ready"
+        );
     }
 
     #[tokio::test]

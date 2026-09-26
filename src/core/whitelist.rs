@@ -118,7 +118,9 @@ impl WhitelistCache {
     /// Remove a specific pattern from the cache, forcing recompilation on next lookup.
     pub fn invalidate(&self, value: &str) {
         match self.inner.write() {
-            Ok(mut cache) => { cache.remove(value); }
+            Ok(mut cache) => {
+                cache.remove(value);
+            }
             Err(_) => {
                 // Poisoned RwLock — a previous writer panicked.
                 // Worst case: stale entry survives for CACHE_TTL (30s).
@@ -131,7 +133,9 @@ impl WhitelistCache {
     /// Clear all cached entries.
     pub fn invalidate_all(&self) {
         match self.inner.write() {
-            Ok(mut cache) => { cache.clear(); }
+            Ok(mut cache) => {
+                cache.clear();
+            }
             Err(_) => {
                 // Poisoned RwLock — all entries will naturally expire
                 // within CACHE_TTL (30s). No explicit recovery needed.
@@ -157,6 +161,19 @@ pub fn is_whitelisted_wildcard(values: &[String], target: &str, cache: &Whitelis
             Ok(regex) => regex.is_match(target),
             Err(_) => false,
         })
+}
+
+/// Resolves a sender/receiver address into whitelist lookup keys
+/// (single exact match, address-level only).
+pub struct ExactKeyResolver;
+impl ExactKeyResolver {
+    pub async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>> {
+        let record = db
+            .get_system_domain_by_name(addr)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("domain not found: {}", addr)))?;
+        Ok(vec![(record.system_id, addr.to_string())])
+    }
 }
 
 #[cfg(test)]
@@ -267,18 +284,5 @@ mod tests {
             "anything@example.com",
             &cache
         ));
-    }
-}
-
-/// Resolves a sender/receiver address into whitelist lookup keys
-/// (single exact match, address-level only).
-pub struct ExactKeyResolver;
-impl ExactKeyResolver {
-    pub async fn resolve(&self, db: &Database, addr: &str) -> AppResult<Vec<(String, String)>> {
-        let record = db
-            .get_system_domain_by_name(addr)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("domain not found: {}", addr)))?;
-        Ok(vec![(record.system_id, addr.to_string())])
     }
 }

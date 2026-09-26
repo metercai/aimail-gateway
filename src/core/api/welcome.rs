@@ -136,8 +136,8 @@ pub async fn send_welcome(
     }
 
     // ── 3. cc: reverse-lookup manager_address, auto-route internal/external ──
-    let mut ext_cc: Vec<String> = Vec::new();   // external (MX)
-    let mut int_cc: Vec<String> = Vec::new();   // internal (webhook)
+    let mut ext_cc: Vec<String> = Vec::new(); // external (MX)
+    let mut int_cc: Vec<String> = Vec::new(); // internal (webhook)
     for (agent, _) in &internal {
         if let Ok(Some(meta)) = env.db.get_domain_addr_meta(agent).await {
             let m = meta.manager_address.trim().to_lowercase();
@@ -195,7 +195,11 @@ pub async fn send_welcome(
             }
         }
     }
-    let full_cc: Vec<String> = int_cc.iter().cloned().chain(ext_cc.iter().cloned()).collect();
+    let full_cc: Vec<String> = int_cc
+        .iter()
+        .cloned()
+        .chain(ext_cc.iter().cloned())
+        .collect();
 
     // ── 4. Headers: welcome marker + Message-ID (thread root) ──
     let from = state.config.system_sender();
@@ -208,9 +212,10 @@ pub async fn send_welcome(
         .unwrap_or("aimail-relay");
     let message_id = format!("<{}@{}>", Uuid::new_v4(), domain);
     // Human-readable local time (gateway tz), e.g. 2026-09-05 08:49:40 +0800.
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
-    let mut headers: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let timestamp = chrono::Local::now()
+        .format("%Y-%m-%d %H:%M:%S %z")
+        .to_string();
+    let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     headers.insert("Message-ID".into(), message_id.clone());
     headers.insert("X-AIMail-Welcome".into(), "1".into());
     let headers_json = serde_json::to_string(&headers).unwrap_or_default();
@@ -417,17 +422,26 @@ mod tests {
     #[test]
     fn welcome_body_renders_human_readable_footer_and_stable_marker() {
         // 与 send_welcome() 内**完全相同**的渲染方式(chrono 本地时区)
-        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z").to_string();
+        let ts = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S %z")
+            .to_string();
         let body = WELCOME_BODY
             .replace("{domain}", "example.tm")
             .replace("{timestamp}", &ts);
 
         // 1) 页脚人类可读: "Sent YYYY-MM-DD HH:MM:SS ±ZZZZ"
         let footer = body.lines().last().unwrap_or("");
-        assert!(footer.starts_with("Sent "), "footer must start with 'Sent ': {footer}");
+        assert!(
+            footer.starts_with("Sent "),
+            "footer must start with 'Sent ': {footer}"
+        );
         let stamp = footer.trim_start_matches("Sent ");
         let parts: Vec<&str> = stamp.split(' ').collect();
-        assert_eq!(parts.len(), 3, "footer stamp must be 'date time tz': {stamp}");
+        assert_eq!(
+            parts.len(),
+            3,
+            "footer stamp must be 'date time tz': {stamp}"
+        );
         assert_eq!(parts[0].len(), 10, "date must be YYYY-MM-DD: {}", parts[0]);
         assert_eq!(parts[1].len(), 8, "time must be HH:MM:SS: {}", parts[1]);
         assert!(
@@ -442,7 +456,10 @@ mod tests {
         }
 
         // 3) 主题标记稳定: 个人化后缀不影响小写化子串匹配
-        let subject = format!("Welcome to AIMail World, {}, since {}!", "agent1", "2026-09-22");
+        let subject = format!(
+            "Welcome to AIMail World, {}, since {}!",
+            "agent1", "2026-09-22"
+        );
         assert!(subject.to_lowercase().contains("welcome to aimail world"));
     }
 }

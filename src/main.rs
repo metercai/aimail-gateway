@@ -80,11 +80,10 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     let db_path = config.storage.db_path();
     // 平台 admin-key 文件: 生产应指向 DB 目录之外(如 /etc/aimail/admin.key, 0600 root);
     // 未配置时沿用历史位置 <db>.admin_key(仅供测试/CI)。
-    let key_path: std::path::PathBuf = config
-        .storage
-        .admin_key_file
-        .clone()
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.admin_key", db_path.display())));
+    let key_path: std::path::PathBuf =
+        config.storage.admin_key_file.clone().unwrap_or_else(|| {
+            std::path::PathBuf::from(format!("{}.admin_key", db_path.display()))
+        });
     if key_path.parent() == db_path.parent() {
         tracing::warn!(
             operation = "admin_key_colocated",
@@ -191,8 +190,8 @@ fn cmd_test_config(cli: &Cli) -> AppResult<()> {
     let raw = std::fs::read_to_string(config_path.as_ref())
         .map_err(|e| AppError::Config(format!("cannot read {}: {}", config_path, e)))?;
 
-    let config: Config = toml::from_str(&raw)
-        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
+    let config: Config =
+        toml::from_str(&raw).map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
 
     config.validate()?;
 

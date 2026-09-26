@@ -128,10 +128,13 @@ pub async fn send_email_core(
             .map(|s| s.trim().to_lowercase())
             .collect();
         let dedup_subject = req.subject.as_deref().unwrap_or("");
-        if state
-            .send_deduper
-            .is_duplicate(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body)
-        {
+        if state.send_deduper.is_duplicate(
+            sender,
+            &dedup_to,
+            &dedup_cc,
+            dedup_subject,
+            &markdown_body,
+        ) {
             warn!(
                 operation = "send_dedupe_suppressed",
                 sender = %sender,
@@ -192,7 +195,7 @@ pub async fn send_email_core(
     let to_raw: Vec<(String, String)> = req
         .to
         .split(',')
-        .map(|s| parse_one(s))
+        .map(&parse_one)
         .filter(|(_, e)| !e.is_empty())
         .map(|(name, email)| {
             // Board addresses (`{short}[.{sys}].a2a@{domain}`) must survive
@@ -226,10 +229,9 @@ pub async fn send_email_core(
             if !raw_email.is_empty() {
                 // Board addresses keep their dot-separated local part (see
                 // TO parsing above) — stripping would break the address.
-                let (base, persona) =
-                    if crate::board::addr::is_board_address(&raw_email) {
-                        (raw_email, String::new())
-                    } else if is_shared_sender {
+                let (base, persona) = if crate::board::addr::is_board_address(&raw_email) {
+                    (raw_email, String::new())
+                } else if is_shared_sender {
                     let elocal = raw_email.split('@').next().unwrap_or("");
                     if elocal.matches('.').count() >= 2 {
                         strip_persona(&raw_email)
@@ -254,7 +256,7 @@ pub async fn send_email_core(
     // Collect unique bare emails to resolve names in batch.
     let mut bare_emails: Vec<String> = Vec::new();
     for (n, e) in to_raw.iter().chain(cc_raw.iter()) {
-        if n.is_empty() && !bare_emails.contains(&e) {
+        if n.is_empty() && !bare_emails.contains(e) {
             bare_emails.push(e.clone());
         }
     }
@@ -396,10 +398,10 @@ pub async fn send_email_core(
                     let to_addr = to_set.iter().next().map(|s| s.as_str()).unwrap_or("");
                     let from_member = db::get_member(&conn, &board_id, sender).ok().flatten();
                     let to_member = db::get_member(&conn, &board_id, to_addr).ok().flatten();
-                    if from_member.is_some() && to_member.is_some() {
+                    if let (Some(from_m), Some(to_m)) = (from_member, to_member) {
                         merged_headers.insert("X-Board-ID".to_string(), board_id.clone());
-                        merged_headers.insert("X-Board-Role".to_string(), to_member.unwrap().role);
-                        merged_headers.insert("X-From-Role".to_string(), from_member.unwrap().role);
+                        merged_headers.insert("X-Board-Role".to_string(), to_m.role);
+                        merged_headers.insert("X-From-Role".to_string(), from_m.role);
                     }
                 }
                 break; // Only process the first matching board
@@ -437,9 +439,7 @@ pub async fn send_email_core(
         .iter()
         .cloned()
         .chain(cc_set.iter().cloned())
-        .filter(|e| {
-            to_set.contains(e) || !crate::board::addr::is_board_address(e)
-        })
+        .filter(|e| to_set.contains(e) || !crate::board::addr::is_board_address(e))
         .collect();
 
     if recipients.is_empty() {
@@ -566,9 +566,9 @@ pub async fn send_email_core(
     // (email, domain, webhook_url, webhook_secret)
     let mut external: Vec<String> = Vec::new();
     let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
-    // System sink: the fixed auto-reply sender (noreply@{domain}) appearing
-    // as a recipient. Never delivered (no MX, no webhook, no notification) —
-    // recorded in the to/cc display list only (section 7).
+                                                    // System sink: the fixed auto-reply sender (noreply@{domain}) appearing
+                                                    // as a recipient. Never delivered (no MX, no webhook, no notification) —
+                                                    // recorded in the to/cc display list only (section 7).
     let mut system_sink: Vec<String> = Vec::new();
     // Owning system of a board recipient, if any (inbound records for
     // command-flow delivery are attributed to the board's system, mirroring
@@ -600,22 +600,17 @@ pub async fn send_email_core(
                 Ok(b) => {
                     // Endpoint via the board's owning domain (domain-level
                     // webhook fallback), same resolution SMTP uses.
-                    let (webhook_url, webhook_secret) = match env.lookup_domain_addr(&b.domain).await
-                    {
-                        Ok(Some(r)) if r.is_active => {
-                            (r.webhook_url.clone(), r.webhook_secret.clone())
-                        }
-                        _ => (None, None),
-                    };
+                    let (webhook_url, webhook_secret) =
+                        match env.lookup_domain_addr(&b.domain).await {
+                            Ok(Some(r)) if r.is_active => {
+                                (r.webhook_url.clone(), r.webhook_secret.clone())
+                            }
+                            _ => (None, None),
+                        };
                     if board_system.is_none() {
                         board_system = Some(b.system_id.clone());
                     }
-                    internal.push((
-                        recipient.clone(),
-                        b.domain,
-                        webhook_url,
-                        webhook_secret,
-                    ));
+                    internal.push((recipient.clone(), b.domain, webhook_url, webhook_secret));
                 }
                 Err(e) => {
                     tracing::info!(
@@ -712,7 +707,11 @@ pub async fn send_email_core(
     if let Some(cmd_name) = crate::board::addr::STRANGER_COMMANDS
         .iter()
         .find(|cmd| subject.to_uppercase().starts_with(**cmd))
-        .map(|cmd| cmd.trim_start_matches('[').trim_end_matches(']').to_lowercase())
+        .map(|cmd| {
+            cmd.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_lowercase()
+        })
     {
         if !sender_known_to_internal && !inbound_headers.contains_key("x-mail-stranger") {
             inbound_headers.insert("x-mail-stranger".into(), "true".into());
@@ -766,7 +765,9 @@ pub async fn send_email_core(
         let new_id = Uuid::new_v4().to_string();
         let new_sender = external[0].clone();
         let new_recipient = sender.to_string();
-        let new_recipients_json = serde_json::json!({"to": [new_recipient], "cc": [], "rcpt": [new_recipient]}).to_string();
+        let new_recipients_json =
+            serde_json::json!({"to": [new_recipient], "cc": [], "rcpt": [new_recipient]})
+                .to_string();
 
         info!(
             operation = "pong_intercepted",
@@ -781,7 +782,7 @@ pub async fn send_email_core(
         let pong_endpoints = state
             .factories
             .email
-            .build_endpoints_for_recipients(&[new_recipient.clone()])
+            .build_endpoints_for_recipients(std::slice::from_ref(&new_recipient))
             .await;
         let pong_endpoints_opt = if pong_endpoints == "{}" || pong_endpoints.is_empty() {
             None
@@ -1101,7 +1102,9 @@ pub async fn send_email_core(
                 .map(|s| s.trim().to_lowercase())
                 .collect();
             let dedup_subject = req.subject.as_deref().unwrap_or("");
-            state.send_deduper.mark(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body);
+            state
+                .send_deduper
+                .mark(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body);
         }
         "queued"
     };
@@ -1312,12 +1315,20 @@ mod tests {
     fn fallback_domain_prefers_sender_domain() {
         // ① sender domain preferred over smtp/http hostname
         assert_eq!(
-            resolve_fallback_domain("alice@agent.com", Some("relay.example"), Some("http.example")),
+            resolve_fallback_domain(
+                "alice@agent.com",
+                Some("relay.example"),
+                Some("http.example")
+            ),
             "agent.com"
         );
         // shared-domain persona (2-dot local) also yields its domain
         assert_eq!(
-            resolve_fallback_domain("persona.profile.system@shared.example", Some("relay.example"), None),
+            resolve_fallback_domain(
+                "persona.profile.system@shared.example",
+                Some("relay.example"),
+                None
+            ),
             "shared.example"
         );
     }
@@ -1330,10 +1341,16 @@ mod tests {
             "relay.example"
         );
         // ② missing → ③ http.hostname
-        assert_eq!(resolve_fallback_domain("", None, Some("http.example")), "http.example");
+        assert_eq!(
+            resolve_fallback_domain("", None, Some("http.example")),
+            "http.example"
+        );
         // ③ missing → ④ aimail.local
         assert_eq!(resolve_fallback_domain("", None, None), "aimail.local");
         // sender has @ but empty domain → falls back to hostname chain
-        assert_eq!(resolve_fallback_domain("alice@", Some("relay.example"), None), "relay.example");
+        assert_eq!(
+            resolve_fallback_domain("alice@", Some("relay.example"), None),
+            "relay.example"
+        );
     }
 }

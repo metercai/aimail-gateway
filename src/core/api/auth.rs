@@ -135,7 +135,12 @@ pub fn verify_request_signature(
 /// constant time. A 5-minute freshness window on the (signed) timestamp
 /// bounds replay. Returns 401 if any header is missing, the signature does
 /// not match, or the timestamp is stale.
-pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next, body_cap: u64) -> Response {
+pub async fn auth_layer(
+    env_factory: EnvFactory,
+    req: Request,
+    next: Next,
+    body_cap: u64,
+) -> Response {
     // `X-Api-Identity` is optional: curl drops empty-valued headers on the
     // wire, so a *missing* header must mean the same as an empty one
     // (empty-identity fallback — the signature itself selects the key).
@@ -209,8 +214,14 @@ pub async fn auth_layer(env_factory: EnvFactory, req: Request, next: Next, body_
     };
 
     // 验签走**公共唯一实现**(内部逐候选解封 + 常数时间 HMAC 比对)。
-    let record: Option<ApiKeyRecord> =
-        verify_request_signature(&candidates, &method, &path, &timestamp, &bytes, &provided_sig);
+    let record: Option<ApiKeyRecord> = verify_request_signature(
+        &candidates,
+        &method,
+        &path,
+        &timestamp,
+        &bytes,
+        &provided_sig,
+    );
 
     let Some(record) = record else {
         return unauthorized("Invalid X-Api-Signature");
@@ -255,7 +266,7 @@ pub fn require_scope(
     let has_scope = key
         .scopes
         .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == required));
+        .any(|s| Scope::parse_db(s).is_some_and(|scope| scope == required));
 
     if !has_scope {
         return Err((
@@ -301,13 +312,16 @@ fn check_domain_access(
     if key.email_address == target {
         return Ok(());
     }
-    Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-        error: "forbidden".into(),
-        detail: Some(format!(
-            "{} email '{}' does not match target '{}' — cross-address access denied",
-            role_label, key.email_address, target
-        )),
-    })))
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "forbidden".into(),
+            detail: Some(format!(
+                "{} email '{}' does not match target '{}' — cross-address access denied",
+                role_label, key.email_address, target
+            )),
+        }),
+    ))
 }
 
 /// Verify target email matches API key's email_address.
@@ -338,10 +352,8 @@ pub fn check_whitelist_access(
     }
 
     // ── AgentAdmin: 自己系统内的 agent(授权对象是 agent, 与域名/共享域无关) ──
-    if is_agent_admin_scope(key) {
-        if target_system == Some(key.system_id.as_str()) {
-            return Ok(());
-        }
+    if is_agent_admin_scope(key) && target_system == Some(key.system_id.as_str()) {
+        return Ok(());
     }
 
     // ── Agent: own email only ──
@@ -362,28 +374,28 @@ pub fn check_whitelist_access(
 pub fn is_agent_scope(key: &ApiKeyRecord) -> bool {
     key.scopes
         .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == Scope::Agent))
+        .any(|s| Scope::parse_db(s).is_some_and(|scope| scope == Scope::Agent))
 }
 
 /// Check if the API key has SystemAdmin scope.
 pub fn is_system_admin_scope(key: &ApiKeyRecord) -> bool {
     key.scopes
         .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == Scope::SystemAdmin))
+        .any(|s| Scope::parse_db(s).is_some_and(|scope| scope == Scope::SystemAdmin))
 }
 
 /// Check if the API key has AgentAdmin scope.
 pub fn is_agent_admin_scope(key: &ApiKeyRecord) -> bool {
     key.scopes
         .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == Scope::AgentAdmin))
+        .any(|s| Scope::parse_db(s).is_some_and(|scope| scope == Scope::AgentAdmin))
 }
 
 /// Check if the API key has PlatformAdmin scope.
 pub fn is_platform_admin_scope(key: &ApiKeyRecord) -> bool {
     key.scopes
         .iter()
-        .any(|s| Scope::from_str(s).map_or(false, |scope| scope == Scope::PlatformAdmin))
+        .any(|s| Scope::parse_db(s).is_some_and(|scope| scope == Scope::PlatformAdmin))
 }
 
 /// Check if the API key has any admin scope (PlatformAdmin, SystemAdmin, or AgentAdmin).
@@ -437,8 +449,7 @@ fn api_signature_matches_canonical_vector() {
     );
 
     // Empty-body (GET) case.
-    let sig_empty =
-        compute_api_signature(&key_hash, "GET", "/api/v1/whoami", timestamp, b"");
+    let sig_empty = compute_api_signature(&key_hash, "GET", "/api/v1/whoami", timestamp, b"");
     assert_eq!(
         sig_empty,
         "1aac75c79bea9c60efb3280a384900ce649c346c3da5cc124361fc5070e55c74"
@@ -456,7 +467,13 @@ fn api_signature_is_tamper_sensitive() {
     let base = compute_api_signature(&key_hash, method, path, timestamp, body);
 
     assert_ne!(
-        compute_api_signature(&key_hash, method, path, timestamp, b"{\"direction\":\"from\"}"),
+        compute_api_signature(
+            &key_hash,
+            method,
+            path,
+            timestamp,
+            b"{\"direction\":\"from\"}"
+        ),
         base
     );
     assert_ne!(
@@ -494,7 +511,10 @@ mod tests {
         use super::signature_body_cap;
         use super::MAX_SIGNATURE_BODY_BYTES;
         // Below base cap → base cap + 1 MB margin.
-        assert_eq!(signature_body_cap(0), MAX_SIGNATURE_BODY_BYTES + 1024 * 1024);
+        assert_eq!(
+            signature_body_cap(0),
+            MAX_SIGNATURE_BODY_BYTES + 1024 * 1024
+        );
         assert_eq!(
             signature_body_cap(20 * 1024 * 1024),
             MAX_SIGNATURE_BODY_BYTES + 1024 * 1024

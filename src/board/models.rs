@@ -196,7 +196,7 @@ pub fn derive_board_id(board_email: &str) -> String {
     hex::encode(&hash[..10])
 }
 
-/// Parse a board address like `xk9mp2q.a2a@mail.hermes.io` into (short_id, board_id, domain).
+// Parse a board address like `xk9mp2q.a2a@mail.hermes.io` into (short_id, board_id, domain).
 
 /// Sanitize short_id: filter to [a-zA-Z0-9_-], truncate to 16, pad to 5.
 pub fn sanitize_short_id(raw: &str) -> String {
@@ -292,14 +292,20 @@ mod tests {
     fn test_derive_board_id_different_domain() {
         let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
         let id2 = derive_board_id("pgmig001.a2a@mail.other.io");
-        assert_ne!(id1, id2, "different domains should produce different board_id");
+        assert_ne!(
+            id1, id2,
+            "different domains should produce different board_id"
+        );
     }
 
     #[test]
     fn test_derive_board_id_different_short_id() {
         let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
         let id2 = derive_board_id("costv2.a2a@mail.hermes.io");
-        assert_ne!(id1, id2, "different short_ids should produce different board_id");
+        assert_ne!(
+            id1, id2,
+            "different short_ids should produce different board_id"
+        );
     }
 
     #[test]
@@ -313,13 +319,15 @@ mod tests {
         // Shared-domain layout: {short}.{system_name}.a2a@{shared_domain}
         let a = derive_board_id("proj.xianlin.a2a@aimail.token.tm");
         let b = derive_board_id("proj.wguo.a2a@aimail.token.tm");
-        assert_ne!(a, b, "same short_id on different shared systems must not collide");
+        assert_ne!(
+            a, b,
+            "same short_id on different shared systems must not collide"
+        );
     }
 
     #[test]
     fn test_parse_board_email_shared_layout() {
-        let (short, bid, domain) =
-            parse_board_email("proj.xianlin.a2a@aimail.token.tm").unwrap();
+        let (short, bid, domain) = parse_board_email("proj.xianlin.a2a@aimail.token.tm").unwrap();
         assert_eq!(short, "proj");
         assert_eq!(domain, "aimail.token.tm");
         assert_eq!(bid, derive_board_id("proj.xianlin.a2a@aimail.token.tm"));

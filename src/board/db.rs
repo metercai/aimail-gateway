@@ -33,8 +33,8 @@ pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection
 }
 
 pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
-      conn.execute_batch(
-          "CREATE TABLE IF NOT EXISTS boards (
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS boards (
               id TEXT PRIMARY KEY,
               short_id TEXT UNIQUE NOT NULL,
               board_email TEXT NOT NULL,
@@ -50,16 +50,13 @@ pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
               created_at TEXT,
               completed_at TEXT
           );",
-      )?;
-      // Migration: add system_id for legacy boards (pre-Frozen-state).
-      // The column is nullable — legacy rows keep NULL.
-      let _ = conn.execute(
-          "ALTER TABLE boards ADD COLUMN system_id TEXT",
-          [],
-      );
-      // Remaining schema (unchanged from the original single batch).
-      conn.execute_batch(
-          "CREATE TABLE IF NOT EXISTS board_members (
+    )?;
+    // Migration: add system_id for legacy boards (pre-Frozen-state).
+    // The column is nullable — legacy rows keep NULL.
+    let _ = conn.execute("ALTER TABLE boards ADD COLUMN system_id TEXT", []);
+    // Remaining schema (unchanged from the original single batch).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS board_members (
             email TEXT PRIMARY KEY,
             role TEXT NOT NULL,
             display_name TEXT NOT NULL,
@@ -183,9 +180,9 @@ pub fn list_boards(storage_path: &str) -> AppResult<Vec<BoardRef>> {
     if !dir.is_dir() {
         return Ok(out);
     }
-    for entry in std::fs::read_dir(&dir).map_err(|e| {
-        crate::core::errors::AppError::Internal(format!("list a2a_board dir: {e}"))
-    })? {
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| crate::core::errors::AppError::Internal(format!("list a2a_board dir: {e}")))?
+    {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
@@ -210,14 +207,7 @@ pub fn list_boards(storage_path: &str) -> AppResult<Vec<BoardRef>> {
             .query_row(
                 "SELECT id, board_email, status, system_id FROM boards LIMIT 1",
                 [],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                    ))
-                },
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()
             .map_err(|e| crate::core::errors::AppError::Internal(format!("read board row: {e}")))
@@ -367,10 +357,34 @@ pub const KNOWN_ROLES: &[&str] = &["orchestrator", "verifier", "worker", "owner"
 /// Union of every role's seeded verb set — typos/unknown verbs are rejected
 /// instead of silently creating inert permission rows.
 pub const KNOWN_VERBS: &[&str] = &[
-    "tasks", "create", "assign", "review", "block", "unblock",
-    "cancel", "reassign", "edit", "deadline", "output", "notify", "members",
-    "roles", "config", "arbitrate", "comment", "list", "show", "status",
-    "heartbeat", "verify", "approve", "reject", "complete", "continue", "commit", "reopen",
+    "tasks",
+    "create",
+    "assign",
+    "review",
+    "block",
+    "unblock",
+    "cancel",
+    "reassign",
+    "edit",
+    "deadline",
+    "output",
+    "notify",
+    "members",
+    "roles",
+    "config",
+    "arbitrate",
+    "comment",
+    "list",
+    "show",
+    "status",
+    "heartbeat",
+    "verify",
+    "approve",
+    "reject",
+    "complete",
+    "continue",
+    "commit",
+    "reopen",
 ];
 
 /// Single source of truth for default role→verb permissions (L3 fix:
@@ -567,7 +581,7 @@ pub fn get_role_permissions(
     Ok(map.into_iter().collect())
 }
 
-/// Record heartbeat by updating task updated_at.
+// Record heartbeat by updating task updated_at.
 
 /// Verify a board token. Returns member email on success.
 pub fn verify_member_token(
@@ -959,7 +973,10 @@ mod tests {
         // Original board untouched
         let board = get_board(&conn, &board_id).unwrap();
         assert_eq!(board.short_id, "pgmig001");
-        assert_eq!(board.created_at, "2026-07-01T00:00:00Z", "original board must survive");
+        assert_eq!(
+            board.created_at, "2026-07-01T00:00:00Z",
+            "original board must survive"
+        );
     }
 
     #[test]
@@ -985,7 +1002,11 @@ mod tests {
         add_member(&conn, &make_member(&board_id, "alice@t.io", "orchestrator")).unwrap();
         add_member(&conn, &make_member(&board_id, "bob@t.io", "worker")).unwrap();
         let members = list_members(&conn, &board_id).unwrap();
-        assert_eq!(members.len(), 6, "setup_db creates 6 members; add_member with OR REPLACE doesn't add new ones");
+        assert_eq!(
+            members.len(),
+            6,
+            "setup_db creates 6 members; add_member with OR REPLACE doesn't add new ones"
+        );
     }
 
     #[test]
@@ -1076,7 +1097,10 @@ mod tests {
         t1.completed_at = Some("2026-07-01T00:00:00Z".to_string());
         create_task(&conn, &t1).unwrap();
         let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
-        assert!(issues.is_empty(), "pipeline should be clean when all tasks done");
+        assert!(
+            issues.is_empty(),
+            "pipeline should be clean when all tasks done"
+        );
     }
 
     #[test]
@@ -1085,7 +1109,10 @@ mod tests {
         let t1 = make_task(&board_id, "T1", "alice@t.io"); // status=Ready
         create_task(&conn, &t1).unwrap();
         let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
-        assert!(!issues.is_empty(), "pipeline should report issues when tasks are pending");
+        assert!(
+            !issues.is_empty(),
+            "pipeline should report issues when tasks are pending"
+        );
     }
 
     #[test]

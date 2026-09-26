@@ -13,8 +13,8 @@ use axum::{
 };
 use serde::Deserialize;
 
-use tracing::{info, warn};
 use crate::core::errors::AppError;
+use tracing::{info, warn};
 
 use crate::core::api::activation::activate_address_handler;
 use crate::core::api::auth::{
@@ -27,8 +27,8 @@ use crate::core::api::keys::{
 };
 use crate::core::api::monitor::health_check;
 use crate::core::api::send::send_email;
-use crate::core::api::welcome::send_welcome;
 use crate::core::api::types::*;
+use crate::core::api::welcome::send_welcome;
 use crate::core::api::whoami::whoami;
 use crate::core::storage::{ApiKeyRecord, Database, DomainAddrMetaRecord};
 use crate::core::strategy::RouterHook;
@@ -51,9 +51,8 @@ pub fn create_router(
     // Body cap tracks the configured attachment limit (P2-2): the auth layer
     // buffers the full body for signature hashing, so it must accept at least
     // as much as the upload handler will later accept.
-    let body_cap = crate::core::api::auth::signature_body_cap(
-        state.config.storage.attachment_max_size as u64,
-    );
+    let body_cap =
+        crate::core::api::auth::signature_body_cap(state.config.storage.attachment_max_size as u64);
     let api = Router::new()
         // API Key CRUD
         .route("/api/v1/key/rotate", post(rotate_own_key))
@@ -111,7 +110,10 @@ pub fn create_router(
         .route("/api/v1/contacts/:address", get(get_contact_profile))
         .route("/api/v1/contacts", get(get_contacts_by_name))
         // Admin: whitelist CRUD
-        .route("/api/v1/whitelists", post(whitelist_handler.unwrap_or_else(|| post(create_whitelist))))
+        .route(
+            "/api/v1/whitelists",
+            post(whitelist_handler.unwrap_or_else(|| post(create_whitelist))),
+        )
         .route("/api/v1/whitelists", get(list_whitelists))
         .route("/api/v1/whitelists/check", get(check_whitelist))
         .route("/api/v1/whitelists/:id", put(update_whitelist))
@@ -145,30 +147,30 @@ pub fn create_router(
         // Routes are intentionally outside the api auth_layer.
         Router::new()
             .route(
-            "/api/v1/board/:board_id/task/:task_id",
-            get(crate::board::handlers::handle_get_task),
-        )
-        .route(
-            "/api/v1/board/:board_id/tasks",
-            get(crate::board::handlers::handle_list_tasks),
-        )
-        .route(
-            "/api/v1/board/:board_id/members",
-            get(crate::board::handlers::handle_list_members),
-        )
-        .route(
-            "/api/v1/board/:board_id/status",
-            get(crate::board::handlers::handle_board_status),
-        )
-        .route(
-            "/api/v1/board/:board_id/roles",
-            get(crate::board::handlers::handle_list_roles),
-        )
-        .route(
-            "/api/v1/board/:board_id/task/:task_id/heartbeat",
-            post(crate::board::handlers::handle_post_heartbeat),
-        )
-        .with_state(state.clone())
+                "/api/v1/board/:board_id/task/:task_id",
+                get(crate::board::handlers::handle_get_task),
+            )
+            .route(
+                "/api/v1/board/:board_id/tasks",
+                get(crate::board::handlers::handle_list_tasks),
+            )
+            .route(
+                "/api/v1/board/:board_id/members",
+                get(crate::board::handlers::handle_list_members),
+            )
+            .route(
+                "/api/v1/board/:board_id/status",
+                get(crate::board::handlers::handle_board_status),
+            )
+            .route(
+                "/api/v1/board/:board_id/roles",
+                get(crate::board::handlers::handle_list_roles),
+            )
+            .route(
+                "/api/v1/board/:board_id/task/:task_id/heartbeat",
+                post(crate::board::handlers::handle_post_heartbeat),
+            )
+            .with_state(state.clone())
     }; // end board_routes block
     router.merge(board_routes)
 }
@@ -232,9 +234,7 @@ pub async fn create_system_domain(
     // Only enforce domain match for agent/scoped keys, not for system admins
     let is_admin_like = is_system_admin_scope(&api_key);
     if !is_admin_like {
-        if let Err(e) = require_domain_match(&api_key, &req.domain) {
-            return Err(e);
-        }
+        require_domain_match(&api_key, &req.domain)?;
     }
     // Verify system exists
     match state.factories.email.env_factory.resolve_system(&tid).await {
@@ -368,39 +368,66 @@ async fn register_address(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "invalid_email".to_string(),
-                    detail: Some("shared-domain address must use profile.system_id@domain format".to_string()),
+                    detail: Some(
+                        "shared-domain address must use profile.system_id@domain format"
+                            .to_string(),
+                    ),
                 }),
             ));
         }
         let (profile, sys_id) = local.split_once('.').unwrap();
         if profile.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some("profile segment must not be empty".into()),
-            })));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".into(),
+                    detail: Some("profile segment must not be empty".into()),
+                }),
+            ));
         }
         if let Some(bad) = profile.bytes().find(|&b| !is_atext_no_dot(b)) {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some(format!("illegal char in profile: '{}' (0x{:02X})", bad as char, bad)),
-            })));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".into(),
+                    detail: Some(format!(
+                        "illegal char in profile: '{}' (0x{:02X})",
+                        bad as char, bad
+                    )),
+                }),
+            ));
         }
         // Validate system_id naming rules (same as activate_system.py SYSNAME_RE):
         // lowercase start, 3-8 chars, [a-z0-9_-] only, not "a2a" or ".a2a"
-        if !sys_id.bytes().next().map_or(false, |b| b.is_ascii_lowercase())
-            || sys_id.len() < 3 || sys_id.len() > 8
-            || sys_id.bytes().any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
+        if !sys_id
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_lowercase())
+            || sys_id.len() < 3
+            || sys_id.len() > 8
+            || sys_id
+                .bytes()
+                .any(|b| !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_'))
         {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some("system-id must be 3-8 chars, lowercase letter start, [a-z0-9_-] only".into()),
-            })));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".into(),
+                    detail: Some(
+                        "system-id must be 3-8 chars, lowercase letter start, [a-z0-9_-] only"
+                            .into(),
+                    ),
+                }),
+            ));
         }
         if sys_id == "a2a" || sys_id.contains(".a2a") {
-            return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-                error: "invalid_email".into(),
-                detail: Some("'a2a' is a reserved system-id".into()),
-            })));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_email".into(),
+                    detail: Some("'a2a' is a reserved system-id".into()),
+                }),
+            ));
         }
     } else {
         // ── Non-shared: no dots. ".a2a@" is reserved exclusively for
@@ -430,7 +457,10 @@ async fn register_address(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "invalid_email".to_string(),
-                    detail: Some(format!("illegal character '{}' in local-part (0x{:02X})", bad as char, bad)),
+                    detail: Some(format!(
+                        "illegal character '{}' in local-part (0x{:02X})",
+                        bad as char, bad
+                    )),
                 }),
             ));
         }
@@ -438,9 +468,7 @@ async fn register_address(
 
     // agent_admin scope: must match their domain
     if is_agent_admin_scope(&api_key) {
-        if let Err(e) = require_domain_match(&api_key, bare_domain) {
-            return Err(e);
-        }
+        require_domain_match(&api_key, bare_domain)?;
     }
 
     // Verify system exists
@@ -540,12 +568,20 @@ async fn register_address(
     }
 
     // ── Address admission check ──
-    state.extensions.admission_gate.admit_address(&tid).await.map_err(|e| {
-        (StatusCode::FORBIDDEN, Json(ErrorResponse {
-            error: "quota_exceeded".to_string(),
-            detail: Some(e.to_string()),
-        }))
-    })?;
+    state
+        .extensions
+        .admission_gate
+        .admit_address(&tid)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "quota_exceeded".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+        })?;
 
     // Create system_domains + domain_addr_meta for the agent email
     match state
@@ -705,13 +741,16 @@ async fn list_system_domains(
         require_scope_any(&api_key, &["system"])?;
         // Guard: system-scoped key only sees own system's domains
         if api_key.system_id != tid {
-            return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-                error: "Cross-system access denied".into(),
-                detail: Some(format!(
-                    "Key system '{}' cannot list domains of system '{}'",
-                    api_key.system_id, tid
-                )),
-            })));
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cross-system access denied".into(),
+                    detail: Some(format!(
+                        "Key system '{}' cannot list domains of system '{}'",
+                        api_key.system_id, tid
+                    )),
+                }),
+            ));
         }
     }
     match state
@@ -837,9 +876,7 @@ async fn update_system_domain(
             .rsplit('@')
             .next()
             .unwrap_or(&existing_domain.domain);
-        if let Err(e) = require_domain_match(&api_key, req_domain) {
-            return Err(e);
-        }
+        require_domain_match(&api_key, req_domain)?;
     }
 
     match state
@@ -926,9 +963,7 @@ async fn delete_system_domain(
             .rsplit('@')
             .next()
             .unwrap_or(&existing_domain.domain);
-        if let Err(e) = require_domain_match(&api_key, req_domain) {
-            return Err(e);
-        }
+        require_domain_match(&api_key, req_domain)?;
     }
 
     match state.factories.email.env_factory.delete_domain(&id).await {
@@ -971,34 +1006,48 @@ async fn rename_agent_address(
     require_scope_any(&api_key, &["system"])?;
     // agent_admin may only rename their own address.
     if is_agent_admin_scope(&api_key) && api_key.email_address != req.old_email {
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-            error: "not_owner".into(),
-            detail: Some("agent_admin keys may only rename their own address".into()),
-        })));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "not_owner".into(),
+                detail: Some("agent_admin keys may only rename their own address".into()),
+            }),
+        ));
     }
     let old = req.old_email.trim().to_lowercase();
     let new = req.new_email.trim().to_lowercase();
     if old == new {
-        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-            error: "same_address".into(), detail: None,
-        })));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "same_address".into(),
+                detail: None,
+            }),
+        ));
     }
     // Same bare domain required (rename is a local-part switch).
     let old_domain = old.rsplit('@').next().unwrap_or("");
     let new_domain = new.rsplit('@').next().unwrap_or("");
     if old_domain.is_empty() || new_domain != old_domain {
-        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
-            error: "cross_domain_rename".into(),
-            detail: Some("rename must stay on the same bare domain".into()),
-        })));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "cross_domain_rename".into(),
+                detail: Some("rename must stay on the same bare domain".into()),
+            }),
+        ));
     }
     // Local-part shape mirrors register_address validation.
     let new_local = new.split('@').next().unwrap_or("");
     let dot_count = new_local.bytes().filter(|&b| b == b'.').count();
     let legal = !new_local.is_empty()
         && new_local.len() <= 64
-        && new_local.bytes().all(|b| is_atext_no_dot(b))
-        && if tid.starts_with("shared-") { dot_count == 1 } else { dot_count == 0 };
+        && new_local.bytes().all(is_atext_no_dot)
+        && if tid.starts_with("shared-") {
+            dot_count == 1
+        } else {
+            dot_count == 0
+        };
     if !legal {
         return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse {
             error: "invalid_email".into(),
@@ -1008,41 +1057,62 @@ async fn rename_agent_address(
     // `new` must not already be registered anywhere.
     let ef = &state.factories.email.env_factory;
     if ef.lookup_domain_addr(&new).await.ok().flatten().is_some()
-        || ef.db.get_domain_addr_meta(&new).await.ok().flatten().is_some()
+        || ef
+            .db
+            .get_domain_addr_meta(&new)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     {
-        return Err((StatusCode::CONFLICT, Json(ErrorResponse {
-            error: "already_exists".into(),
-            detail: Some(format!("'{new}' is already a registered address")),
-        })));
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "already_exists".into(),
+                detail: Some(format!("'{new}' is already a registered address")),
+            }),
+        ));
     }
     // `old` must exist and belong to this system.
     let rec = match ef.db.get_system_domain_by_name(&old).await {
         Ok(Some(r)) => r,
         Ok(None) => {
-            return Err((StatusCode::NOT_FOUND, Json(ErrorResponse {
-                error: "agent_not_found".into(),
-                detail: Some(format!("No registered address '{old}'")),
-            })));
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "agent_not_found".into(),
+                    detail: Some(format!("No registered address '{old}'")),
+                }),
+            ));
         }
         Err(e) => {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-                error: "Database error".into(),
-                detail: Some(e.to_string()),
-            })));
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".into(),
+                    detail: Some(e.to_string()),
+                }),
+            ));
         }
     };
     if rec.system_id != tid {
-        return Err((StatusCode::FORBIDDEN, Json(ErrorResponse {
-            error: "forbidden".into(),
-            detail: Some("Address does not belong to this system".into()),
-        })));
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "forbidden".into(),
+                detail: Some("Address does not belong to this system".into()),
+            }),
+        ));
     }
 
     if let Err(e) = ef.db.rename_agent_address_refs(&old, &new).await {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse {
-            error: "Database error".into(),
-            detail: Some(e.to_string()),
-        })));
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".into(),
+                detail: Some(e.to_string()),
+            }),
+        ));
     }
     info!(operation = "agent_address_renamed", system_id = %tid, old = %old, new = %new, "Agent address renamed with resource inheritance");
     Ok(Json(serde_json::json!({
@@ -1089,19 +1159,17 @@ async fn update_agent_meta(
     })))?;
 
     // AA: must be the manager of this agent
-    if is_agent_admin_scope(&api_key) {
-        if existing.manager_address != api_key.email_address {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "Not the manager of this agent".to_string(),
-                    detail: Some(format!(
-                        "You ({}) are not the manager of '{}'",
-                        api_key.email_address, email
-                    )),
-                }),
-            ));
-        }
+    if is_agent_admin_scope(&api_key) && existing.manager_address != api_key.email_address {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Not the manager of this agent".to_string(),
+                detail: Some(format!(
+                    "You ({}) are not the manager of '{}'",
+                    api_key.email_address, email
+                )),
+            }),
+        ));
     }
 
     // Merge: keep existing values where request field is None
@@ -1241,7 +1309,17 @@ pub async fn create_whitelist(
                 })?
                 .map(|k| k.id)
         } else {
-            check_whitelist_access(&api_key, &req.domain_addr, state.factories.email.env_factory.owning_system_of(&req.domain_addr).await.as_deref())?;
+            check_whitelist_access(
+                &api_key,
+                &req.domain_addr,
+                state
+                    .factories
+                    .email
+                    .env_factory
+                    .owning_system_of(&req.domain_addr)
+                    .await
+                    .as_deref(),
+            )?;
             Some(api_key.id)
         };
         // Whitelist per-key limit enforced by advanced edition
@@ -1279,7 +1357,17 @@ pub async fn create_whitelist(
         }
     } else if is_system_admin_scope(&api_key) {
         // SystemAdmin: can create DOMAIN-level whitelist entries only
-        check_whitelist_access(&api_key, &req.domain_addr, state.factories.email.env_factory.owning_system_of(&req.domain_addr).await.as_deref())?;
+        check_whitelist_access(
+            &api_key,
+            &req.domain_addr,
+            state
+                .factories
+                .email
+                .env_factory
+                .owning_system_of(&req.domain_addr)
+                .await
+                .as_deref(),
+        )?;
         match state
             .factories
             .email
@@ -1311,7 +1399,7 @@ pub async fn create_whitelist(
         }
     } else if is_platform_admin_scope(&api_key) {
         // PlatformAdmin: only allowed to toggle is_active via update, not create
-        return Err((
+        Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "Insufficient scope".to_string(),
@@ -1319,7 +1407,7 @@ pub async fn create_whitelist(
                     "PlatformAdmin can only view and toggle whitelist entries".to_string(),
                 ),
             }),
-        ));
+        ))
     } else {
         Err((
             StatusCode::FORBIDDEN,
@@ -1371,7 +1459,10 @@ async fn list_whitelists(
                 }),
             )),
         }
-    } else if is_agent_admin_scope(&api_key) && !is_system_admin_scope(&api_key) && !is_platform_admin_scope(&api_key) {
+    } else if is_agent_admin_scope(&api_key)
+        && !is_system_admin_scope(&api_key)
+        && !is_platform_admin_scope(&api_key)
+    {
         // AA: return category='agent' entries for agents they manage
         // Fetch all managed agent emails from domain_addr_meta, then filter whitelist
         let all = state
@@ -1471,9 +1562,7 @@ async fn check_whitelist(
     }
     // SystemAdmin: domain_addr must match their domain
     if is_system_admin {
-        if let Err(e) = require_domain_match(&api_key, &query.domain_addr) {
-            return Err(e);
-        }
+        require_domain_match(&api_key, &query.domain_addr)?;
     }
     // AgentAdmin: verify manager binding via domain_addr_meta
     if is_agent_admin {
@@ -1626,7 +1715,17 @@ async fn update_whitelist(
                         ));
                     }
                 }
-                check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?;
+                check_whitelist_access(
+                    &api_key,
+                    &entry.domain_addr,
+                    state
+                        .factories
+                        .email
+                        .env_factory
+                        .owning_system_of(&entry.domain_addr)
+                        .await
+                        .as_deref(),
+                )?;
             }
             Ok(None) => {
                 return Err((
@@ -1795,7 +1894,17 @@ async fn delete_whitelist_by_params(
         }
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
-        check_whitelist_access(&api_key, &query.domain_addr, state.factories.email.env_factory.owning_system_of(&query.domain_addr).await.as_deref())?;
+        check_whitelist_access(
+            &api_key,
+            &query.domain_addr,
+            state
+                .factories
+                .email
+                .env_factory
+                .owning_system_of(&query.domain_addr)
+                .await
+                .as_deref(),
+        )?;
         let entries = state
             .factories
             .email
@@ -1980,7 +2089,17 @@ async fn update_whitelist_by_params(
         }
     } else if is_system_admin_scope(&api_key) || is_platform_admin_scope(&api_key) {
         // Admin: unrestricted access
-        check_whitelist_access(&api_key, &query.domain_addr, state.factories.email.env_factory.owning_system_of(&query.domain_addr).await.as_deref())?;
+        check_whitelist_access(
+            &api_key,
+            &query.domain_addr,
+            state
+                .factories
+                .email
+                .env_factory
+                .owning_system_of(&query.domain_addr)
+                .await
+                .as_deref(),
+        )?;
         let entries = state
             .factories
             .email
@@ -2127,7 +2246,17 @@ async fn delete_whitelist(
                         ));
                     }
                 }
-                check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?;
+                check_whitelist_access(
+                    &api_key,
+                    &entry.domain_addr,
+                    state
+                        .factories
+                        .email
+                        .env_factory
+                        .owning_system_of(&entry.domain_addr)
+                        .await
+                        .as_deref(),
+                )?;
             }
             Ok(None) => {
                 return Err((
@@ -2166,7 +2295,17 @@ async fn delete_whitelist(
                 )
             })?;
         match existing {
-            Some(ref entry) => check_whitelist_access(&api_key, &entry.domain_addr, state.factories.email.env_factory.owning_system_of(&entry.domain_addr).await.as_deref())?,
+            Some(ref entry) => check_whitelist_access(
+                &api_key,
+                &entry.domain_addr,
+                state
+                    .factories
+                    .email
+                    .env_factory
+                    .owning_system_of(&entry.domain_addr)
+                    .await
+                    .as_deref(),
+            )?,
             None => {
                 return Err((
                     StatusCode::NOT_FOUND,
@@ -2453,12 +2592,10 @@ async fn get_contact_profile(
     // registered contact. Return it without a DB lookup so agent contact
     // checks never treat auto mails as unknown senders.
     if address.trim().to_lowercase() == state.config.system_sender().to_lowercase() {
-        return Ok(Json(
-            serde_json::json!({
-                "address": address,
-                "profile": {"type": "system", "auto_mail": true},
-            }),
-        ));
+        return Ok(Json(serde_json::json!({
+            "address": address,
+            "profile": {"type": "system", "auto_mail": true},
+        })));
     }
     match db
         .agent_state_get(agent_addr, &format!("profile:{}", address))
@@ -2540,14 +2677,14 @@ async fn get_contacts_by_name(
         }
 
         // Self profile: the approved persona is the single source of truth.
-        let my_profile: Option<serde_json::Value> =
-            match db.get_domain_addr_meta(agent_addr).await {
-                Ok(Some(meta)) if !meta.agent_persona.is_empty() => Some(serde_json::json!({
-                    "address": agent_addr,
-                    "profile": meta.agent_persona,
-                })),
-                _ => None,
-            };
+        let my_profile: Option<serde_json::Value> = match db.get_domain_addr_meta(agent_addr).await
+        {
+            Ok(Some(meta)) if !meta.agent_persona.is_empty() => Some(serde_json::json!({
+                "address": agent_addr,
+                "profile": meta.agent_persona,
+            })),
+            _ => None,
+        };
 
         let mut sender_profile = serde_json::Map::new();
         let mut recipients_profile = serde_json::Map::new();
@@ -2557,7 +2694,8 @@ async fn get_contacts_by_name(
                 if i == 0 {
                     sender_profile.insert(addr.clone(), serde_json::Value::String(profile.clone()));
                 } else {
-                    recipients_profile.insert(addr.clone(), serde_json::Value::String(profile.clone()));
+                    recipients_profile
+                        .insert(addr.clone(), serde_json::Value::String(profile.clone()));
                 }
                 results.push(serde_json::json!({
                     "address": addr,
@@ -2852,11 +2990,11 @@ async fn ack_pending_deliveries(
 
 // ── Probe Webhook ───────────────────────────────────────────────
 
-/// Probe network reachability to a host:port from the relay.
-///
-/// Used by integrate.sh to determine whether to deploy the bridge in
-/// push mode (relay can reach the agent's machine) or pull mode (relay
-/// cannot, bridge must poll).
+// Probe network reachability to a host:port from the relay.
+//
+// Used by integrate.sh to determine whether to deploy the bridge in
+// push mode (relay can reach the agent's machine) or pull mode (relay
+// cannot, bridge must poll).
 
 // ── Public config ─────────────────────────────────────────────────
 

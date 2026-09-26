@@ -221,7 +221,7 @@ pub fn board_sweeper_flow(config: &Config) {
         .unwrap_or(86400u64);
     if now - last_archive >= archive_interval {
         LAST_ARCHIVE.store(now, std::sync::atomic::Ordering::Relaxed);
-        let storage = config.storage.path.to_str().unwrap_or( "").to_string();
+        let storage = config.storage.path.to_str().unwrap_or("").to_string();
         let threshold = config
             .board
             .archive_retention_days

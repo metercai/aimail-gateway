@@ -138,7 +138,8 @@ impl Server {
             http_state.trigger_tx.clone(),
             http_state.metrics.clone(),
         );
-        let smtp_handle = aimail_base::core::server::spawn_smtp(&http_state, smtp_handler, cancel.clone())?;
+        let smtp_handle =
+            aimail_base::core::server::spawn_smtp(&http_state, smtp_handler, cancel.clone())?;
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();

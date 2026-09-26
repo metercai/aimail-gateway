@@ -55,7 +55,8 @@ pub fn is_sealed(stored: &str) -> bool {
 /// 而无密钥者无法预测 nonce(GCM 的 (key, nonce) 组合不会重复使用 ⇒ 安全)。
 /// 明文均为 256 位随机哈希(sha256) ⇒ 不存在"低熵明文被离线暴破"的面。
 fn derive_nonce(seal_key: &[u8; 32], plaintext: &str) -> [u8; NONCE_LEN] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(seal_key).expect("HMAC accepts any key len");
+    let mut mac =
+        <Hmac<Sha256> as Mac>::new_from_slice(seal_key).expect("HMAC accepts any key len");
     mac.update(plaintext.as_bytes());
     let out = mac.finalize().into_bytes();
     let mut nonce = [0u8; NONCE_LEN];
@@ -177,7 +178,7 @@ mod tests {
         let plain = "8f14e45fceea167a5a36dedd4bea2543"; // 形如 sha256 hex
         let sealed = seal(&key, plain).unwrap();
         assert!(is_sealed(&sealed));
-        assert_ne!(sealed.contains(plain), true, "密文不得含明文");
+        assert!(!sealed.contains(plain), "密文不得含明文");
         assert_eq!(open(&key, &sealed).unwrap(), plain);
     }
 

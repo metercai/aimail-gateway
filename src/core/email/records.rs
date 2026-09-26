@@ -178,7 +178,7 @@ impl EmailRecord {
                     .map(|s| s.raw);
                 (processed.body, sig)
             }
-            Some(cached_sig) if cached_sig.is_empty() => (self.body.clone(), None),
+            Some("") => (self.body.clone(), None),
             Some(cached_sig) => (self.body.clone(), Some(cached_sig.to_string())),
         };
 

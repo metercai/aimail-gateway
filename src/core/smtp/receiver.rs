@@ -114,9 +114,8 @@ impl ConnectionHandler {
         original_filename: &str,
         uuid: &str,
     ) -> AppResult<String> {
-        let extension = crate::core::email::factory::AttachmentFactory::extension_for(
-            original_filename,
-        );
+        let extension =
+            crate::core::email::factory::AttachmentFactory::extension_for(original_filename);
         let full = self.attachment_factory.file_path(sender, uuid, extension);
         let relative = full.to_string_lossy().to_string();
 
@@ -265,7 +264,7 @@ impl ConnectionHandler {
         &self.message_data
     }
 
-   /// Resolved system id(s) for the current recipients (None before RCPT).
+    /// Resolved system id(s) for the current recipients (None before RCPT).
     pub fn pending_system_id(&self) -> Option<&str> {
         self.system_id.as_deref()
     }
@@ -478,9 +477,11 @@ impl ConnectionHandler {
         // Inbound whitelist — board-member bypass is handled inside
         // check_whitelisted (board_whitelists lookup on either side).
         if let Some(ref sender) = self.sender {
-            let allowed = self.block_on(self.email_factory.env_factory.check_whitelisted(
-                to, sender, "from",
-            ));
+            let allowed = self.block_on(
+                self.email_factory
+                    .env_factory
+                    .check_whitelisted(to, sender, "from"),
+            );
             match allowed {
                 Ok(true) => {
                     self.sender_whitelisted = true;
@@ -501,7 +502,6 @@ impl ConnectionHandler {
         self.recipients.push(to.to_lowercase());
         ok()
     }
-
 }
 
 // ── Shared DATA-phase business body ─────────────────────────────────────
@@ -777,52 +777,50 @@ impl ConnectionHandler {
             // before this — adds the authenticity gate.)
             if crate::board::models::parse_board_email(&sender).is_some() {
                 let raw_text = String::from_utf8_lossy(&raw_data);
-            let header_val = raw_text.lines().find_map(|l| {
-                l.trim()
-                    .strip_prefix("X-Board-Members:")
-                    .map(|v| v.trim().to_string())
-            });
-            if let Some(hval) = header_val {
-                let parts: Vec<&str> = hval.splitn(2, ';').collect();
-                if parts.len() == 2 && parts[0].trim().eq_ignore_ascii_case(&sender) {
-                    let members: Vec<String> = parts[1]
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        // Accept only plausible email addresses — prevents
-                        // junk members / whitelist bloat from a malformed
-                        // header.
-                        .filter(|s| s.contains('@') && !s.starts_with('@') && !s.ends_with('@'))
-                        .collect();
-                    if !members.is_empty() {
-                        match self
-                            .block_on(
+                let header_val = raw_text.lines().find_map(|l| {
+                    l.trim()
+                        .strip_prefix("X-Board-Members:")
+                        .map(|v| v.trim().to_string())
+                });
+                if let Some(hval) = header_val {
+                    let parts: Vec<&str> = hval.splitn(2, ';').collect();
+                    if parts.len() == 2 && parts[0].trim().eq_ignore_ascii_case(&sender) {
+                        let members: Vec<String> = parts[1]
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            // Accept only plausible email addresses — prevents
+                            // junk members / whitelist bloat from a malformed
+                            // header.
+                            .filter(|s| s.contains('@') && !s.starts_with('@') && !s.ends_with('@'))
+                            .collect();
+                        if !members.is_empty() {
+                            match self.block_on(
                                 self.email_factory
                                     .env_factory
                                     .db
                                     .replace_board_members(parts[0].trim(), &members),
                             ) {
-
-                            Ok(_) => tracing::info!(
-                                operation = "board_group_whitelist",
-                                board_email = parts[0].trim(),
-                                members = members.len(),
-                                "board group whitelist learnt from inbound notification"
-                            ),
-                            Err(e) => tracing::warn!(
-                                operation = "board_group_whitelist",
-                                error = %e,
-                                "failed to learn board group whitelist"
-                            ),
+                                Ok(_) => tracing::info!(
+                                    operation = "board_group_whitelist",
+                                    board_email = parts[0].trim(),
+                                    members = members.len(),
+                                    "board group whitelist learnt from inbound notification"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    operation = "board_group_whitelist",
+                                    error = %e,
+                                    "failed to learn board group whitelist"
+                                ),
+                            }
                         }
+                    } else {
+                        tracing::warn!(
+                            operation = "board_group_whitelist",
+                            "member notification rejected: From != header board address"
+                        );
                     }
-                } else {
-                    tracing::warn!(
-                        operation = "board_group_whitelist",
-                        "member notification rejected: From != header board address"
-                    );
                 }
-            }
             } // end: parse_board_email(sender).is_some()
         }
 
@@ -965,7 +963,7 @@ impl ConnectionHandler {
         for ((filename, content_type, data, _content_id), attachment_uuid) in
             attachments.iter().zip(attachment_uuids.iter())
         {
-            let _ = match self.save_attachment(&data, &sender, &filename, attachment_uuid) {
+            let _ = match self.save_attachment(data, &sender, filename, attachment_uuid) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(operation="attachment_save_failed", attachment_id = %attachment_uuid, filename = %filename, error = %e, "Failed to save attachment file");
@@ -980,10 +978,10 @@ impl ConnectionHandler {
             }));
             if let Err(e) = self.block_on(self.attachment_factory.create_meta(
                 attachment_uuid,
-                &filename,
-                Some(&content_type),
+                filename,
+                Some(content_type),
                 &sender,
-                Some(&[mail_id.clone()]),
+                Some(std::slice::from_ref(&mail_id)),
             )) {
                 tracing::warn!(operation="attachment_meta_failed", attachment_id = %attachment_uuid, error = %e, "Failed to create attachment metadata");
             }
@@ -1378,7 +1376,6 @@ fn write_response_blocking(
     writer.write_all(&buf)?;
     writer.flush()
 }
-
 
 #[cfg(test)]
 mod bounce_dsn_format_tests {

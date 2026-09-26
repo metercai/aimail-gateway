@@ -104,20 +104,41 @@ mod tests {
     // P2-3: default port must follow the scheme, explicit port always wins.
     #[test]
     fn parse_host_port_scheme_defaults() {
-        assert_eq!(parse_host_port("mail.example.com", "smtps"), ("mail.example.com", 465));
-        assert_eq!(parse_host_port("mail.example.com", "starttls"), ("mail.example.com", 587));
-        assert_eq!(parse_host_port("mail.example.com", "plain"), ("mail.example.com", 25));
+        assert_eq!(
+            parse_host_port("mail.example.com", "smtps"),
+            ("mail.example.com", 465)
+        );
+        assert_eq!(
+            parse_host_port("mail.example.com", "starttls"),
+            ("mail.example.com", 587)
+        );
+        assert_eq!(
+            parse_host_port("mail.example.com", "plain"),
+            ("mail.example.com", 25)
+        );
     }
 
     #[test]
     fn parse_host_port_explicit_port_wins() {
-        assert_eq!(parse_host_port("mail.example.com:587", "smtps"), ("mail.example.com", 587));
-        assert_eq!(parse_host_port("mail.example.com:2525", "plain"), ("mail.example.com", 2525));
+        assert_eq!(
+            parse_host_port("mail.example.com:587", "smtps"),
+            ("mail.example.com", 587)
+        );
+        assert_eq!(
+            parse_host_port("mail.example.com:2525", "plain"),
+            ("mail.example.com", 2525)
+        );
     }
 
     #[test]
     fn parse_host_port_bad_port_falls_back_to_scheme_default() {
-        assert_eq!(parse_host_port("mail.example.com:bad", "smtps"), ("mail.example.com", 465));
-        assert_eq!(parse_host_port("mail.example.com:bad", "plain"), ("mail.example.com", 25));
+        assert_eq!(
+            parse_host_port("mail.example.com:bad", "smtps"),
+            ("mail.example.com", 465)
+        );
+        assert_eq!(
+            parse_host_port("mail.example.com:bad", "plain"),
+            ("mail.example.com", 25)
+        );
     }
 }

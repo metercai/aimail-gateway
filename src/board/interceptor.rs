@@ -5,8 +5,8 @@ use crate::board::db;
 use crate::board::models::{parse_board_email, A2aCommand, Board, BoardStatus, Member};
 use crate::board::notify::{Notifier, ReplyPolicy};
 use crate::core::email::factory::AttachmentFactory;
-use crate::core::strategy::AdmissionGate;
 use crate::core::email::factory::EmailFactory;
+use crate::core::strategy::AdmissionGate;
 use crate::core::strategy::InboundInterceptor;
 use async_trait::async_trait;
 use serde_json::Value;
@@ -86,7 +86,11 @@ impl InboundInterceptor for A2aInterceptor {
         // board address; fall back to the first To entry (non-board flow).
         let to_addr = to_arr
             .iter()
-            .find(|v| v.as_str().map(crate::board::addr::is_board_address).unwrap_or(false))
+            .find(|v| {
+                v.as_str()
+                    .map(crate::board::addr::is_board_address)
+                    .unwrap_or(false)
+            })
             .and_then(|v| v.as_str())
             .or_else(|| to_arr.first().and_then(|v| v.as_str()))
             .unwrap_or("")
@@ -279,10 +283,11 @@ impl InboundInterceptor for A2aInterceptor {
                     // Register the new board address for the RCPT
                     // substantive check — the only creation path in the
                     // whole codebase.
-                    self.email_factory
-                        .env_factory
-                        .board_registry()
-                        .insert(&board_email, &board_id, board.system_id.clone());
+                    self.email_factory.env_factory.board_registry().insert(
+                        &board_email,
+                        &board_id,
+                        board.system_id.clone(),
+                    );
                 }
 
                 // Register members and collect invite info.
@@ -410,7 +415,9 @@ impl InboundInterceptor for A2aInterceptor {
                         })
                         .unwrap_or_default();
 
-                    let cn = description.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}'));
+                    let cn = description
+                        .chars()
+                        .any(|c| matches!(c, '\u{4e00}'..='\u{9fff}'));
                     let (proj_l, members_l) = if cn {
                         ("项目", "团队成员")
                     } else {
@@ -503,7 +510,12 @@ impl InboundInterceptor for A2aInterceptor {
                     .join(",");
                 for (email, token) in &member_invites {
                     invite_notifier.notify_invite(
-                        email, token, &board_id, &board_email, &short_id, &new_members_csv,
+                        email,
+                        token,
+                        &board_id,
+                        &board_email,
+                        &short_id,
+                        &new_members_csv,
                     );
                 }
 
@@ -764,7 +776,11 @@ impl InboundInterceptor for A2aInterceptor {
                                         if ver.is_empty() {
                                             tracing::warn!(
                                                 "[a2a_board] [Confirm] {} missing version",
-                                                if kind == ConfirmType::Plan { "plan" } else { "criteria" }
+                                                if kind == ConfirmType::Plan {
+                                                    "plan"
+                                                } else {
+                                                    "criteria"
+                                                }
                                             );
                                         } else {
                                             let now = chrono::Utc::now().to_rfc3339();
@@ -774,10 +790,17 @@ impl InboundInterceptor for A2aInterceptor {
                                             } else {
                                                 ("UPDATE boards SET criteria_version = ?1, criteria_text = ?2, criteria_confirmed_at = ?3 WHERE id = ?4", "criteria")
                                             };
-                                            bconn.execute(sql, rusqlite::params![ver, body, now, bid]).ok();
+                                            bconn
+                                                .execute(
+                                                    sql,
+                                                    rusqlite::params![ver, body, now, bid],
+                                                )
+                                                .ok();
                                             tracing::info!(
                                                 "[a2a_board] {} approved: board={} version={}",
-                                                what, bid, ver
+                                                what,
+                                                bid,
+                                                ver
                                             );
                                         }
                                     }
@@ -943,14 +966,26 @@ mod tests {
             Some(&addr(&["orch@example.com"])),
             Some(&addr(&["other@example.com"]))
         ));
-        assert!(!verifier_addressed(Some(&m), Some(&addr(&["orch@example.com"])), None));
+        assert!(!verifier_addressed(
+            Some(&m),
+            Some(&addr(&["orch@example.com"])),
+            None
+        ));
     }
 
     #[test]
     fn verifier_no_members_fails() {
         // No verifier declared — must not pass even if TO/CC look valid.
-        assert!(!verifier_addressed(None, Some(&addr(&["orch@example.com"])), None));
-        assert!(!verifier_addressed(Some(&Vec::new()), Some(&addr(&["x@y.z"])), None));
+        assert!(!verifier_addressed(
+            None,
+            Some(&addr(&["orch@example.com"])),
+            None
+        ));
+        assert!(!verifier_addressed(
+            Some(&Vec::new()),
+            Some(&addr(&["x@y.z"])),
+            None
+        ));
     }
 
     #[test]
@@ -1023,7 +1058,9 @@ pub fn verifier_addressed(
             }
         }
     }
-    verifier_emails.iter().any(|ve| addressed.contains(ve.as_str()))
+    verifier_emails
+        .iter()
+        .any(|ve| addressed.contains(ve.as_str()))
 }
 
 /// Register the A2A interceptor on the given email factory.
@@ -1065,6 +1102,7 @@ pub enum ConfirmType {
 /// Accepts the documented forms:
 ///   - `[confirm] plan v2` / `[confirm] criteria v1` (board from TO address)
 ///   - `[confirm] output web-redesign`
+///
 /// and the legacy 3-segment form `[confirm] {board} {type} v{N}`.
 ///
 /// Returns `None` when no confirm type token is present.

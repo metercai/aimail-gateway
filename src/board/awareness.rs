@@ -35,8 +35,15 @@ pub fn board_status(conn: &Connection, board_id: &str) -> AppResult<Value> {
     }
     // All task statuses, matching TaskStatus's serialized names (lowercase).
     let keys = [
-        "triage", "todo", "ready", "running", "reviewing", "done",
-        "blocked", "cancelled", "archived",
+        "triage",
+        "todo",
+        "ready",
+        "running",
+        "reviewing",
+        "done",
+        "blocked",
+        "cancelled",
+        "archived",
     ];
     let mut pipeline = serde_json::Map::new();
     for k in &keys {
@@ -92,7 +99,11 @@ pub fn get_task(conn: &Connection, task_id: &str) -> AppResult<(Task, Vec<Value>
 }
 
 /// List board members (full records), optionally filtered by email.
-pub fn list_members(conn: &Connection, board_id: &str, email: Option<&str>) -> AppResult<Vec<crate::board::models::Member>> {
+pub fn list_members(
+    conn: &Connection,
+    board_id: &str,
+    email: Option<&str>,
+) -> AppResult<Vec<crate::board::models::Member>> {
     let members = db::list_members(conn, board_id)?;
     Ok(if let Some(e) = email {
         members.into_iter().filter(|m| m.email == e).collect()
@@ -282,7 +293,10 @@ mod tests {
         let (conn, board_id) = setup();
         let tid = make_task(&conn, &board_id, "T1", "a@t.io", TaskStatus::Ready);
         heartbeat(&conn, &tid, "a@t.io").unwrap();
-        assert_eq!(db::get_task(&conn, &tid).unwrap().status, TaskStatus::Running);
+        assert_eq!(
+            db::get_task(&conn, &tid).unwrap().status,
+            TaskStatus::Running
+        );
     }
 
     #[test]

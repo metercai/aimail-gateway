@@ -11,15 +11,16 @@ use serde_json::json;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::core::api::monitor::Metrics;
 use crate::core::config::Config;
 use crate::core::email::factory::EmailFactory;
-use crate::core::api::monitor::Metrics;
 use tokio::sync::mpsc::Sender;
 
 /// 入队一封**单收件人、无附件**的外发邮件, 并在有 trigger 句柄时唤醒调度器。
 ///
 /// 返回 `email_id`; 失败返回 `Err(原因)`。确认信失败**不应**影响指令本身的执行结果,
 /// 所以调用方按 warn 处理即可。
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub async fn enqueue_outbound_simple(
     cfg: &Config,
     email_factory: &EmailFactory,

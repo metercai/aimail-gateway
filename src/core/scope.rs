@@ -37,7 +37,11 @@ pub enum Scope {
 impl Scope {
     /// Parse a scope from its string representation (from the DB).
     /// Accepts legacy strings for backward compatibility.
-    pub fn from_str(s: &str) -> Option<Self> {
+    ///
+    /// Deliberately an inherent `Option`-returning helper rather than
+    /// `std::str::FromStr`: unknown input is an ordinary "not a scope" case
+    /// here, not an error to propagate.
+    pub fn parse_db(s: &str) -> Option<Self> {
         match s {
             "platform" | "admin" | "system_admin" => Some(Scope::PlatformAdmin),
             "system" | "tenant_admin" => Some(Scope::SystemAdmin),
@@ -83,7 +87,8 @@ pub enum KeyCategory {
 }
 
 impl KeyCategory {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// See `Scope::parse_db` for why this is not `std::str::FromStr`.
+    pub fn parse_db(s: &str) -> Option<Self> {
         match s {
             "platform" => Some(KeyCategory::Platform),
             "system" => Some(KeyCategory::System),
@@ -113,7 +118,8 @@ pub enum WhitelistCategory {
 }
 
 impl WhitelistCategory {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// See `Scope::parse_db` for why this is not `std::str::FromStr`.
+    pub fn parse_db(s: &str) -> Option<Self> {
         match s {
             "system" => Some(WhitelistCategory::System),
             "agent" => Some(WhitelistCategory::Agent),

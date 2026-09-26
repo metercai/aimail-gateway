@@ -53,6 +53,7 @@ async fn finalize_after_delivery(
 /// Exhaust an email: record final send_count, insert auto-reply/notification,
 /// record metrics, then complete + cleanup. Shared by handle_overlimit,
 /// periodic_inspection and immediate_forward (AUDIT-1 P2-8 de-duplication).
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub(crate) async fn exhaust_email(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
@@ -69,7 +70,8 @@ pub(crate) async fn exhaust_email(
     if record.direction == "inbound" {
         insert_exhaustion_auto_reply(config, email_factory, record, metrics, trigger).await;
     } else if record.direction == "outbound" {
-        insert_exhaustion_notification(email_factory, attachment_factory, config, record, trigger).await;
+        insert_exhaustion_notification(email_factory, attachment_factory, config, record, trigger)
+            .await;
     }
     match delivery_type {
         "webhook" => metrics.inc_webhook_exhausted(),
@@ -123,6 +125,7 @@ pub(crate) async fn handle_overlimit(
 // ── Flow 2: Periodic retry inspection ──────────────────────────────
 
 /// Process a retry-due email: attempt delivery, reschedule with backoff or promote to overlimit.
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub(crate) async fn periodic_inspection(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
@@ -149,14 +152,23 @@ pub(crate) async fn periodic_inspection(
     // Attempt delivery
     // 2026-09-23: 同 immediate_forward —— 确认信需在重试路径也保持生效。
     let last_error = match delivery_type {
-        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await,
+        "webhook" => {
+            deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await
+        }
         _ => deliver_smtp(smtp_relay, record, metrics, config, email_factory).await,
     };
 
     // Success → mark completed or delivered
     if last_error.is_none() {
         info!(email_id = %record.id, "Retry delivery succeeded, marking completed");
-        finalize_after_delivery(email_factory, attachment_factory, config, record, delivery_type).await;
+        finalize_after_delivery(
+            email_factory,
+            attachment_factory,
+            config,
+            record,
+            delivery_type,
+        )
+        .await;
         return;
     }
 
@@ -194,7 +206,7 @@ pub(crate) async fn periodic_inspection(
 
     let next_retry = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::seconds(backoff_secs as i64))
-        .unwrap_or_else(|| chrono::Utc::now())
+        .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     if let Err(e) = email_factory
@@ -205,7 +217,7 @@ pub(crate) async fn periodic_inspection(
         error!(email_id = %record.id, %e, "Failed to schedule retry, applying fallback backoff");
         let fallback_next = chrono::Utc::now()
             .checked_add_signed(chrono::Duration::seconds(60))
-            .unwrap_or_else(|| chrono::Utc::now())
+            .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         if let Err(e2) = email_factory
             .ready_retry(&record.id, record.send_count, &fallback_next)
@@ -226,6 +238,7 @@ pub(crate) async fn periodic_inspection(
 // ── Flow 3: Immediate forward ──────────────────────────────────────
 
 /// Deliver a new email immediately. On success → completed/delivered. On failure → enter retry cycle.
+#[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub(crate) async fn immediate_forward(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
@@ -248,13 +261,22 @@ pub(crate) async fn immediate_forward(
     // 2026-09-23: trigger 句柄透传给 webhook 投递 ⇒ manager 指令确认信在
     // 调度路径(首次投递)真正生效。此前传 None ⇒ 确认信从未入队(S4 e2e 实证)。
     let last_error = match delivery_type {
-        "webhook" => deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await,
+        "webhook" => {
+            deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await
+        }
         _ => deliver_smtp(smtp_relay, record, metrics, config, email_factory).await,
     };
 
     if last_error.is_none() {
         debug!(email_id = %record.id, "Immediate forward succeeded, marking completed");
-        finalize_after_delivery(email_factory, attachment_factory, config, record, delivery_type).await;
+        finalize_after_delivery(
+            email_factory,
+            attachment_factory,
+            config,
+            record,
+            delivery_type,
+        )
+        .await;
         return;
     }
 
@@ -295,7 +317,7 @@ pub(crate) async fn immediate_forward(
 
     let next_retry = chrono::Utc::now()
         .checked_add_signed(chrono::Duration::seconds(backoff_secs as i64))
-        .unwrap_or_else(|| chrono::Utc::now())
+        .unwrap_or_else(chrono::Utc::now)
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
 
     if let Err(e) = email_factory
@@ -382,7 +404,7 @@ pub(crate) async fn process_expired_attachments(
             // ── Full cascade: no other references ──
             // Track file size before deletion for metrics
             let full_path =
-                attachment_factory.file_path(&attachment.sender_email, &attachment.id, &extension);
+                attachment_factory.file_path(&attachment.sender_email, &attachment.id, extension);
             let file_size = tokio::task::spawn_blocking(move || {
                 std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0)
             })
@@ -393,7 +415,7 @@ pub(crate) async fn process_expired_attachments(
                 attachment_factory,
                 email_factory,
                 &attachment.id,
-                &extension,
+                extension,
                 &attachment.sender_email,
                 perm_count,
                 mail_count,
@@ -446,12 +468,8 @@ pub(crate) async fn process_expired_attachments(
                 );
                 match email_factory.get(mail_id).await {
                     Ok(Some(email_record)) => {
-                        cleanup_completed_email(
-                            attachment_factory,
-                            email_factory,
-                            &email_record,
-                        )
-                        .await;
+                        cleanup_completed_email(attachment_factory, email_factory, &email_record)
+                            .await;
                     }
                     Ok(None) => {
                         debug!(%mail_id, "Email already deleted, skipping cascade");

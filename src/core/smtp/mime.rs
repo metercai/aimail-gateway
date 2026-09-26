@@ -1,6 +1,8 @@
 //! MIME helpers for building multipart email bodies and custom headers.
 
-use lettre::message::header::{ContentTransferEncoding, ContentType, Header, HeaderName, HeaderValue};
+use lettre::message::header::{
+    ContentTransferEncoding, ContentType, Header, HeaderName, HeaderValue,
+};
 use lettre::message::{Body, MultiPart, SinglePart};
 use lettre::Address;
 
@@ -60,8 +62,9 @@ impl Header for PassthroughHeader {
         })
     }
     fn display(&self) -> HeaderValue {
-        let name = HeaderName::new_from_ascii(self.name.clone())
-            .unwrap_or_else(|_| HeaderName::new_from_ascii("X-AIMail-Agent".to_string()).expect("valid"));
+        let name = HeaderName::new_from_ascii(self.name.clone()).unwrap_or_else(|_| {
+            HeaderName::new_from_ascii("X-AIMail-Agent".to_string()).expect("valid")
+        });
         HeaderValue::new(name, self.value.clone())
     }
 }

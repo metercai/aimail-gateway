@@ -12,9 +12,7 @@ use crate::core::storage::Database;
 use crate::core::storage::SystemDomainRecord;
 use crate::core::strategy::SystemStore;
 
-use crate::core::email::storage::{
-    AttachmentMetaRecord, AttachmentPermissionRecord, EmailRecord,
-};
+use crate::core::email::storage::{AttachmentMetaRecord, AttachmentPermissionRecord, EmailRecord};
 
 /// Email CRUD factory backed by `Arc<Database>`.
 #[derive(Clone)]
@@ -42,6 +40,18 @@ pub struct ParsedInbound {
     pub headers: BTreeMap<String, String>,
 }
 
+/// Return type of `parse_mime_detailed*`: the 8-tuple consumed by the SMTP receiver.
+pub type ParsedMimeDetailed = (
+    String,                                         // subject
+    Vec<(String, String, Vec<u8>, Option<String>)>, // attachments
+    Vec<String>,                                    // in-reply-to chain
+    Vec<String>,                                    // references
+    String,                                         // message-id
+    String,                                         // from
+    String,                                         // to
+    String,                                         // date
+);
+
 impl EmailFactory {
     pub fn new(
         db: Arc<Database>,
@@ -66,6 +76,7 @@ impl EmailFactory {
     // ── Create ────────────────────────────────────────────────────────
 
     /// Create an email record (inbound or outbound) and return the inserted row.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     async fn create_email(
         &self,
         direction: &str,
@@ -81,26 +92,82 @@ impl EmailFactory {
         max_attempts: i32,
     ) -> AppResult<EmailRecord> {
         self.db
-            .insert_email(id, system_id, direction, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts)
+            .insert_email(
+                id,
+                system_id,
+                direction,
+                sender,
+                recipients,
+                subject,
+                body,
+                endpoints,
+                attachments,
+                headers,
+                max_attempts,
+            )
             .await
     }
 
     /// Create an inbound email record.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn create_inbound(
-        &self, id: &str, system_id: &str, sender: &str, recipients: &str,
-        subject: &str, body: &str, endpoints: Option<&str>,
-        attachments: Option<&str>, headers: Option<&str>, max_attempts: i32,
+        &self,
+        id: &str,
+        system_id: &str,
+        sender: &str,
+        recipients: &str,
+        subject: &str,
+        body: &str,
+        endpoints: Option<&str>,
+        attachments: Option<&str>,
+        headers: Option<&str>,
+        max_attempts: i32,
     ) -> AppResult<EmailRecord> {
-        self.create_email("inbound", id, system_id, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts).await
+        self.create_email(
+            "inbound",
+            id,
+            system_id,
+            sender,
+            recipients,
+            subject,
+            body,
+            endpoints,
+            attachments,
+            headers,
+            max_attempts,
+        )
+        .await
     }
 
     /// Create an outbound email record.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn create_outbound(
-        &self, id: &str, system_id: &str, sender: &str, recipients: &str,
-        subject: &str, body: &str, endpoints: Option<&str>,
-        attachments: Option<&str>, headers: Option<&str>, max_attempts: i32,
+        &self,
+        id: &str,
+        system_id: &str,
+        sender: &str,
+        recipients: &str,
+        subject: &str,
+        body: &str,
+        endpoints: Option<&str>,
+        attachments: Option<&str>,
+        headers: Option<&str>,
+        max_attempts: i32,
     ) -> AppResult<EmailRecord> {
-        self.create_email("outbound", id, system_id, sender, recipients, subject, body, endpoints, attachments, headers, max_attempts).await
+        self.create_email(
+            "outbound",
+            id,
+            system_id,
+            sender,
+            recipients,
+            subject,
+            body,
+            endpoints,
+            attachments,
+            headers,
+            max_attempts,
+        )
+        .await
     }
 
     // ── Status transitions ────────────────────────────────────────────
@@ -152,7 +219,11 @@ impl EmailFactory {
     }
 
     /// Fetch `readying` emails older than `cutoff` (crash orphans for Flow 0).
-    pub async fn get_stuck_readying(&self, cutoff: &str, limit: i32) -> AppResult<Vec<EmailRecord>> {
+    pub async fn get_stuck_readying(
+        &self,
+        cutoff: &str,
+        limit: i32,
+    ) -> AppResult<Vec<EmailRecord>> {
         self.db.get_stuck_readying_emails(cutoff, limit).await
     }
 
@@ -249,15 +320,26 @@ impl EmailFactory {
         if ids.is_empty() {
             return Vec::new();
         }
-        let metas = self.db.get_attachment_meta_batch(ids).await.unwrap_or_default();
+        let metas = self
+            .db
+            .get_attachment_meta_batch(ids)
+            .await
+            .unwrap_or_default();
         let mut map: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
         for meta in &metas {
             map.insert(meta.id.as_str(), meta.filename.as_str());
         }
         ids.iter()
             .map(|id| match map.get(id.as_str()) {
-                Some(filename) => format!("{} ({})", filename,
-                    metas.iter().find(|m| m.id == *id).and_then(|m| m.content_type.as_deref()).unwrap_or("unknown")),
+                Some(filename) => format!(
+                    "{} ({})",
+                    filename,
+                    metas
+                        .iter()
+                        .find(|m| m.id == *id)
+                        .and_then(|m| m.content_type.as_deref())
+                        .unwrap_or("unknown")
+                ),
                 None => format!("{} (deleted)", id),
             })
             .collect()
@@ -338,18 +420,7 @@ impl EmailFactory {
 
     /// Parse MIME with full header extraction: subject, message_id, in-reply-to, references.
     /// Returns an 8-tuple for SMTP receiver usage.
-    pub fn parse_mime_detailed(
-        raw: &[u8],
-    ) -> AppResult<(
-        String,
-        Vec<(String, String, Vec<u8>, Option<String>)>,
-        Vec<String>,
-        Vec<String>,
-        String,
-        String,
-        String,
-        String,
-    )> {
+    pub fn parse_mime_detailed(raw: &[u8]) -> AppResult<ParsedMimeDetailed> {
         let parsed = mailparse::parse_mail(raw)
             .map_err(|e| AppError::Parse(format!("MIME parse failed: {}", e)))?;
         Self::parse_mime_detailed_from_parsed(&parsed)
@@ -360,16 +431,7 @@ impl EmailFactory {
     /// pass the result here, avoiding a redundant full MIME parse.
     pub fn parse_mime_detailed_from_parsed(
         parsed: &mailparse::ParsedMail,
-    ) -> AppResult<(
-        String,
-        Vec<(String, String, Vec<u8>, Option<String>)>,
-        Vec<String>,
-        Vec<String>,
-        String,
-        String,
-        String,
-        String,
-    )> {
+    ) -> AppResult<ParsedMimeDetailed> {
         let mut body = String::new();
         let mut attachments: Vec<MimeAttachment> = Vec::new();
         EmailFactory::walk_mime_parts(parsed, &mut body, &mut attachments);
@@ -515,9 +577,8 @@ impl EmailFactory {
                     if sub_subtype == "plain" {
                         body.clear();
                         body.push_str(&text);
-                    } else if body.is_empty() && sub_subtype == "html" {
-                        body.push_str(&text);
                     } else if body.is_empty() {
+                        // html part (or any non-plain part) fills an empty body
                         body.push_str(&text);
                     }
                 }
@@ -590,7 +651,6 @@ impl EmailFactory {
         // Collapse multiple spaces/newlines
         result.split_whitespace().collect::<Vec<_>>().join(" ")
     }
-
 }
 
 /// Factory for attachment CRUD and permission operations.
@@ -621,11 +681,8 @@ impl MailFactories {
         let attachments_dir = storage_path.join("attachments");
         let board_registry = Arc::new(crate::board::registry::BoardRegistry::new());
         board_registry.load(&storage_path.to_string_lossy());
-        let mut email_factory = EmailFactory::new(
-            db.clone(),
-            attachments_dir.clone(),
-            system_store,
-        );
+        let mut email_factory =
+            EmailFactory::new(db.clone(), attachments_dir.clone(), system_store);
         email_factory.env_factory = email_factory
             .env_factory
             .with_board_registry(board_registry);
@@ -773,6 +830,7 @@ impl AttachmentFactory {
     }
 
     /// Save attachment to disk: validate → write file → create metadata → grant permission.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn save_attachment(
         &self,
         config: &StorageConfig,

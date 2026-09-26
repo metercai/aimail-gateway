@@ -18,7 +18,7 @@ pub async fn whoami(
     let scope_name = key
         .scopes
         .first()
-        .and_then(|s| Scope::from_str(s).map(|scope| scope.to_string()))
+        .and_then(|s| Scope::parse_db(s).map(|scope| scope.to_string()))
         .unwrap_or_else(|| "unknown".to_string());
 
     // Look up agent metadata from domain_addr_meta (keyed by email_address).

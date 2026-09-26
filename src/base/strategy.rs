@@ -78,9 +78,7 @@ impl RouterHook for BaseRouterHook {
             .route_layer(axum::middleware::from_fn(move |req, next| {
                 let ef = api_env_factory.clone();
                 let cap = body_cap;
-                async move {
-                    crate::core::api::auth::auth_layer(ef, req, next, cap).await
-                }
+                async move { crate::core::api::auth::auth_layer(ef, req, next, cap).await }
             }));
         router.merge(batch)
     }

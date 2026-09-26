@@ -154,9 +154,7 @@ pub async fn batch_generate_codes(
     Extension(api_key): Extension<ApiKeyRecord>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = require_scope_any(&api_key, &["platform", "system"]) {
-        return Err(e);
-    }
+    require_scope_any(&api_key, &["platform", "system"])?;
     let code_type = body
         .get("code_type")
         .and_then(|v| v.as_str())
@@ -221,7 +219,7 @@ pub async fn batch_generate_codes(
                     }),
                 )
             })?;
-        if meta.as_ref().map_or(true, |m| m.manager_address.is_empty()) {
+        if meta.as_ref().is_none_or(|m| m.manager_address.is_empty()) {
             return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
                 error: "Cannot generate activation code: manager_address not configured for this address".to_string(),
                 detail: None,
@@ -234,7 +232,7 @@ pub async fn batch_generate_codes(
         system_id,
         domain,
         email,
-        count.max(1).min(100),
+        count.clamp(1, 100),
     )
     .await
     .map_err(|e| {
@@ -365,14 +363,17 @@ mod tests {
     use crate::base::strategy::BaseSystemStore;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn temp_env_factory() -> (crate::core::storage::Database, crate::core::factory::EnvFactory) {
+    fn temp_env_factory() -> (
+        crate::core::storage::Database,
+        crate::core::factory::EnvFactory,
+    ) {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("aimailgw-act-test-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::core::storage::Database::open(&dir.join("aimail.db"), 4, None).unwrap();
+        let db = crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap();
         let factory = crate::core::factory::EnvFactory::new(
             std::sync::Arc::new(db.clone()),
             std::sync::Arc::new(BaseSystemStore),
@@ -420,10 +421,9 @@ mod tests {
         assert!(err.to_string().contains("bound to a different address"));
 
         // Case-insensitive match on the bound address still works.
-        let (raw_key, _) =
-            activate_address_code(&db, "addr-test-0002", "Alice@Test.COM", &factory)
-                .await
-                .expect("case-insensitive bound match must succeed");
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0002", "Alice@Test.COM", &factory)
+            .await
+            .expect("case-insensitive bound match must succeed");
         let rec = factory
             .db
             .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
@@ -439,10 +439,9 @@ mod tests {
         let (db, factory) = temp_env_factory();
         insert_code(&db, "addr-test-0003", "").await;
 
-        let (raw_key, _) =
-            activate_address_code(&db, "addr-test-0003", "carol@test.com", &factory)
-                .await
-                .expect("unbound batch code must accept any address");
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0003", "carol@test.com", &factory)
+            .await
+            .expect("unbound batch code must accept any address");
         let rec = factory
             .db
             .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))

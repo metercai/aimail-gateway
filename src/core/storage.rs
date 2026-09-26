@@ -14,9 +14,12 @@ use tracing::debug;
 use crate::core::errors::{AppError, AppResult};
 use crate::core::whitelist::{is_whitelisted_wildcard, WhitelistCache};
 
-/// Global database handle — set once at startup.
+// Global database handle — set once at startup.
 
 // ── Database Pool ──────────────────────────────────────────────────────
+
+/// Cached domain lookups: `domain -> (fetched_at, record)`.
+pub type DomainCacheMap = Arc<RwLock<HashMap<String, (Instant, Option<SystemDomainRecord>)>>>;
 
 /// Thread-safe, cloneable database handle backed by an `r2d2_sqlite` connection pool.
 #[derive(Clone)]
@@ -27,7 +30,7 @@ pub struct Database {
     db_file: std::path::PathBuf,
     pub whitelist_cache: Arc<WhitelistCache>,
     /// Domain lookup cache.
-    pub domain_cache: Arc<RwLock<HashMap<String, (Instant, Option<SystemDomainRecord>)>>>,
+    pub domain_cache: DomainCacheMap,
 }
 
 impl Database {
@@ -101,7 +104,7 @@ impl Database {
             })?;
 
             // Auto-detect unencrypted DB and rekey in-place.
-            if encryption_key.is_some() {
+            if let Some(enc_key) = encryption_key {
                 if let Err(e) = init_connection(&conn) {
                     if format!("{}", e).contains("file is not a database") {
                         tracing::warn!(
@@ -109,9 +112,9 @@ impl Database {
                              This happens on first restart after admin key provisioning."
                         );
                         drop(conn);
-                        migrate_to_encrypted(path_ref, encryption_key.unwrap())?;
+                        migrate_to_encrypted(path_ref, enc_key)?;
                         let manager2 = SqliteConnectionManager::file(path_ref);
-                        let key2 = encryption_key.unwrap().to_string();
+                        let key2 = enc_key.to_string();
                         let manager2 = manager2.with_init(move |conn| {
                             conn.execute_batch(&format!("PRAGMA key = '{}';", key2))?;
                             Ok(())
@@ -228,7 +231,7 @@ fn init_connection(conn: &Connection) -> AppResult<()> {
 /// Encrypt a plaintext database with SQLCipher.
 fn migrate_to_encrypted(path: &Path, key: &str) -> AppResult<()> {
     let conn = Connection::open(path)?;
-    conn.execute_batch(&format!("PRAGMA key = '';"))?; // open in plaintext mode explicitly
+    conn.execute_batch("PRAGMA key = '';")?; // open in plaintext mode explicitly
     conn.execute_batch(&format!("PRAGMA rekey = '{}';", key))?;
     drop(conn);
     tracing::info!("Database encrypted successfully with SQLCipher");
@@ -745,10 +748,37 @@ impl Database {
         let safe = |s: &str| -> bool {
             !s.is_empty()
                 && s.len() <= 255
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'-' | b'_' | b'+' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'/' | b'=' | b'?' | b'^' | b'`' | b'{' | b'|' | b'}' | b'~' | b'!'))
+                && s.bytes().all(|b| {
+                    b.is_ascii_alphanumeric()
+                        || matches!(
+                            b,
+                            b'@' | b'.'
+                                | b'-'
+                                | b'_'
+                                | b'+'
+                                | b'#'
+                                | b'$'
+                                | b'%'
+                                | b'&'
+                                | b'\''
+                                | b'*'
+                                | b'/'
+                                | b'='
+                                | b'?'
+                                | b'^'
+                                | b'`'
+                                | b'{'
+                                | b'|'
+                                | b'}'
+                                | b'~'
+                                | b'!'
+                        )
+                })
         };
-        assert!(safe(old) && safe(new), "rename addresses must be bounded atext/no-quote strings");
+        assert!(
+            safe(old) && safe(new),
+            "rename addresses must be bounded atext/no-quote strings"
+        );
         let old = old.to_string();
         let new = new.to_string();
         let db_file = self.db_file.clone();
@@ -833,7 +863,7 @@ COMMIT;
         .await
     }
 
-    /// Get the webhook config for a domain.
+    // Get the webhook config for a domain.
     // get_webhook_for_domain moved to AdvancedStorage (queries systems table)
 
     /// Get a system domain record by domain name (uses cache).
@@ -990,6 +1020,7 @@ fn whitelist_row(r: &rusqlite::Row) -> rusqlite::Result<WhitelistRecord> {
 }
 
 impl Database {
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn insert_whitelist(
         &self,
         system_id: &str,
@@ -1214,7 +1245,11 @@ impl Database {
     }
 
     /// Replace the member list of a board (full sync from notification).
-    pub async fn replace_board_members(&self, board_email: &str, members: &[String]) -> AppResult<usize> {
+    pub async fn replace_board_members(
+        &self,
+        board_email: &str,
+        members: &[String],
+    ) -> AppResult<usize> {
         let be = board_email.to_string();
         let members: Vec<String> = members.to_vec();
         self.call(move |conn| {
@@ -1350,6 +1385,7 @@ impl Database {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn insert_api_key(
         &self,
         system_id: &str,
@@ -1627,6 +1663,7 @@ impl Database {
     // ── Activation Codes ──────────────────────────────────────────────
 
     /// Insert a new activation code. Returns the row ID.
+    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     pub async fn insert_activation_code(
         &self,
         code_hash: &str,
@@ -1787,7 +1824,7 @@ impl Database {
                 },
             )?;
             rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|e| crate::core::errors::AppError::from(e))
+                .map_err(crate::core::errors::AppError::from)
         })
         .await
     }
@@ -1862,16 +1899,12 @@ mod tests {
         // AUDIT-1 P1-1: a malicious domain string must be treated as a literal
         // LIKE pattern, never spliced into SQL.
         let db = temp_db();
-        db.insert_pending_delivery(
-            "sys1", "agent@good.test", "agent@good.test", "{}", "{}",
-        )
-        .await
-        .unwrap();
-        db.insert_pending_delivery(
-            "sys1", "agent@evil.com", "agent@evil.com", "{}", "{}",
-        )
-        .await
-        .unwrap();
+        db.insert_pending_delivery("sys1", "agent@good.test", "agent@good.test", "{}", "{}")
+            .await
+            .unwrap();
+        db.insert_pending_delivery("sys1", "agent@evil.com", "agent@evil.com", "{}", "{}")
+            .await
+            .unwrap();
 
         // Injection attempt: closes the LIKE, ORs a tautology, comments out the rest.
         let evil = "x' OR '1'='1";
@@ -1963,8 +1996,17 @@ mod tests {
         let db = temp_db();
         let endpoints = r#"{"orch@y.com":{"url":"http://a","status":"pending"},"ver@y.com":{"url":"http://b","status":"pending"}}"#;
         db.insert_email(
-            "e1", "sys1", "outbound", "s@x.com", "r@y.com",
-            "subj", "body", Some(endpoints), None, None, 3,
+            "e1",
+            "sys1",
+            "outbound",
+            "s@x.com",
+            "r@y.com",
+            "subj",
+            "body",
+            Some(endpoints),
+            None,
+            None,
+            3,
         )
         .await
         .unwrap();
@@ -1975,7 +2017,9 @@ mod tests {
         );
 
         assert!(
-            db.update_email_endpoint_status("e1", "orch@y.com", "success").await.unwrap(),
+            db.update_email_endpoint_status("e1", "orch@y.com", "success")
+                .await
+                .unwrap(),
             "known endpoint key must match"
         );
         assert!(
@@ -1983,7 +2027,10 @@ mod tests {
             "one endpoint still pending → not all completed"
         );
 
-        assert!(db.update_email_endpoint_status("e1", "ver@y.com", "success").await.unwrap());
+        assert!(db
+            .update_email_endpoint_status("e1", "ver@y.com", "success")
+            .await
+            .unwrap());
         assert!(
             db.check_all_endpoints_completed("e1").await.unwrap(),
             "all endpoints success → completed"
@@ -1993,8 +2040,7 @@ mod tests {
         // original domains (the old bug created a `\"orch@y.com` key and left
         // the real ones pending).
         let rec = db.get_email("e1").await.unwrap().unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
         let obj = v.as_object().expect("endpoints is a JSON object");
         assert_eq!(obj.len(), 2, "no garbage keys in endpoints JSON");
         assert!(obj.contains_key("orch@y.com"));
@@ -2013,8 +2059,17 @@ mod tests {
         // success mark land and the email complete on first delivery.
         let db = temp_db();
         db.insert_email(
-            "e1", "sys1", "inbound", "ext@x.com", "agent@pull.test",
-            "subj", "body", None, None, None, 3,
+            "e1",
+            "sys1",
+            "inbound",
+            "ext@x.com",
+            "agent@pull.test",
+            "subj",
+            "body",
+            None,
+            None,
+            None,
+            3,
         )
         .await
         .unwrap();
@@ -2025,7 +2080,9 @@ mod tests {
         );
 
         assert!(
-            db.update_email_endpoint_status("e1", "pull.test", "success").await.unwrap(),
+            db.update_email_endpoint_status("e1", "pull.test", "success")
+                .await
+                .unwrap(),
             "NULL endpoints must gain the key, not stay NULL"
         );
         assert!(
@@ -2035,8 +2092,7 @@ mod tests {
 
         // The key landed with the right status and nothing else.
         let rec = db.get_email("e1").await.unwrap().unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(rec.endpoints.as_deref().unwrap()).unwrap();
         let obj = v.as_object().expect("endpoints is a JSON object");
         assert_eq!(obj.len(), 1);
         assert_eq!(
@@ -2058,8 +2114,11 @@ mod tests {
     async fn born_state_is_readying() {
         // Invariant 1: every insert lands in `readying`, never `ready`.
         let db = temp_db();
-        db.insert_email("born1", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.insert_email(
+            "born1", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
         let rec = db.get_email("born1").await.unwrap().unwrap();
         assert_eq!(rec.status, "readying");
     }
@@ -2071,12 +2130,19 @@ mod tests {
         // invisible to both, so a half-prepared payload can never be
         // delivered early. Once flipped to `ready`, the tick sees it.
         let db = temp_db();
-        db.insert_email("inv1", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
-        assert!(db.get_pending_retry_emails(10).await.unwrap().is_empty(),
-            "tick must not see a readying email");
-        assert!(db.get_overlimit_emails(10).await.unwrap().is_empty(),
-            "overlimit fetch must not see a readying email");
+        db.insert_email(
+            "inv1", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
+        assert!(
+            db.get_pending_retry_emails(10).await.unwrap().is_empty(),
+            "tick must not see a readying email"
+        );
+        assert!(
+            db.get_overlimit_emails(10).await.unwrap().is_empty(),
+            "overlimit fetch must not see a readying email"
+        );
 
         // Flip to ready (what crash recovery / retry fallback do) → visible.
         assert!(db.flip_readying_to_ready("inv1").await.unwrap());
@@ -2090,17 +2156,25 @@ mod tests {
         // fallback) are both claimable; a second claim must fail
         // (single-delivery guarantee).
         let db = temp_db();
-        db.insert_email("c1", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.insert_email(
+            "c1", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
         let first = db.claim_ready("c1").await.unwrap();
         assert!(first.is_some(), "trigger must claim a readying email");
         assert_eq!(first.unwrap().status, "sending");
-        assert!(db.claim_ready("c1").await.unwrap().is_none(),
-            "double claim must fail — single delivery");
+        assert!(
+            db.claim_ready("c1").await.unwrap().is_none(),
+            "double claim must fail — single delivery"
+        );
 
         // A `ready` email (retry fallback) is claimable too; `sending` is not.
-        db.insert_email("c2", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.insert_email(
+            "c2", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
         db.flip_readying_to_ready("c2").await.unwrap();
         assert!(db.claim_ready("c2").await.unwrap().is_some());
         assert!(db.claim_ready("c2").await.unwrap().is_none());
@@ -2111,11 +2185,16 @@ mod tests {
         // Invariant 4: the crash-recovery flip is a no-op once a trigger has
         // already claimed the email (flip-vs-claim race resolves safely).
         let db = temp_db();
-        db.insert_email("f1", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.insert_email(
+            "f1", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
         assert!(db.claim_ready("f1").await.unwrap().is_some());
-        assert!(!db.flip_readying_to_ready("f1").await.unwrap(),
-            "flip must not resurrect a claimed email");
+        assert!(
+            !db.flip_readying_to_ready("f1").await.unwrap(),
+            "flip must not resurrect a claimed email"
+        );
     }
 
     #[tokio::test]
@@ -2124,15 +2203,23 @@ mod tests {
         // backoff), never back to `readying` — so a retry is always
         // tick-claimable and can never re-enter the hidden birth state.
         let db = temp_db();
-        db.insert_email("r1", "sys1", "inbound", "a@x.com",
-            "{}", "s", "b", None, None, None, 3).await.unwrap();
+        db.insert_email(
+            "r1", "sys1", "inbound", "a@x.com", "{}", "s", "b", None, None, None, 3,
+        )
+        .await
+        .unwrap();
         db.claim_ready("r1").await.unwrap(); // trigger → sending
-        let rec = db.update_email_ready_retry("r1", 1, "2099-01-01T00:00:00Z")
-            .await.unwrap().unwrap();
+        let rec = db
+            .update_email_ready_retry("r1", 1, "2099-01-01T00:00:00Z")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(rec.status, "ready");
         // Past-due retry is visible to the tick.
         db.update_email_ready_retry("r1", 1, "2000-01-01T00:00:00Z")
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(db.get_pending_retry_emails(10).await.unwrap().len(), 1);
     }
 
@@ -2272,7 +2359,10 @@ mod tests {
             1
         );
         assert_eq!(
-            count_rows(&conn, "SELECT COUNT(*) FROM whitelists WHERE value='old.agent@shared.example'"),
+            count_rows(
+                &conn,
+                "SELECT COUNT(*) FROM whitelists WHERE value='old.agent@shared.example'"
+            ),
             0
         );
         assert_eq!(
@@ -2321,9 +2411,11 @@ mod tests {
             0
         );
         let t: (String, String) = bconn
-            .query_row("SELECT assignee, reviewer FROM tasks WHERE id='t1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT assignee, reviewer FROM tasks WHERE id='t1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(
             t,
@@ -2352,13 +2444,29 @@ mod tests {
     #[tokio::test]
     async fn gateway_and_agent_keys_coexist_for_one_system() {
         let db = temp_db();
-        db.insert_api_key("system-1", "", "hashA", "prefA", &["platform".to_string(), "system".to_string()], None, "platform")
-            .await
-            .unwrap();
+        db.insert_api_key(
+            "system-1",
+            "",
+            "hashA",
+            "prefA",
+            &["platform".to_string(), "system".to_string()],
+            None,
+            "platform",
+        )
+        .await
+        .unwrap();
         // B under the reserved marker — must NOT collide with A's empty domain_addr.
-        db.insert_api_key("system-1", crate::core::server::SYSTEM_KEY_DOMAIN_ADDR, "hashB", "prefB", &["system".to_string()], None, "system")
-            .await
-            .expect("system key must coexist with the platform key of the same system");
+        db.insert_api_key(
+            "system-1",
+            crate::core::server::SYSTEM_KEY_DOMAIN_ADDR,
+            "hashB",
+            "prefB",
+            &["system".to_string()],
+            None,
+            "system",
+        )
+        .await
+        .expect("system key must coexist with the platform key of the same system");
 
         let all = db.list_api_keys().await.unwrap();
         assert_eq!(all.len(), 2, "both bootstrap keys live in one DB");
@@ -2366,9 +2474,18 @@ mod tests {
         assert_eq!(all.iter().filter(|k| k.category == "system").count(), 1);
         // Identity lookup matches either column: the shared system id resolves BOTH keys,
         // the reserved marker resolves the agent-side one.
-        assert_eq!(db.list_api_keys_by_identity("system-1").await.unwrap().len(), 2);
         assert_eq!(
-            db.list_api_keys_by_identity(crate::core::server::SYSTEM_KEY_DOMAIN_ADDR).await.unwrap().len(),
+            db.list_api_keys_by_identity("system-1")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            db.list_api_keys_by_identity(crate::core::server::SYSTEM_KEY_DOMAIN_ADDR)
+                .await
+                .unwrap()
+                .len(),
             1
         );
     }
@@ -2379,9 +2496,17 @@ mod tests {
     #[tokio::test]
     async fn legacy_system_admin_key_is_aligned_in_place() {
         let db = temp_db();
-        db.insert_api_key("system-1", "", "hashLegacy", "prefLegacy", &["system".to_string()], None, "system")
-            .await
-            .unwrap();
+        db.insert_api_key(
+            "system-1",
+            "",
+            "hashLegacy",
+            "prefLegacy",
+            &["system".to_string()],
+            None,
+            "system",
+        )
+        .await
+        .unwrap();
         let factory = crate::core::factory::EnvFactory::new(
             std::sync::Arc::new(db.clone()),
             std::sync::Arc::new(crate::base::strategy::BaseSystemStore),
@@ -2394,15 +2519,28 @@ mod tests {
         assert_eq!(migrated.category, "system");
         assert_eq!(migrated.key_hash, "hashLegacy");
 
-        let platform_rows = db.list_api_keys_by_system("system-1", "platform").await.unwrap();
-        assert_eq!(platform_rows.len(), 1, "row now carries the platform category");
-        assert_eq!(platform_rows[0].key_hash, "hashLegacy", "raw key material untouched");
+        let platform_rows = db
+            .list_api_keys_by_system("system-1", "platform")
+            .await
+            .unwrap();
+        assert_eq!(
+            platform_rows.len(),
+            1,
+            "row now carries the platform category"
+        );
+        assert_eq!(
+            platform_rows[0].key_hash, "hashLegacy",
+            "raw key material untouched"
+        );
         assert_eq!(
             platform_rows[0].scopes,
             vec!["platform".to_string(), "system".to_string()]
         );
         assert!(
-            db.list_api_keys_by_system("system-1", "system").await.unwrap().is_empty(),
+            db.list_api_keys_by_system("system-1", "system")
+                .await
+                .unwrap()
+                .is_empty(),
             "no system-category admin key remains (only the migration target)"
         );
 

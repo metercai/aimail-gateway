@@ -102,13 +102,16 @@ pub async fn handle_list_members(
         ));
     }
     match db::open_board_db(&s, &board_id) {
-        Ok(conn) => match awareness::list_members(&conn, &board_id, query.get("email").map(|v| v.as_str())) {
-            Ok(members) => Ok(Json(json!({"status": "ok", "members": members}))),
-            Err(e) => Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("{:?}", e)})),
-            )),
-        },
+        Ok(conn) => {
+            match awareness::list_members(&conn, &board_id, query.get("email").map(|v| v.as_str()))
+            {
+                Ok(members) => Ok(Json(json!({"status": "ok", "members": members}))),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("{:?}", e)})),
+                )),
+            }
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("{:?}", e)})),

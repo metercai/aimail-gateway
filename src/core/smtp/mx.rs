@@ -21,10 +21,13 @@ pub struct MxRecord {
     pub preference: u16,
 }
 
+/// Cached transport + the instant it was created.
+type PoolMap = HashMap<String, (AsyncSmtpTransport<Tokio1Executor>, Instant)>;
+
 /// Pool of cached SMTP transports keyed by MX hostname.
 #[derive(Clone)]
 pub struct MxTransportPool {
-    inner: Arc<tokio::sync::Mutex<HashMap<String, (AsyncSmtpTransport<Tokio1Executor>, Instant)>>>,
+    inner: Arc<tokio::sync::Mutex<PoolMap>>,
     ttl: Duration,
 }
 

@@ -337,7 +337,9 @@ impl Config {
         let mut errors: Vec<String> = Vec::new();
 
         if self.retry.max_attempts == 0 {
-            errors.push("retry.max_attempts must be > 0 (set to 0 → immediate exhaustion)".to_string());
+            errors.push(
+                "retry.max_attempts must be > 0 (set to 0 → immediate exhaustion)".to_string(),
+            );
         }
         if self.retry.initial_backoff_secs == 0 {
             errors.push("retry.initial_backoff_secs must be > 0".to_string());
@@ -657,7 +659,9 @@ max_concurrent_deliveries = 0
 "#,
         )
         .expect("Config parse");
-        let err = cfg.validate().expect_err("zero concurrency must be rejected");
+        let err = cfg
+            .validate()
+            .expect_err("zero concurrency must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("smtp.max_concurrent_deliveries"), "got {msg}");
     }

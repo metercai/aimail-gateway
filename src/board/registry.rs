@@ -77,7 +77,11 @@ impl BoardRegistry {
     /// Substantive check: does this gateway have a board at `board_email`?
     /// Case-insensitive (SMTP addresses are case-insensitive).
     pub fn lookup(&self, board_email: &str) -> Option<BoardEntry> {
-        self.entries.read().unwrap().get(board_email.to_lowercase().as_str()).cloned()
+        self.entries
+            .read()
+            .unwrap()
+            .get(board_email.to_lowercase().as_str())
+            .cloned()
     }
 
     /// Register a newly created board (Owner `[A2A] new` path).
@@ -151,7 +155,11 @@ mod tests {
     fn test_insert_empty_system_id_becomes_none() {
         let reg = BoardRegistry::new();
         reg.insert("abc.a2a@example.com", "b1", Some("".into()));
-        assert!(reg.lookup("abc.a2a@example.com").unwrap().system_id.is_none());
+        assert!(reg
+            .lookup("abc.a2a@example.com")
+            .unwrap()
+            .system_id
+            .is_none());
     }
 
     #[test]
@@ -201,7 +209,10 @@ mod tests {
 
         let reg = BoardRegistry::new();
         let n = reg.load(&dir);
-        assert_eq!(n, 1, "exactly the real board should load (stray file skipped)");
+        assert_eq!(
+            n, 1,
+            "exactly the real board should load (stray file skipped)"
+        );
         let e = reg.lookup(board_email).unwrap();
         assert_eq!(e.board_id, board_id);
         assert_eq!(e.system_id.as_deref(), Some("sys-load"));

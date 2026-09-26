@@ -22,9 +22,7 @@ pub async fn create_api_key(
     api_key: Extension<ApiKeyRecord>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<ApiKeyResponse>), (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = require_scope_any(&api_key, &["platform", "system", "agent_admin"]) {
-        return Err(e);
-    }
+    require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
 
     // ── Address admission check ──
     {
@@ -133,9 +131,7 @@ pub async fn create_api_key(
     // ── Domain admin scope restriction ──
     // Domain-level admins (bare domain in email_address) may only create keys within their domain.
     // System-level (empty email) and platform admins pass through without restriction.
-    if let Err(e) = require_domain_match(&api_key, &req.email_address) {
-        return Err(e);
-    }
+    require_domain_match(&api_key, &req.email_address)?;
 
     let raw_key = Uuid::new_v4().to_string().replace('-', "");
     let key_hash = crate::core::api::seal::store_hash(&sha256_hex(&raw_key));
@@ -161,7 +157,7 @@ pub async fn create_api_key(
     // ("system_admin" → PlatformAdmin), 让 system 管理员造出 platform key。
     let parsed: Vec<Scope> = scopes
         .iter()
-        .filter_map(|s| Scope::from_str(s.trim()))
+        .filter_map(|s| Scope::parse_db(s.trim()))
         .collect();
     // 注意: 不能拒收"解析不出 Scope"的串 —— scopes 里还有功能性标记(如 "send",
     // 发送路径按字面串判定), 历史 key 也在用。层级比较只认解析得出的那几个即可,
@@ -360,7 +356,9 @@ pub async fn list_api_keys(
         {
             // 非平台 scope 只能查本系统的键: 这条分支以前直接走全局解析,
             // agent_admin / system_admin 能跨租户读到别家地址的键元数据。
-            Ok(Some(k)) if !is_platform_admin_scope(&api_key) && k.system_id != api_key.system_id => {
+            Ok(Some(k))
+                if !is_platform_admin_scope(&api_key) && k.system_id != api_key.system_id =>
+            {
                 return Err((
                     StatusCode::FORBIDDEN,
                     Json(ErrorResponse {
@@ -452,9 +450,7 @@ pub async fn get_api_key(
     api_key: Extension<ApiKeyRecord>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiKeyResponse>, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = require_scope_any(&api_key, &["platform", "system", "agent_admin"]) {
-        return Err(e);
-    }
+    require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
 
     let record = match state
         .factories
@@ -469,9 +465,7 @@ pub async fn get_api_key(
             } else {
                 require_domain_match(&api_key, &r.email_address)
             };
-            if let Err(e) = match_result {
-                return Err(e);
-            }
+            match_result?;
             r
         }
         Ok(None) => {
@@ -598,9 +592,7 @@ pub async fn update_api_key(
             } else {
                 require_domain_match(&api_key, &existing.email_address)
             };
-            if let Err(e) = match_result {
-                return Err(e);
-            }
+            match_result?;
         }
         match state
             .factories
@@ -690,13 +682,13 @@ pub async fn update_api_key(
             )),
         }
     } else {
-        return Err((
+        Err((
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "Insufficient scope".to_string(),
                 detail: None,
             }),
-        ));
+        ))
     }
 }
 
@@ -706,9 +698,7 @@ pub async fn delete_api_key(
     api_key: Extension<ApiKeyRecord>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = require_scope_any(&api_key, &["platform", "system", "agent_admin"]) {
-        return Err(e);
-    }
+    require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
 
     // Verify key exists and check domain match
     let existing = match state
@@ -744,9 +734,7 @@ pub async fn delete_api_key(
     } else {
         require_domain_match(&api_key, &existing.email_address)
     };
-    if let Err(e) = match_result {
-        return Err(e);
-    }
+    match_result?;
 
     match state.factories.email.env_factory.delete_api_key(id).await {
         Ok(()) => {

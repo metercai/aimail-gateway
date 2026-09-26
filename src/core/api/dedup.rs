@@ -87,26 +87,27 @@ impl SendDeduper {
 
     /// Returns true if this exact (sender, to, cc, subject, body) was
     /// already seen within the window. Does NOT record the key.
-    pub fn is_duplicate(&self, sender: &str, to: &[String], cc: &[String], subject: &str, body: &str) -> bool {
-        let key = Self::hash_key(sender, to, cc, subject, body);
-        let mut g = self.inner.lock().unwrap();
-        let now = Instant::now();
-        // Lazy TTL purge of expired entries while we hold the lock.
-        g.entries.retain(|_, (t, _)| now.duration_since(*t) < self.window);
-        g.entries.contains_key(&key)
-    }
-
-    /// Record a successful send so subsequent identical sends in the
-    /// window are suppressed. Call ONLY after the DB insert succeeded —
-    /// a failed insert must not poison the key.
-    pub fn mark(
+    pub fn is_duplicate(
         &self,
         sender: &str,
         to: &[String],
         cc: &[String],
         subject: &str,
         body: &str,
-    ) {
+    ) -> bool {
+        let key = Self::hash_key(sender, to, cc, subject, body);
+        let mut g = self.inner.lock().unwrap();
+        let now = Instant::now();
+        // Lazy TTL purge of expired entries while we hold the lock.
+        g.entries
+            .retain(|_, (t, _)| now.duration_since(*t) < self.window);
+        g.entries.contains_key(&key)
+    }
+
+    /// Record a successful send so subsequent identical sends in the
+    /// window are suppressed. Call ONLY after the DB insert succeeded —
+    /// a failed insert must not poison the key.
+    pub fn mark(&self, sender: &str, to: &[String], cc: &[String], subject: &str, body: &str) {
         let key = Self::hash_key(sender, to, cc, subject, body);
         let mut g = self.inner.lock().unwrap();
         g.seq = g.seq.wrapping_add(1);

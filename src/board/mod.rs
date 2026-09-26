@@ -7,7 +7,6 @@
 //! - toolset HTTP API (6 endpoints — see core/api/http.rs board_routes)
 //! - A2aInterceptor for inbound email processing
 
-
 pub mod addr;
 pub mod awareness;
 pub mod commands;
