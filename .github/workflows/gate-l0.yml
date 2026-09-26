@@ -1,0 +1,36 @@
+name: gate-l0
+
+# gateway 三层门禁的 L0（定义见 metercai/aimail-advanced: tests/RELEASE-GATES.md）：
+# 静态检查 + 仓内单测。不需要 docker、不需要夹具、不连外网服务。
+# 本地等价跑法：bash tests/gateway/run-gateway-gate.sh（advanced 仓里的机制真源 run-e2e.sh）。
+#
+# 工具链钉住版本：clippy/fmt 的判定随 rustc 版本漂移（新版本会带来新 lint），
+# 本地门禁跑的就是 1.98.1 —— CI 必须与之一致，否则同一个提交两边结论不同。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  l0:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain (pinned to the gate's local version)
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.98.1
+          rustc -V && cargo -V
+
+      - name: fmt --check
+        run: cargo fmt --check
+
+      # --no-deps：vendored 第三方 crate（vendor/mailin）不在我们的改写范围内，
+      # 其 lint 不作为本仓的门禁判据。
+      - name: clippy -D warnings
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+
+      - name: cargo test
+        run: cargo test
