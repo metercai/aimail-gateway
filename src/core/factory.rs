@@ -21,6 +21,38 @@ pub struct EnvFactory {
     board_registry: Arc<crate::board::registry::BoardRegistry>,
 }
 
+/// Refuse a `webhook_url` the cloud could never deliver to.
+///
+/// `system_domains.webhook_url` is handed straight to `reqwest` at delivery time, so a
+/// value that is not an absolute http(s) URL can only ever fail — measured 2026-09-27 on
+/// the L2 journey (J4e) and in a direct probe:
+///   `'127.0.0.1'`        → `request error: builder error`
+///   `'127.0.0.1:18789'`  → `builder error` as well (scheme-less `host:port` is still not
+///                          a URL — this is the shape the CLI used to register for the
+///                          "bridge push" case)
+/// The only visible symptom used to be the mail being promoted to overlimit, i.e. a
+/// silent inbound black hole. Fail loudly at the boundary instead: an operator sees the
+/// registration error, not an undeliverable mailbox months later.
+fn validate_webhook_url(webhook_url: Option<&str>) -> AppResult<()> {
+    if let Some(u) = webhook_url.map(str::trim).filter(|u| !u.is_empty()) {
+        if !(u.starts_with("http://") || u.starts_with("https://")) {
+            tracing::error!(
+                operation = "webhook_url_rejected",
+                webhook_url = %u,
+                "rejected a webhook_url that is not an absolute http(s) URL — the cloud \
+                 cannot POST to it (reqwest builder error), so inbound mail could never \
+                 be delivered"
+            );
+            return Err(AppError::Validation(format!(
+                "webhook_url must be an absolute http(s) URL (got '{}'): a bare host or \
+                 scheme-less host:port cannot be delivered to",
+                u
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl EnvFactory {
     pub fn new(db: Arc<Database>, system_store: Arc<dyn SystemStore>) -> Self {
         Self {
@@ -91,6 +123,7 @@ impl EnvFactory {
         webhook_secret: Option<&str>,
         manager_address: Option<&str>,
     ) -> AppResult<SystemDomainRecord> {
+        validate_webhook_url(webhook_url)?;
         // Pre-check: domain must be globally unique
         if self.lookup_domain_addr(domain).await?.is_some() {
             return Err(AppError::Conflict(format!(
@@ -167,6 +200,7 @@ impl EnvFactory {
         webhook_secret: Option<&str>,
         is_active: Option<bool>,
     ) -> AppResult<Option<SystemDomainRecord>> {
+        validate_webhook_url(webhook_url)?;
         self.db
             .update_system_domain(id, webhook_url, webhook_secret, is_active)
             .await
@@ -682,6 +716,63 @@ mod tests {
         assert_eq!(
             meta.agent_persona, "assistant",
             "persona must survive update"
+        );
+    }
+
+    /// 2026-09-27: only an absolute http(s) URL can be delivered to.
+    ///
+    /// Measured on the L2 journey (J4e) and in a direct probe: `system_domains.webhook_url`
+    /// is handed straight to reqwest, so `'127.0.0.1'` and even the scheme-less
+    /// `'127.0.0.1:18789'` (the shape the CLI used to register for the bridge-push case)
+    /// both die with "builder error" — a silent inbound black hole, visible only as the
+    /// mail being promoted to overlimit. Registration must refuse them loudly.
+    #[tokio::test]
+    async fn rejects_undeliverable_webhook_url() {
+        let (_db, factory) = temp_factory();
+        for (i, bad) in [
+            "127.0.0.1",
+            "127.0.0.1:18789",
+            "example.com/hook",
+            "ftp://x/y",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let res = factory
+                .create_domain(
+                    &format!("d{i}"),
+                    "sys1",
+                    &format!("agent{i}@test.com"),
+                    Some(bad),
+                    None,
+                    None,
+                )
+                .await;
+            assert!(res.is_err(), "webhook_url {bad:?} must be refused");
+            assert!(
+                matches!(res.err(), Some(AppError::Validation(_))),
+                "refusal must be a Validation error for {bad:?}"
+            );
+        }
+
+        let ok = factory
+            .create_domain(
+                "dok",
+                "sys1",
+                "agent-ok@test.com",
+                Some("http://127.0.0.1:18789/aimail/inbound"),
+                None,
+                None,
+            )
+            .await;
+        assert!(ok.is_ok(), "absolute URL must be accepted: {:?}", ok.err());
+
+        let upd = factory
+            .update_domain("dok", Some("127.0.0.1:18789"), None, None)
+            .await;
+        assert!(
+            matches!(upd.err(), Some(AppError::Validation(_))),
+            "the update path must refuse an undeliverable value too"
         );
     }
 }
