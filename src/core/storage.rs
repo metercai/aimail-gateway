@@ -686,8 +686,9 @@ impl Database {
             webhook_url.map(String::from),
             webhook_secret.map(String::from),
         );
+        let id_for_cache = id.clone();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        self.call(move |conn| {
+        let updated = self.call(move |conn| {
             let affected = conn.execute(
                 "UPDATE system_domains SET webhook_url = ?1, webhook_secret = ?2, is_active = COALESCE(?3, is_active), updated_at = ?4 WHERE id = ?5",
                 params![wu, ws, is_active.map(|a| a as i32), now, id],
@@ -699,7 +700,23 @@ impl Database {
                 system_domain_row,
             )?;
             Ok(Some(updated))
-        }).await
+        })
+        .await?;
+        // ── Invalidate domain cache ──
+        // Without this, a previously cached positive lookup would keep serving
+        // the pre-update record (old webhook / is_active) for up to the 30s
+        // TTL — deactivations would not be visible to readers immediately.
+        // Same shape as `delete_system_domain`: cache keys are the raw query
+        // strings callers pass in, so match on the stored record id instead of
+        // a possibly-differently-cased domain to stay format-agnostic.
+        if updated.is_some() {
+            if let Ok(mut cache) = self.domain_cache.write() {
+                cache.retain(|_, (_, rec)| {
+                    rec.as_ref().map(|r| r.id != id_for_cache).unwrap_or(true)
+                });
+            }
+        }
+        Ok(updated)
     }
 
     pub async fn delete_system_domain(&self, id: &str) -> AppResult<()> {
@@ -781,6 +798,7 @@ impl Database {
         );
         let old = old.to_string();
         let new = new.to_string();
+        let old_for_cache = old.clone();
         let db_file = self.db_file.clone();
 
         self.call(move |conn| {
@@ -860,7 +878,23 @@ COMMIT;
             }
             Ok(())
         })
-        .await
+        .await?;
+        // Evict any cached lookup of the renamed address: its `system_domains`
+        // row was re-keyed, so a cached positive hit would keep serving the old
+        // address (and its system_id) for up to the 30s TTL. Cache keys are the
+        // raw query strings callers pass in, so match both the key and the
+        // stored record to stay format-agnostic (same rationale as
+        // `delete_system_domain`).
+        if let Ok(mut cache) = self.domain_cache.write() {
+            cache.retain(|key, (_, rec)| {
+                key != &old_for_cache
+                    && rec
+                        .as_ref()
+                        .map(|r| r.domain != old_for_cache)
+                        .unwrap_or(true)
+            });
+        }
+        Ok(())
     }
 
     // Get the webhook config for a domain.
@@ -1948,6 +1982,99 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// REGRESSION (cache invalidation): a write must evict the positive domain
+    /// lookup cache, otherwise readers keep seeing the PRE-update row for up to
+    /// the 30s TTL. Measured production symptom: after `PUT is_active=false`
+    /// the probe still answered `{exists:true, valid:true}` until t+30.1s.
+    #[tokio::test]
+    async fn update_system_domain_is_visible_immediately_after_write() {
+        let db = temp_db();
+        db.insert_system_domain("d1", "sys1", "alice@x.com", Some("http://old"), None)
+            .await
+            .unwrap();
+
+        // 1) Warm the cache with a positive hit — the precondition of the bug.
+        let cached = db
+            .get_system_domain_by_name("alice@x.com")
+            .await
+            .unwrap()
+            .expect("seeded row");
+        assert_eq!(cached.webhook_url.as_deref(), Some("http://old"));
+        assert!(
+            db.domain_cache.read().unwrap().contains_key("alice@x.com"),
+            "fixture must seed the cache, otherwise this test proves nothing"
+        );
+
+        // 2) Update the webhook and deactivate.
+        let updated = db
+            .update_system_domain("d1", Some("http://new"), None, Some(false))
+            .await
+            .unwrap()
+            .expect("row exists");
+        assert_eq!(updated.webhook_url.as_deref(), Some("http://new"));
+        assert!(!updated.is_active);
+
+        // 3) The very next read must already reflect the write — no sleep, no
+        //    TTL wait.
+        let fresh = db
+            .get_system_domain_by_name("alice@x.com")
+            .await
+            .unwrap()
+            .expect("row still exists");
+        assert_eq!(
+            fresh.webhook_url.as_deref(),
+            Some("http://new"),
+            "stale cache: update_system_domain must invalidate the domain cache"
+        );
+        assert!(!fresh.is_active, "deactivation must be visible immediately");
+
+        // 4) The cache still caches: the read above repopulated the positive
+        //    entry (invalidation, not disabling — TTL semantics preserved).
+        let cache = db.domain_cache.read().unwrap();
+        assert_eq!(cache.len(), 1);
+        let (_, rec) = cache.get("alice@x.com").expect("positive hit re-cached");
+        assert_eq!(
+            rec.as_ref().unwrap().webhook_url.as_deref(),
+            Some("http://new")
+        );
+    }
+
+    /// REGRESSION (cache invalidation, rename path): `rename_agent_address_refs`
+    /// re-keys the `system_domains` row, so a cached lookup under the OLD
+    /// address must be evicted — otherwise readers resolve an address that no
+    /// longer exists for the whole TTL.
+    #[tokio::test]
+    async fn rename_agent_address_evicts_cached_old_lookup() {
+        let db = temp_db();
+        db.insert_system_domain("d1", "sys1", "old@x.com", Some("http://w"), None)
+            .await
+            .unwrap();
+        db.get_system_domain_by_name("old@x.com")
+            .await
+            .unwrap()
+            .expect("seeded row");
+        assert!(db.domain_cache.read().unwrap().contains_key("old@x.com"));
+
+        db.rename_agent_address_refs("old@x.com", "new@x.com")
+            .await
+            .unwrap();
+
+        assert!(
+            db.get_system_domain_by_name("old@x.com")
+                .await
+                .unwrap()
+                .is_none(),
+            "a renamed-away address must not be served from the cache"
+        );
+        let rec = db
+            .get_system_domain_by_name("new@x.com")
+            .await
+            .unwrap()
+            .expect("renamed row");
+        assert_eq!(rec.domain, "new@x.com");
+        assert_eq!(rec.webhook_url.as_deref(), Some("http://w"));
     }
 
     #[tokio::test]

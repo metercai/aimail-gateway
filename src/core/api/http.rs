@@ -3366,6 +3366,46 @@ mod tests {
         (status, value)
     }
 
+    /// Mutating twin of `signed_get`: v1 signature computed over the JSON body
+    /// actually sent (the signature covers sha256(body)).
+    async fn signed_put(
+        router: Router,
+        raw_key: &str,
+        identity: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        let body_bytes = serde_json::to_vec(body).unwrap();
+        let sig = compute_api_signature(
+            &crate::core::api::auth::sha256_hex(raw_key),
+            "PUT",
+            path,
+            &ts,
+            &body_bytes,
+        );
+        let req = axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .header("X-Api-Identity", identity)
+            .header("X-Api-Timestamp", &ts)
+            .header("X-Api-Signature", sig)
+            .body(axum::body::Body::from(body_bytes))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
     /// State ①: an existing, active address ⇒ {true,true}, two fields only.
     #[tokio::test]
     async fn address_probe_existing_active_address_is_true_true() {
@@ -3433,6 +3473,52 @@ mod tests {
             body,
             serde_json::json!({"exists": true, "valid": false}),
             "is_active=0 must yield valid=false"
+        );
+        assert_only_two_fields(&body);
+    }
+
+    /// REGRESSION (the reported defect, end-to-end): the read path caches
+    /// positive domain lookups for 30s, and `PUT` must evict. Pre-fix, a read
+    /// that warmed the cache kept answering `{exists:true, valid:true}` after
+    /// the domain was deactivated, flipping only when the TTL expired
+    /// (measured t+30.1s).
+    #[tokio::test]
+    async fn address_probe_reflects_deactivation_immediately_after_put() {
+        let (db, state, _rx, _dir) = probe_fixture("deactivate-then-probe").await;
+        db.insert_system_domain("d1", "sys1", "alice@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0004").await;
+        let router = probe_router(&state);
+        let probe_path = "/api/v1/admin/systems/sys1/addresses/alice%40x.com";
+
+        // 1) First read WARMS the positive lookup cache — the precondition.
+        let (status, body) = signed_get(router.clone(), "syskey0004", "sys1", probe_path).await;
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body, serde_json::json!({"exists": true, "valid": true}));
+        assert!(
+            db.domain_cache.read().unwrap().contains_key("alice@x.com"),
+            "precondition: the probe must have populated the domain cache"
+        );
+
+        // 2) Deactivate through the real API (PUT /admin/system-domains/:id).
+        let (put_status, put_body) = signed_put(
+            router.clone(),
+            "syskey0004",
+            "sys1",
+            "/api/v1/admin/system-domains/d1",
+            &serde_json::json!({"is_active": false}),
+        )
+        .await;
+        assert_eq!(put_status, StatusCode::OK, "PUT body was {put_body}");
+
+        // 3) The very next read — no sleep — must already report invalid.
+        let (status, body) = signed_get(router, "syskey0004", "sys1", probe_path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({"exists": true, "valid": false}),
+            "stale cache: update_system_domain must invalidate the domain cache"
         );
         assert_only_two_fields(&body);
     }
