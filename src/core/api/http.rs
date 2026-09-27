@@ -11,7 +11,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::core::errors::AppError;
 use tracing::{info, warn};
@@ -98,6 +98,12 @@ pub fn create_router(
         .route(
             "/api/v1/admin/systems/:sid/addresses/rename",
             post(rename_agent_address),
+        )
+        // Admin: single-address read-only probe (existence + validity ONLY;
+        // no list endpoint and no row content — see get_address_status)
+        .route(
+            "/api/v1/admin/systems/:sid/addresses/:addr",
+            get(get_address_status),
         )
         // Admin: agent metadata (manager, signature, persona, webhook)
         .route("/api/v1/admin/agent-meta/:email", put(update_agent_meta))
@@ -1122,6 +1128,128 @@ async fn rename_agent_address(
         "system_id": tid,
         "key_preserved": true,
     })))
+}
+
+// ── Single-address read-only probe ──
+
+/// Response of `GET /api/v1/admin/systems/:sid/addresses/:addr`.
+///
+/// **Exactly two booleans — never a row.** The endpoint exists so a caller
+/// (gate / quota pre-check) can ask "is this address there, and is it
+/// usable?" without the gateway ever serializing a row: no `webhook_url`, no
+/// `webhook_secret`, no manager/signature/persona, no id, no timestamps.
+/// A list/enumeration endpoint over a system's addresses was explicitly
+/// rejected by the owner for the same data-security reason.
+///
+/// `valid` is derived from the **real** schema: `system_domains` has one
+/// liveness column, `is_active` (`core/storage.rs` CREATE TABLE), and
+/// neither this repo nor `aimail-advanced` adds a validity/expiry column to
+/// it (advanced only ALTERs `ip_blacklist` / `systems` / `system_quotas` /
+/// `activation_codes`). So `valid = is_active` — there is no date column to
+/// consult. `exists` = a `system_domains` row whose `domain_addr` equals the
+/// probe AND belongs to the probed system.
+///
+/// The struct having no other fields is load-bearing: the unit tests assert
+/// the serialized object has exactly `{exists, valid}`, so a future field
+/// cannot be added silently.
+#[derive(Debug, Serialize)]
+struct AddressStatusResponse {
+    exists: bool,
+    valid: bool,
+}
+
+impl AddressStatusResponse {
+    /// The single non-disclosing answer. Used for "no such row", for a value
+    /// that cannot be an address, and for every unauthorized agent-scope
+    /// probe — identical bytes in all three cases, so the response is not an
+    /// existence oracle.
+    fn absent() -> Self {
+        Self {
+            exists: false,
+            valid: false,
+        }
+    }
+}
+
+/// GET /api/v1/admin/systems/:sid/addresses/:addr — read-only existence +
+/// validity probe for ONE address (`:addr` = the full email, URL-encoded).
+///
+/// Authorization reuses the existing scope predicates — no second auth model:
+/// - `platform` → any system, any address (same rule as GET .../domains);
+/// - `system` / `agent_admin` → only its own system; a foreign `:sid` is
+///   `403` like the sibling handlers (a 403 confirms no row);
+/// - `agent` → only its own address under its own system; any other probe
+///   (another address, or another system) returns the neutral
+///   `{false,false}`, byte-identical to a nonexistent address ⇒ no
+///   existence leak. The DB is not even queried in that case;
+/// - any other scope (`bridge`, …) → `403` via `require_scope_any`.
+///
+/// A value without `@` can never report `exists = true`: this endpoint
+/// probes addresses, never the bare-domain rows that share the table.
+async fn get_address_status(
+    state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    Path((tid, addr)): Path<(String, String)>,
+) -> Result<Json<AddressStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let addr = addr.trim().to_lowercase();
+
+    if is_platform_admin_scope(&api_key) {
+        // platform admin: unrestricted (mirrors GET /api/v1/admin/systems/:sid/domains)
+    } else if is_system_admin_scope(&api_key) || is_agent_admin_scope(&api_key) {
+        if api_key.system_id != tid {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Cross-system access denied".into(),
+                    detail: Some(format!(
+                        "Key system '{}' cannot read addresses of system '{}'",
+                        api_key.system_id, tid
+                    )),
+                }),
+            ));
+        }
+    } else if is_agent_scope(&api_key) {
+        // Agent keys see their own address and nothing else — and only under
+        // their own system. Anything else gets the neutral answer, with no DB
+        // round trip and no distinguishable status code.
+        let is_own = api_key.email_address.eq_ignore_ascii_case(&addr);
+        if !is_own || api_key.system_id != tid {
+            return Ok(Json(AddressStatusResponse::absent()));
+        }
+    } else {
+        require_scope_any(&api_key, &["system", "agent_admin"])?;
+    }
+
+    // Domain-level rows live in the same table; they are not addresses.
+    if !addr.contains('@') {
+        return Ok(Json(AddressStatusResponse::absent()));
+    }
+
+    let record = state
+        .factories
+        .email
+        .env_factory
+        .lookup_domain_addr(&addr)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+        })?;
+
+    // The row must belong to the probed system; a row of another system is
+    // simply "not this system's address".
+    Ok(Json(match record.filter(|r| r.system_id == tid) {
+        Some(r) => AddressStatusResponse {
+            exists: true,
+            valid: r.is_active,
+        },
+        None => AddressStatusResponse::absent(),
+    }))
 }
 
 // ── Agent Meta (domain_addr_meta) ──
@@ -3114,5 +3242,345 @@ mod tests {
         assert_eq!(resp.manager_address, "");
         assert_eq!(resp.agent_signature, "");
         assert_eq!(resp.agent_persona, "");
+    }
+
+    // ─── GET /api/v1/admin/systems/:sid/addresses/:addr (read-only probe) ───
+    //
+    // The endpoint answers with EXACTLY `{exists, valid}` and nothing else.
+    // These tests drive the real router (auth layer + handler + DB), not a
+    // copy of the logic, so they cover the whole request path.
+
+    use crate::base::strategy::{BaseRouterHook, BaseSystemStore};
+    use crate::core::api::auth::compute_api_signature;
+    use crate::core::api::dedup::SendDeduper;
+    use crate::core::api::monitor::Metrics;
+    use crate::core::api::seal::store_hash;
+    use crate::core::config::Config;
+    use crate::core::email::factory::MailFactories;
+    use crate::core::strategy::ExtensionProviders;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// The security口径, in one place: the probe body carries ONLY
+    /// `{exists, valid}`. Adding any field (webhook/secret/manager/…) must
+    /// break this assertion.
+    fn assert_only_two_fields(body: &serde_json::Value) {
+        let obj = body
+            .as_object()
+            .unwrap_or_else(|| panic!("probe response must be a JSON object, got {body}"));
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["exists", "valid"],
+            "probe response must expose ONLY {{exists, valid}} — got {body}"
+        );
+    }
+
+    /// DB + HTTP state + router over a throwaway DB directory.
+    async fn probe_fixture(
+        tag: &str,
+    ) -> (
+        Arc<Database>,
+        HttpState,
+        tokio::sync::mpsc::Receiver<String>,
+        std::path::PathBuf,
+    ) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-http-probe-{tag}-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::open(dir.join("aimail.db"), 4, None).unwrap());
+        let mut config = Config::default();
+        config.storage.path = dir.clone();
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::channel(8);
+        let state = HttpState {
+            factories: MailFactories::new(db.clone(), &dir, Arc::new(BaseSystemStore)),
+            metrics: Arc::new(Metrics::new()),
+            config,
+            trigger_tx,
+            extensions: Arc::new(ExtensionProviders::base()),
+            dns_resolver: None,
+            send_deduper: SendDeduper::new(Duration::from_secs(60), 64),
+        };
+        (db, state, trigger_rx, dir)
+    }
+
+    fn probe_router(state: &HttpState) -> Router {
+        let hook: Arc<dyn RouterHook> = Arc::new(BaseRouterHook(state.clone()));
+        create_router(state.clone(), hook, None, None, None, None)
+    }
+
+    /// Insert a key whose raw material is known to the test, so it can sign.
+    async fn seed_key(db: &Database, sid: &str, email: &str, scopes: &[&str], raw_key: &str) {
+        let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
+        let category = if email.is_empty() { "system" } else { "agent" };
+        db.insert_api_key(
+            sid,
+            email,
+            &store_hash(&crate::core::api::auth::sha256_hex(raw_key)),
+            &raw_key[..8],
+            &scopes,
+            None,
+            category,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Full router round-trip with a v1 signature (the client signs the
+    /// ENCODED path it sends).
+    async fn signed_get(
+        router: Router,
+        raw_key: &str,
+        identity: &str,
+        path: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        let sig = compute_api_signature(
+            &crate::core::api::auth::sha256_hex(raw_key),
+            "GET",
+            path,
+            &ts,
+            b"",
+        );
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri(path)
+            .header("X-Api-Identity", identity)
+            .header("X-Api-Timestamp", &ts)
+            .header("X-Api-Signature", sig)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    /// State ①: an existing, active address ⇒ {true,true}, two fields only.
+    #[tokio::test]
+    async fn address_probe_existing_active_address_is_true_true() {
+        let (db, state, _rx, _dir) = probe_fixture("exists").await;
+        db.insert_system_domain("d1", "sys1", "alice@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0001").await;
+
+        let (status, body) = signed_get(
+            probe_router(&state),
+            "syskey0001",
+            "sys1",
+            "/api/v1/admin/systems/sys1/addresses/alice%40x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body, serde_json::json!({"exists": true, "valid": true}));
+        assert_only_two_fields(&body);
+    }
+
+    /// State ②: a nonexistent address ⇒ {false,false} — and still nothing else.
+    #[tokio::test]
+    async fn address_probe_missing_address_is_false_false_with_no_extra_fields() {
+        let (db, state, _rx, _dir) = probe_fixture("missing").await;
+        seed_key(&db, "sys1", "", &["system"], "syskey0002").await;
+
+        let (status, body) = signed_get(
+            probe_router(&state),
+            "syskey0002",
+            "sys1",
+            "/api/v1/admin/systems/sys1/addresses/nobody%40x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"exists": false, "valid": false}));
+        assert_only_two_fields(&body);
+    }
+
+    /// State ④: deactivating the row (the only liveness knob the table has)
+    /// flips `valid` to false while `exists` stays true.
+    #[tokio::test]
+    async fn address_probe_deactivated_address_is_valid_false() {
+        let (db, state, _rx, _dir) = probe_fixture("deactivated").await;
+        db.insert_system_domain("d1", "sys1", "alice@x.com", None, None)
+            .await
+            .unwrap();
+        db.update_system_domain("d1", None, None, Some(false))
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0003").await;
+
+        let (status, body) = signed_get(
+            probe_router(&state),
+            "syskey0003",
+            "sys1",
+            "/api/v1/admin/systems/sys1/addresses/alice%40x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            serde_json::json!({"exists": true, "valid": false}),
+            "is_active=0 must yield valid=false"
+        );
+        assert_only_two_fields(&body);
+    }
+
+    /// State ③: an agent-scope key probing ANOTHER live address of the same
+    /// system must be indistinguishable from probing a nonexistent one — same
+    /// status, same bytes. (Its own address still answers truthfully.)
+    #[tokio::test]
+    async fn agent_scope_probe_of_another_address_leaks_nothing() {
+        let (db, state, _rx, _dir) = probe_fixture("agent-scope").await;
+        db.insert_system_domain("d1", "sys1", "alice@x.com", None, None)
+            .await
+            .unwrap();
+        db.insert_system_domain("d2", "sys1", "bob@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "alice@x.com", &["agent"], "agentkey0001").await;
+        let router = probe_router(&state);
+
+        // Own address: truthful.
+        let (own_status, own) = signed_get(
+            router.clone(),
+            "agentkey0001",
+            "alice@x.com",
+            "/api/v1/admin/systems/sys1/addresses/alice%40x.com",
+        )
+        .await;
+        assert_eq!(own_status, StatusCode::OK);
+        assert_eq!(own, serde_json::json!({"exists": true, "valid": true}));
+
+        // Someone else's LIVE address of the same system.
+        let (other_status, other) = signed_get(
+            router.clone(),
+            "agentkey0001",
+            "alice@x.com",
+            "/api/v1/admin/systems/sys1/addresses/bob%40x.com",
+        )
+        .await;
+        // A nonexistent address.
+        let (none_status, none) = signed_get(
+            router.clone(),
+            "agentkey0001",
+            "alice@x.com",
+            "/api/v1/admin/systems/sys1/addresses/nobody%40x.com",
+        )
+        .await;
+
+        assert_eq!(other, serde_json::json!({"exists": false, "valid": false}));
+        assert_only_two_fields(&other);
+        assert_eq!(other_status, none_status, "status must not discriminate");
+        assert_eq!(
+            other, none,
+            "probing another agent's live address must be byte-identical to probing a missing one"
+        );
+
+        // Another system's sid, with its own address in the path.
+        let (foreign_status, foreign) = signed_get(
+            router,
+            "agentkey0001",
+            "alice@x.com",
+            "/api/v1/admin/systems/sys2/addresses/alice%40x.com",
+        )
+        .await;
+        assert_eq!(foreign_status, StatusCode::OK);
+        assert_eq!(
+            foreign,
+            serde_json::json!({"exists": false, "valid": false})
+        );
+    }
+
+    /// A system-scope key may not read a foreign system (403, like the sibling
+    /// handlers — a 403 confirms no row).
+    #[tokio::test]
+    async fn system_scope_cross_system_probe_is_forbidden() {
+        let (db, state, _rx, _dir) = probe_fixture("cross-system").await;
+        db.insert_system_domain("d1", "sys2", "bob@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0004").await;
+
+        let (status, _body) = signed_get(
+            probe_router(&state),
+            "syskey0004",
+            "sys1",
+            "/api/v1/admin/systems/sys2/addresses/bob%40x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// A bridge-scope key has no business here: 403, never an answer.
+    #[tokio::test]
+    async fn bridge_scope_cannot_probe_addresses() {
+        let (db, state, _rx, _dir) = probe_fixture("bridge-scope").await;
+        db.insert_system_domain("d1", "sys1", "alice@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["bridge"], "bridgekey01").await;
+
+        let (status, _body) = signed_get(
+            probe_router(&state),
+            "bridgekey01",
+            "sys1",
+            "/api/v1/admin/systems/sys1/addresses/alice%40x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    /// A bare-domain value (domain-level row, same table) can never report
+    /// `exists=true` through the ADDRESS probe.
+    #[tokio::test]
+    async fn probe_of_a_bare_domain_never_reports_exists() {
+        let (db, state, _rx, _dir) = probe_fixture("bare-domain").await;
+        db.insert_system_domain("d0", "sys1", "x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0005").await;
+
+        let (status, body) = signed_get(
+            probe_router(&state),
+            "syskey0005",
+            "sys1",
+            "/api/v1/admin/systems/sys1/addresses/x.com",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, serde_json::json!({"exists": false, "valid": false}));
+        assert_only_two_fields(&body);
+    }
+
+    /// Structural guard independent of the router: the response type itself
+    /// can only ever serialize two booleans.
+    #[test]
+    fn probe_response_type_serializes_to_exactly_exists_and_valid() {
+        let hit = serde_json::to_value(AddressStatusResponse {
+            exists: true,
+            valid: false,
+        })
+        .unwrap();
+        assert_only_two_fields(&hit);
+        assert_eq!(hit, serde_json::json!({"exists": true, "valid": false}));
+
+        let absent = serde_json::to_value(AddressStatusResponse::absent()).unwrap();
+        assert_only_two_fields(&absent);
+        assert_eq!(absent, serde_json::json!({"exists": false, "valid": false}));
     }
 }
