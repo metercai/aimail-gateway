@@ -1,3 +1,4 @@
+#![allow(mismatched_lifetime_syntaxes)]
 //! A library for building smtp servers.
 //!
 //! The library supplies a parser and SMTP state machine. The user of the library
