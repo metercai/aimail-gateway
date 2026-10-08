@@ -63,15 +63,12 @@ jobs:
 
       - name: Rename binary
         shell: bash
-        run: |
-          BIN="aimail-gateway-${{ github.ref_name }}-${{ matrix.platform }}${{ matrix.ext }}"
-          cp target/${{ matrix.target }}/release/aimail-gateway${{ matrix.ext }} "$BIN"
-
+        run: cp "target/${{ matrix.target }}/release/aimail-gateway${{ matrix.ext }}" "aimail-gateway-${{ matrix.platform }}${{ matrix.ext }}"
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: aimail-gateway-${{ github.ref_name }}-${{ matrix.platform }}
-          path: aimail-gateway-${{ github.ref_name }}-${{ matrix.platform }}${{ matrix.ext }}
+          name: aimail-gateway-${{ matrix.platform }}
+          path: aimail-gateway-${{ matrix.platform }}${{ matrix.ext }}
 
   release:
     needs: build
@@ -82,7 +79,7 @@ jobs:
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          files: aimail-gateway-${{ github.ref_name }}-*/*
+          files: aimail-gateway-*/*
           body: |
             ## Platform variants
 
