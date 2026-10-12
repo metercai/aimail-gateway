@@ -129,6 +129,11 @@ pub fn create_router(
         // Admin: pending deliveries (pull-mode for aimail-bridge)
         .route("/api/v1/admin/pending", post(list_pending_deliveries))
         .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
+        // Admin: probe inbound-endpoint reachability (CLI install webhook plan,
+        // 2026-10-13: restored from v1.0; pure TCP classifier — the caller
+        // interprets the error class, e.g. the agent probe treats
+        // connection_refused as "path open, process not yet listening")
+        .route("/api/v1/admin/probe-webhook", post(probe_webhook))
         // Admin: check if domain exists globally (integrate.sh domain uniqueness)
         .route("/api/v1/admin/domains/check", get(check_domain_exists))
         .with_state(state.clone())
@@ -3118,11 +3123,76 @@ async fn ack_pending_deliveries(
 
 // ── Probe Webhook ───────────────────────────────────────────────
 
-// Probe network reachability to a host:port from the relay.
-//
-// Used by integrate.sh to determine whether to deploy the bridge in
-// push mode (relay can reach the agent's machine) or pull mode (relay
-// cannot, bridge must poll).
+/// Probe network reachability to a host:port from the relay.
+///
+/// 2026-10-13: restored from v1.0 (`7d766b5^`) for the CLI install webhook
+/// plan. This endpoint is a **pure TCP classifier** — it reports the outcome
+/// class (`connected` / `connection_refused` / `timeout` / `unreachable` /
+/// `loopback_not_allowed`) and it is the **caller** that interprets it
+/// against the plan:
+/// - agent-endpoint probe (GW → AIMAIL_AGENT_HOST): `connection_refused`
+///   means the path is open but the agent process is not listening yet
+///   (the agent starts after install) ⇒ treated as REACHABLE.
+/// - bridge-endpoint probe (GW → AIMAIL_BRIDGE_HOST): `connection_refused`
+///   means the bridge process is down ⇒ treated as UNREACHABLE (degrade).
+/// Loopback targets are rejected by the endpoint itself so a remote GW can
+/// never "probe" its own machine.
+
+/// Run one probe and classify the outcome. Pure classifier (2026-10-13):
+/// the caller interprets the `error` class against the plan (see
+/// `probe_webhook`). Returns the JSON payload the endpoint returns.
+pub(crate) async fn probe_reachability(addr: &str) -> serde_json::Value {
+    // Reject loopback addresses — probe is meant for cross-machine connectivity
+    if let Ok(sock_addr) = addr.parse::<std::net::SocketAddr>() {
+        if sock_addr.ip().is_loopback() {
+            return serde_json::json!({
+                "reachable": false,
+                "error": "loopback_not_allowed",
+                "detail": "Probe does not accept loopback addresses (127.0.0.1/::1). Provide a routable IP.",
+            });
+        }
+    }
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(_stream)) => serde_json::json!({
+            "reachable": true,
+            "error": "connected",
+        }),
+        Ok(Err(e)) => {
+            let kind = e.kind();
+            let error_str = if kind == std::io::ErrorKind::ConnectionRefused {
+                "connection_refused"
+            } else {
+                "unreachable"
+            };
+            serde_json::json!({
+                "reachable": false,
+                "error": error_str,
+                "detail": e.to_string(),
+            })
+        }
+        Err(_elapsed) => serde_json::json!({
+            "reachable": false,
+            "error": "timeout",
+            "detail": "dial tcp timeout after 5s",
+        }),
+    }
+}
+
+async fn probe_webhook(
+    _state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    Json(req): Json<ProbeWebhookRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_scope_any(&api_key, &["system"])?;
+    Ok(Json(probe_reachability(&req.addr).await))
+}
 
 // ── Public config ─────────────────────────────────────────────────
 
@@ -3668,5 +3738,30 @@ mod tests {
         let absent = serde_json::to_value(AddressStatusResponse::absent()).unwrap();
         assert_only_two_fields(&absent);
         assert_eq!(absent, serde_json::json!({"exists": false, "valid": false}));
+    }
+
+    // 2026-10-13: the restored probe-webhook endpoint must classify outcomes,
+    // never decide reachability — interpretation belongs to the caller
+    // (CLI install webhook plan).
+    //
+    // Note: the `connected` and `connection_refused` classes need a
+    // non-loopback target to observe (the endpoint's loopback guard is the
+    // very behavior pinned by the first test), so they are not exercised on
+    // a 127.0.0.1 listener here. The `connected` branch is the v1.0
+    // behavior, byte-for-byte.
+    #[tokio::test]
+    async fn probe_classifies_loopback_as_not_allowed() {
+        let res = probe_reachability("127.0.0.1:9099").await;
+        assert_eq!(res["reachable"], serde_json::json!(false));
+        assert_eq!(res["error"], serde_json::json!("loopback_not_allowed"));
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_unroutable_target_as_timeout() {
+        // 240.0.0.0/4 is IETF protocol assignment — no route, packets are
+        // dropped, so the connect attempt runs to the 5s timeout.
+        let res = probe_reachability("240.0.0.1:9").await;
+        assert_eq!(res["reachable"], serde_json::json!(false));
+        assert_eq!(res["error"], serde_json::json!("timeout"));
     }
 }

@@ -111,9 +111,16 @@ impl EnvFactory {
 
     // ── Domains ──
 
-    /// Register a new domain under a system.
+    /// Register (or re-register) a domain under a system.
     /// For email-address domains (containing '@'), also upsert into domain_addr_meta
     /// as the authoritative per-agent webhook store.
+    ///
+    /// Re-registration semantics (2026-10-13, owner ruling "复用注册(重发地址)"):
+    /// re-registering the same domain **within the same system** is an idempotent
+    /// upsert — it refreshes webhook_url / webhook_secret / manager (this is how
+    /// the inbound-up feedback loop pushes the confirmed inbound URL back to the
+    /// gateway). Re-registering a domain owned by a **different** system is
+    /// still a conflict (anti-squat).
     pub async fn create_domain(
         &self,
         id: &str,
@@ -124,12 +131,36 @@ impl EnvFactory {
         manager_address: Option<&str>,
     ) -> AppResult<SystemDomainRecord> {
         validate_webhook_url(webhook_url)?;
-        // Pre-check: domain must be globally unique
-        if self.lookup_domain_addr(domain).await?.is_some() {
-            return Err(AppError::Conflict(format!(
-                "Domain '{}' already exists",
-                domain
-            )));
+        // Same-system re-registration: upsert (refresh webhook fields).
+        if let Some(existing) = self.lookup_domain_addr(domain).await? {
+            if existing.system_id != system_id {
+                return Err(AppError::Conflict(format!(
+                    "Domain '{}' already exists (owned by another system)",
+                    domain
+                )));
+            }
+            let updated = self
+                .db
+                .update_system_domain(
+                    &existing.id,
+                    webhook_url,
+                    webhook_secret,
+                    Some(true),
+                )
+                .await?
+                .ok_or_else(|| {
+                    AppError::Internal(format!(
+                        "update_system_domain returned no rows for existing domain '{}'",
+                        domain
+                    ))
+                })?;
+            if domain.contains('@') {
+                let _ = self
+                    .db
+                    .upsert_domain_addr_meta(domain, system_id, manager_address, None, None)
+                    .await;
+            }
+            return Ok(updated);
         }
         let record = self
             .db
@@ -773,6 +804,73 @@ mod tests {
         assert!(
             matches!(upd.err(), Some(AppError::Validation(_))),
             "the update path must refuse an undeliverable value too"
+        );
+    }
+
+    // 2026-10-13: re-registering (复用注册 / 重发地址) the same domain within
+    // the same system must be an idempotent upsert — this is the mechanism
+    // the inbound-up feedback loop uses to push the confirmed inbound URL
+    // back to the gateway. A cross-system re-registration stays a conflict.
+    #[tokio::test]
+    async fn reregister_same_system_is_upsert() {
+        let (_db, factory) = temp_factory();
+        factory
+            .create_domain(
+                "1",
+                "sys1",
+                "agent@test.com",
+                Some("http://127.0.0.1:9099/aimail/inbound"),
+                Some("secret-old"),
+                Some("mgr@test.com"),
+            )
+            .await
+            .unwrap();
+
+        // Re-register: same address, new confirmed inbound URL.
+        let again = factory
+            .create_domain(
+                "2",
+                "sys1",
+                "agent@test.com",
+                Some("http://203.0.113.7:9099/aimail/inbound"),
+                Some("secret-new"),
+                Some("mgr@test.com"),
+            )
+            .await
+            .expect("same-system re-registration must be an upsert");
+        assert_eq!(
+            again.webhook_url.as_deref(),
+            Some("http://203.0.113.7:9099/aimail/inbound"),
+            "upsert must refresh webhook_url"
+        );
+        assert_eq!(
+            again.webhook_secret.as_deref(),
+            Some("secret-new"),
+            "upsert must refresh webhook_secret"
+        );
+        assert!(again.is_active, "upsert must keep the domain active");
+
+        // Only one row may exist for the domain.
+        let rows = factory
+            .list_domains("agent@test.com")
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-registration must not duplicate the row");
+    }
+
+    #[tokio::test]
+    async fn reregister_other_system_still_conflicts() {
+        let (_db, factory) = temp_factory();
+        factory
+            .create_domain("1", "sys1", "agent@test.com", None, None, None)
+            .await
+            .unwrap();
+        let res = factory
+            .create_domain("2", "sys2", "agent@test.com", None, None, None)
+            .await;
+        assert!(
+            matches!(res.err(), Some(AppError::Conflict(_))),
+            "cross-system re-registration must stay a conflict"
         );
     }
 }
