@@ -95,6 +95,23 @@ pub struct SmtpConfig {
     pub max_concurrent_deliveries: usize,
 }
 
+impl SmtpConfig {
+    /// Parse `bind` into (host, port). If no port is specified, defaults to 25
+    /// (the published SMTP protocol contract).
+    ///
+    /// Examples:
+    ///   "127.0.0.1:12526" → ("127.0.0.1", 12526)
+    ///   "127.0.0.1"       → ("127.0.0.1", 25)
+    pub fn parsed_bind(&self) -> (&str, u16) {
+        if let Some((host, port_str)) = self.bind.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                return (host, port);
+            }
+        }
+        (&self.bind, 25)
+    }
+}
+
 impl Default for SmtpConfig {
     fn default() -> Self {
         Self {
@@ -687,5 +704,33 @@ delivery_timeout_secs = 0
             .expect_err("zero delivery timeout must be rejected");
         let msg = format!("{err}");
         assert!(msg.contains("smtp.delivery_timeout_secs"), "got {msg}");
+    }
+
+    #[test]
+    fn smtp_parsed_bind_with_explicit_port() {
+        let c = SmtpConfig {
+            bind: "127.0.0.1:12526".to_string(),
+            ..SmtpConfig::default()
+        };
+        assert_eq!(c.parsed_bind(), ("127.0.0.1", 12526));
+    }
+
+    #[test]
+    fn smtp_parsed_bind_without_port_defaults_25() {
+        let c = SmtpConfig {
+            bind: "127.0.0.1".to_string(),
+            ..SmtpConfig::default()
+        };
+        assert_eq!(c.parsed_bind(), ("127.0.0.1", 25));
+    }
+
+    #[test]
+    fn smtp_parsed_bind_garbage_port_defaults_25() {
+        // 端口段不可解析 ⇒ 端口兜底 25(host 段保留原 bind 串, 与 HttpConfig::parsed_bind 同形)。
+        let c = SmtpConfig {
+            bind: "0.0.0.0:abc".to_string(),
+            ..SmtpConfig::default()
+        };
+        assert_eq!(c.parsed_bind().1, 25);
     }
 }

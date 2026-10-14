@@ -17,6 +17,7 @@ pub async fn health_check(state: axum::extract::State<HttpState>) -> Json<Health
         uptime_secs: state.metrics.uptime_secs(),
         version: state.metrics.version(),
         owner_email: state.config.admin.email.clone(),
+        smtp_port: state.config.smtp.parsed_bind().1,
     })
 }
 
@@ -283,4 +284,28 @@ pub struct HealthStatus {
     pub version: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_email: Option<String>,
+    /// SMTP listen port (from `[smtp] bind`). Clients use this to reach the
+    /// gateway's SMTP listener instead of assuming the protocol default 25.
+    pub smtp_port: u16,
+}
+
+#[cfg(test)]
+mod health_status_tests {
+    use super::*;
+
+    /// `/health` 必须暴露 `smtp_port`(u16)——CLI 审批/ping 步骤靠它定位网关 SMTP 监听端口,
+    /// 不再假设协议默认 25(测试环境常配非 25)。
+    #[test]
+    fn health_status_serializes_smtp_port() {
+        let h = HealthStatus {
+            status: "ok",
+            uptime_secs: 3,
+            version: "base",
+            owner_email: None,
+            smtp_port: 12526,
+        };
+        let v: serde_json::Value = serde_json::to_value(&h).expect("serialize");
+        assert_eq!(v.get("smtp_port").and_then(|x| x.as_u64()), Some(12526));
+        assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("ok"));
+    }
 }
