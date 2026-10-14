@@ -257,3 +257,42 @@ impl AttachmentMetaRecord {
         crate::core::email::factory::AttachmentFactory::extension_for(&self.filename)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_with_headers(headers_json: &str) -> EmailRecord {
+        EmailRecord {
+            id: "e1".into(),
+            status: "pending".into(),
+            system_id: "s1".into(),
+            direction: "inbound".into(),
+            sender: "a@x.test".into(),
+            recipients: r#"[["a@x.test", "in", ""]]"#.into(),
+            endpoints: None,
+            subject: "hi".into(),
+            body: "hello".into(),
+            headers: Some(headers_json.to_string()),
+            attachments: None,
+            send_count: 0,
+            last_sent_at: "".into(),
+            next_retry_at: None,
+            max_attempts: 3,
+            created_at: "2026-10-12T00:00:00Z".into(),
+            sender_signature: None,
+        }
+    }
+
+    /// Internal headers map is all-lowercase (inbound normalizes via
+    /// to_lowercase; welcome/send write "message_id"). to_webhook_payload must
+    /// surface that key at the top level so the SDK logs inbound + threads
+    /// replies. A title-case "Message-ID" would be silently dropped — the L3
+    /// welcome blind spot this guards against.
+    #[test]
+    fn webhook_payload_surfaces_lowercase_message_id() {
+        let rec = record_with_headers(r#"{"message_id":"<abc@x.test>"}"#);
+        let payload = rec.to_webhook_payload("relay@aimail-relay.local", None);
+        assert_eq!(payload["message_id"].as_str(), Some("<abc@x.test>"));
+    }
+}

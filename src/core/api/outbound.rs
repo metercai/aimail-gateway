@@ -70,8 +70,10 @@ pub async fn enqueue_outbound_simple(
             h.insert("delivery_type".to_string(), json!("webhook"));
         }
         let domain = from.split('@').nth(1).unwrap_or("aimail-relay");
+        // Lowercase key: internal headers map convention (inbound normalizes
+        // to lowercase; webhook/SMTP read sites all read "message_id").
         h.insert(
-            "Message-ID".to_string(),
+            "message_id".to_string(),
             json!(format!("<{}@{}>", Uuid::new_v4(), domain)),
         );
         serde_json::to_string(&h).unwrap_or_default()

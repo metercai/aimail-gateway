@@ -216,7 +216,9 @@ pub async fn send_welcome(
         .format("%Y-%m-%d %H:%M:%S %z")
         .to_string();
     let mut headers: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    headers.insert("Message-ID".into(), message_id.clone());
+    // Internal headers map is all-lowercase (inbound normalizes via to_lowercase());
+    // write lowercase so message_id_from_headers / to_webhook_payload can read it.
+    headers.insert("message_id".to_string(), message_id.clone());
     headers.insert("X-AIMail-Welcome".into(), "1".into());
     let headers_json = serde_json::to_string(&headers).unwrap_or_default();
 

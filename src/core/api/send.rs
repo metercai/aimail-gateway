@@ -424,7 +424,9 @@ pub async fn send_email_core(
             state.config.http.hostname.as_deref(),
         );
         let msg_id = format!("<{}@{}>", Uuid::new_v4(), domain);
-        merged_headers.insert("Message-ID".into(), msg_id);
+        // Lowercase key: matches inbound normalization and the read sites
+        // (sender.rs / mx_deliverer / to_webhook_payload all read "message_id").
+        merged_headers.insert("message_id".to_string(), msg_id);
     }
 
     // Board addresses in the CC slot (session flow) are context markers —
