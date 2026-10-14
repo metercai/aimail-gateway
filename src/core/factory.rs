@@ -141,12 +141,7 @@ impl EnvFactory {
             }
             let updated = self
                 .db
-                .update_system_domain(
-                    &existing.id,
-                    webhook_url,
-                    webhook_secret,
-                    Some(true),
-                )
+                .update_system_domain(&existing.id, webhook_url, webhook_secret, Some(true))
                 .await?
                 .ok_or_else(|| {
                     AppError::Internal(format!(
@@ -851,10 +846,7 @@ mod tests {
         assert!(again.is_active, "upsert must keep the domain active");
 
         // Only one row may exist for the domain.
-        let rows = factory
-            .list_domains("agent@test.com")
-            .await
-            .unwrap();
+        let rows = factory.list_domains("agent@test.com").await.unwrap();
         assert_eq!(rows.len(), 1, "re-registration must not duplicate the row");
     }
 
