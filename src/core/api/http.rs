@@ -3123,20 +3123,20 @@ async fn ack_pending_deliveries(
 
 // ── Probe Webhook ───────────────────────────────────────────────
 
-/// Probe network reachability to a host:port from the relay.
-///
-/// 2026-10-13: restored from v1.0 (`7d766b5^`) for the CLI install webhook
-/// plan. This endpoint is a **pure TCP classifier** — it reports the outcome
-/// class (`connected` / `connection_refused` / `timeout` / `unreachable` /
-/// `loopback_not_allowed`) and it is the **caller** that interprets it
-/// against the plan:
-/// - agent-endpoint probe (GW → AIMAIL_AGENT_HOST): `connection_refused`
-///   means the path is open but the agent process is not listening yet
-///   (the agent starts after install) ⇒ treated as REACHABLE.
-/// - bridge-endpoint probe (GW → AIMAIL_BRIDGE_HOST): `connection_refused`
-///   means the bridge process is down ⇒ treated as UNREACHABLE (degrade).
-/// Loopback targets are rejected by the endpoint itself so a remote GW can
-/// never "probe" its own machine.
+// Probe network reachability to a host:port from the relay.
+//
+// 2026-10-13: restored from v1.0 (`7d766b5^`) for the CLI install webhook
+// plan. This endpoint is a **pure TCP classifier** — it reports the outcome
+// class (`connected` / `connection_refused` / `timeout` / `unreachable` /
+// `loopback_not_allowed`) and it is the **caller** that interprets it
+// against the plan:
+// - agent-endpoint probe (GW → AIMAIL_AGENT_HOST): `connection_refused`
+//   means the path is open but the agent process is not listening yet
+//   (the agent starts after install) ⇒ treated as REACHABLE.
+// - bridge-endpoint probe (GW → AIMAIL_BRIDGE_HOST): `connection_refused`
+//   means the bridge process is down ⇒ treated as UNREACHABLE (degrade).
+// Loopback targets are rejected by the endpoint itself so a remote GW can
+// never "probe" its own machine.
 
 /// Run one probe and classify the outcome. Pure classifier (2026-10-13):
 /// the caller interprets the `error` class against the plan (see
