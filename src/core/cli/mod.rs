@@ -11,6 +11,52 @@ use clap::{Parser, Subcommand};
 use crate::core::config::LoggingConfig;
 use crate::core::errors::AppResult;
 
+/// pid-file 路径(clap 字段类型)。默认值 = std::env::temp_dir() 下的
+/// aimail-gateway.pid:unix 无 TMPDIR 时 temp_dir() == /tmp(原字面量
+/// "/tmp/aimail-gateway.pid" 行为逐字不变);Windows ⇒ %LOCALAPPDATA%\Temp(可写,
+/// /tmp 字面量在该平台解析为 C:\tmp 不存在 ⇒ os error 3)。
+/// Deref 到 PathBuf:gateway/advanced 两仓既有 &PathBuf 调用点零改动。
+#[derive(Clone, Debug)]
+pub struct PidFile(PathBuf);
+
+impl PidFile {
+    pub fn default_path() -> PathBuf {
+        std::env::temp_dir().join("aimail-gateway.pid")
+    }
+}
+
+impl Default for PidFile {
+    fn default() -> Self {
+        PidFile(Self::default_path())
+    }
+}
+
+impl std::fmt::Display for PidFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.to_string_lossy())
+    }
+}
+
+impl std::ops::Deref for PidFile {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<std::path::Path> for PidFile {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for PidFile {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(PidFile(PathBuf::from(s)))
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "aimail-gateway",
@@ -34,8 +80,8 @@ pub struct Cli {
     #[arg(short = 'l', long)]
     pub log_level: Option<String>,
 
-    #[arg(long, default_value = "/tmp/aimail-gateway.pid")]
-    pub pid_file: PathBuf,
+    #[arg(long, default_value_t = PidFile::default())]
+    pub pid_file: PidFile,
 
     #[arg(short = 'd', long)]
     pub daemon: bool,
