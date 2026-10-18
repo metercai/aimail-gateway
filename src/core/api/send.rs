@@ -378,6 +378,16 @@ pub async fn send_email_core(
         merged_headers.insert(k, v);
     }
 
+    // Thread headers arrive RFC-cased from the SDKs (`Message-ID`,
+    // `In-Reply-To`, `References`) while the outbound MIME builders read the
+    // lowercase record keys (`message_id`, `in_reply_to`, `references`).
+    // Fold the three onto the record keys here — this is the single API
+    // entry both editions share. Folding per SDK instead would leave the
+    // same hole for any other client: an uppercase key used to satisfy the
+    // "already present" check below and then be ignored by the builders, so
+    // a reply left the gateway with no threading headers at all.
+    normalize_thread_headers(&mut merged_headers);
+
     // ── a2a_board: session flow detection (outbound) ──
     // Check CC for board addresses; inject board identity headers if found.
     // Parse the raw (lowercased) address — board addresses are never
@@ -413,10 +423,7 @@ pub async fn send_email_core(
     // Every outbound email needs a Message-ID header for snapshot
     // tracking and thread correlation. If the caller didn't provide one,
     // generate it from the gateway's hostname.
-    if !merged_headers.contains_key("Message-ID")
-        && !merged_headers.contains_key("message-id")
-        && !merged_headers.contains_key("message_id")
-    {
+    if !merged_headers.contains_key("message_id") {
         // Domain resolution chain (specific → general): see resolve_fallback_domain()
         let domain = resolve_fallback_domain(
             sender,
@@ -1309,9 +1316,89 @@ async fn send_unregistered_notification(
     }
 }
 
+/// Fold the three thread headers onto their canonical record keys.
+///
+/// Matching is case-insensitive and treats `-` and `_` as the same separator,
+/// so `Message-ID`, `message-id` and `message_id` all land on `message_id`
+/// (likewise `In-Reply-To` / `in_reply_to` and `References` / `references`).
+/// The canonical key wins when both spellings are present. Every other header
+/// keeps its exact casing: `X-Board-*` and the outbound passthrough whitelist
+/// are matched by name.
+fn normalize_thread_headers(headers: &mut std::collections::HashMap<String, String>) {
+    const CANONICAL: [&str; 3] = ["message_id", "in_reply_to", "references"];
+    for canonical in CANONICAL {
+        let mut value: Option<String> = None;
+        let aliases: Vec<String> = headers
+            .keys()
+            .filter(|k| {
+                k.as_str() != canonical
+                    && k.to_ascii_lowercase().replace('-', "_") == canonical
+            })
+            .cloned()
+            .collect();
+        for alias in aliases {
+            if let Some(v) = headers.remove(&alias) {
+                if value.is_none() {
+                    value = Some(v);
+                }
+            }
+        }
+        if let Some(v) = value {
+            headers.entry(canonical.to_string()).or_insert(v);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_fallback_domain;
+    use super::{normalize_thread_headers, resolve_fallback_domain};
+
+    #[test]
+    fn thread_headers_fold_onto_record_keys() {
+        // RFC casing (what both SDKs send today)
+        let mut h = std::collections::HashMap::from([
+            ("Message-ID".to_string(), "<a@x>".to_string()),
+            ("In-Reply-To".to_string(), "<root@x>".to_string()),
+            ("References".to_string(), "<root@x> <mid@x>".to_string()),
+            ("X-Board-ID".to_string(), "board-1".to_string()),
+        ]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.get("message_id").map(String::as_str), Some("<a@x>"));
+        assert_eq!(h.get("in_reply_to").map(String::as_str), Some("<root@x>"));
+        assert_eq!(
+            h.get("references").map(String::as_str),
+            Some("<root@x> <mid@x>")
+        );
+        // aliases are gone (no duplicate headers reach the MIME builder)
+        for alias in ["Message-ID", "In-Reply-To", "References"] {
+            assert!(!h.contains_key(alias), "alias {alias} must be folded");
+        }
+        // untouched headers keep their casing
+        assert_eq!(h.get("X-Board-ID").map(String::as_str), Some("board-1"));
+    }
+
+    #[test]
+    fn canonical_thread_key_wins_over_alias() {
+        let mut h = std::collections::HashMap::from([
+            ("message_id".to_string(), "<keep@x>".to_string()),
+            ("Message-ID".to_string(), "<drop@x>".to_string()),
+            ("message-id".to_string(), "<drop2@x>".to_string()),
+        ]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.get("message_id").map(String::as_str), Some("<keep@x>"));
+        assert_eq!(h.len(), 1, "only the canonical key survives: {h:?}");
+    }
+
+    #[test]
+    fn missing_thread_headers_add_nothing() {
+        let mut h = std::collections::HashMap::from([(
+            "X-AIMail-Agent".to_string(),
+            "alice".to_string(),
+        )]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.len(), 1);
+        assert!(!h.contains_key("message_id"));
+    }
 
     #[test]
     fn fallback_domain_prefers_sender_domain() {
