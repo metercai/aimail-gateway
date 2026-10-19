@@ -113,7 +113,13 @@ fn mail(buf: &[u8]) -> IResult<&[u8], Cmd> {
     let (buf, reverse_path) = mail_path(buf)?;
     let (buf, _) = tag(b">")(buf)?;
     let (buf, is8bit) = mail_params(buf)?;
-    Ok((buf, Cmd::Mail { reverse_path, is8bit }))
+    Ok((
+        buf,
+        Cmd::Mail {
+            reverse_path,
+            is8bit,
+        },
+    ))
 }
 
 fn rcpt(buf: &[u8]) -> IResult<&[u8], Cmd> {

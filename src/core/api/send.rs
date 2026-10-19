@@ -1331,8 +1331,7 @@ fn normalize_thread_headers(headers: &mut std::collections::HashMap<String, Stri
         let aliases: Vec<String> = headers
             .keys()
             .filter(|k| {
-                k.as_str() != canonical
-                    && k.to_ascii_lowercase().replace('-', "_") == canonical
+                k.as_str() != canonical && k.to_ascii_lowercase().replace('-', "_") == canonical
             })
             .cloned()
             .collect();
@@ -1391,10 +1390,8 @@ mod tests {
 
     #[test]
     fn missing_thread_headers_add_nothing() {
-        let mut h = std::collections::HashMap::from([(
-            "X-AIMail-Agent".to_string(),
-            "alice".to_string(),
-        )]);
+        let mut h =
+            std::collections::HashMap::from([("X-AIMail-Agent".to_string(), "alice".to_string())]);
         normalize_thread_headers(&mut h);
         assert_eq!(h.len(), 1);
         assert!(!h.contains_key("message_id"));

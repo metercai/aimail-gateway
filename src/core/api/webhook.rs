@@ -776,8 +776,7 @@ async fn handle_manager_commands(
                 );
                 // 闭环: agent 先拿到"已生效"的信(pull 模式下它没有别的途径知道自己
                 // 可以按 persona 说话了), 再把回执发给安全员。
-                notify_agent_persona_applied(ack, to_addr, &agent_meta.system_id, per, sig)
-                    .await;
+                notify_agent_persona_applied(ack, to_addr, &agent_meta.system_id, per, sig).await;
                 send_command_ack(
                     ack,
                     to_addr,
@@ -994,16 +993,32 @@ async fn notify_agent_persona_applied(
     let res = if is_internal {
         ack.email_factory
             .create_inbound(
-                &email_id, system_id, &from, to_agent, subject, &body, None, None,
-                Some(headers.as_str()), 3,
+                &email_id,
+                system_id,
+                &from,
+                to_agent,
+                subject,
+                &body,
+                None,
+                None,
+                Some(headers.as_str()),
+                3,
             )
             .await
     } else {
         let recipients = serde_json::json!({ "to": [to_agent] }).to_string();
         ack.email_factory
             .create_outbound(
-                &email_id, system_id, &from, &recipients, subject, &body, None, None,
-                Some(headers.as_str()), 3,
+                &email_id,
+                system_id,
+                &from,
+                &recipients,
+                subject,
+                &body,
+                None,
+                None,
+                Some(headers.as_str()),
+                3,
             )
             .await
     };
