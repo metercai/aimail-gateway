@@ -774,6 +774,10 @@ async fn handle_manager_commands(
                         ""
                     }
                 );
+                // 闭环: agent 先拿到"已生效"的信(pull 模式下它没有别的途径知道自己
+                // 可以按 persona 说话了), 再把回执发给安全员。
+                notify_agent_persona_applied(ack, to_addr, &agent_meta.system_id, per, sig)
+                    .await;
                 send_command_ack(
                     ack,
                     to_addr,
@@ -961,7 +965,86 @@ async fn send_command_ack(
     }
 }
 
-/// Extract description from email body (line after 'description:' or 'desc:').
+/// 「角色已生效」闭环信 —— 发给 agent 本人。安全员回执只到安全员; pull 模式下
+/// agent 没有任何别的途径知道自己已经可以按 persona 说话了。
+///
+/// 同一网关内部收件人**不能**走 `enqueue_outbound_simple`: pull 模式地址没有
+/// webhook 端点 ⇒ 该 helper 退回 MX ⇒ SMTP sender 的 loopback prevention 直接丢弃
+/// (实测 server.log: `loopback_skip recipient=…`)。内部收件人按 board 通知同款做法
+/// 造一条 inbound 记录(`create_inbound`), 它才走 webhook/pull 投递链。
+async fn notify_agent_persona_applied(
+    ack: Option<crate::core::api::outbound::AckCtx<'_>>,
+    to_agent: &str,
+    system_id: &str,
+    persona: &str,
+    signature: &str,
+) {
+    let Some(ack) = ack else { return };
+    let from = ack.cfg.system_sender();
+    let body = persona_applied_body(to_agent, persona, signature, &from);
+    let subject = "[AIMail] Persona applied";
+    let email_id = format!("sys_persona_{}", uuid::Uuid::new_v4());
+    let domain = from.split('@').nth(1).unwrap_or("").to_lowercase();
+    let is_internal = to_agent.to_lowercase().ends_with(&format!("@{}", domain));
+    // 一条正规的 notice 需要自己的 message_id(线程/去重/宿主展示都读它)。
+    let headers = serde_json::json!({
+        "message_id": format!("<{}@{}>", uuid::Uuid::new_v4(), domain),
+    })
+    .to_string();
+    let res = if is_internal {
+        ack.email_factory
+            .create_inbound(
+                &email_id, system_id, &from, to_agent, subject, &body, None, None,
+                Some(headers.as_str()), 3,
+            )
+            .await
+    } else {
+        let recipients = serde_json::json!({ "to": [to_agent] }).to_string();
+        ack.email_factory
+            .create_outbound(
+                &email_id, system_id, &from, &recipients, subject, &body, None, None,
+                Some(headers.as_str()), 3,
+            )
+            .await
+    };
+    match res {
+        Ok(_) => {
+            if let Some(tx) = ack.trigger_tx {
+                if let Err(e) = tx.try_send(email_id.clone()) {
+                    warn!(
+                        operation = "persona_applied_ack_trigger_dropped",
+                        error = %e,
+                        to = %to_agent,
+                        "persona-applied confirmation queued but the trigger was dropped; the sweep will pick it up"
+                    );
+                }
+            }
+        }
+        Err(e) => warn!(
+            operation = "persona_applied_ack_failed",
+            error = %e,
+            to = %to_agent,
+            "failed to queue the persona-applied confirmation mail"
+        ),
+    }
+}
+
+fn persona_applied_body(to_agent: &str, persona: &str, signature: &str, from: &str) -> String {
+    format!(
+        "Your persona and signature are now active on {to_agent}.
+
+persona    : {persona}
+signature  : {signature}
+my_profile : injected into every inbound message from now on
+
+Nothing else is required — this closes the activation.
+
+--
+Automated confirmation from {from}; do not reply.
+"
+    )
+}
+
 fn extract_description_from_body(body: &str) -> Option<String> {
     for line in body.lines() {
         let trimmed = line.trim();
@@ -983,6 +1066,7 @@ fn extract_description_from_body(body: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::persona_applied_body;
     use crate::core::email::utils::html_to_markdown;
     use crate::core::email::utils::sign_payload;
 
@@ -1304,6 +1388,15 @@ mod tests {
     }
 
     // P2-1: persona-only approval must NOT wipe the existing signature.
+    #[test]
+    fn persona_applied_body_carries_the_applied_values() {
+        let body = persona_applied_body("a@x.test", "I am A.", "-- A", "noreply@x.test");
+        assert!(body.contains("a@x.test"), "{body}");
+        assert!(body.contains("I am A."), "{body}");
+        assert!(body.contains("-- A"), "{body}");
+        assert!(body.contains("do not reply"), "{body}");
+    }
+
     #[tokio::test]
     async fn persona_approval_only_persona_keeps_signature() {
         let (env, ef) = approval_env();

@@ -126,6 +126,9 @@ pub async fn enqueue_outbound_simple(
 }
 
 /// 确认信所需的上下文 —— 投递路径(deliver.rs)里没有 `HttpState`, 故按需注入这几件。
+/// Copy: 一次指令可能产生两封确认信(agent 闭环 + 安全员回执), 借用上下文不该被第一次
+/// 调用移走。
+#[derive(Clone, Copy)]
 pub struct AckCtx<'a> {
     pub cfg: &'a Config,
     pub email_factory: &'a EmailFactory,
