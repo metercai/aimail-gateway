@@ -40,8 +40,8 @@ pub(crate) async fn deliver_smtp(
 
     let attachment_data = load_attachment_data(record, config, email_factory).await;
 
-    // 硬超时: 单次投递尝试最多占用 config.smtp.delivery_timeout_secs 秒。超时按"本次失败"
-    // 处理(重试由既有 retry 流程接管), 从而不再拖住其后的投递(队头阻塞)。
+    // hard timeout: a single delivery attempt occupies at most config.smtp.delivery_timeout_secs seconds. A timeout counts as "this attempt failed"
+    // (retries are handed to the existing retry flow), so it no longer holds up subsequent deliveries (head-of-line blocking).
     let timeout_secs = config.smtp.delivery_timeout_secs;
     match tokio::time::timeout(
         Duration::from_secs(timeout_secs),
@@ -152,7 +152,7 @@ pub(crate) async fn deliver_webhook(
             metrics: Some(metrics),
             trigger_tx,
         }),
-        // 失败确认信上下文与成功路共用同一批句柄; 收件人 = record.sender
+        // the failure-confirmation context shares the same handles as the success path; recipient = record.sender
         Some(crate::core::api::outbound::FailedCommandAck {
             cfg: config,
             email_factory,

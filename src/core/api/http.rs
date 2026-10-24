@@ -3330,7 +3330,7 @@ mod tests {
     use crate::core::strategy::ExtensionProviders;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    /// The security口径, in one place: the probe body carries ONLY
+    /// The security stance, in one place: the probe body carries ONLY
     /// `{exists, valid}`. Adding any field (webhook/secret/manager/…) must
     /// break this assertion.
     fn assert_only_two_fields(body: &serde_json::Value) {

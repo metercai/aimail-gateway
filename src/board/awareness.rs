@@ -208,7 +208,7 @@ mod tests {
         (conn, board_id.to_string())
     }
 
-    /// show 的 parent_summaries 必须反映父任务**最新**摘要(不是建链快照), 无父为空
+    /// show's parent_summaries must reflect the parent task's **latest** summary (not the link-creation snapshot); empty when there is no parent
     #[test]
     fn test_parent_summaries_reflect_latest_summary() {
         let (conn, board_id) = setup();
@@ -222,17 +222,17 @@ mod tests {
         parent.summary = "10%".to_string();
         db::update_task(&conn, &parent).unwrap();
         let (_, ps) = get_task(&conn, &cid).unwrap();
-        assert_eq!(ps.len(), 1, "父链应有一条");
+        assert_eq!(ps.len(), 1, "the parent chain must have one entry");
         assert_eq!(ps[0]["summary"], "10%");
 
         parent.summary = "60%".to_string();
         db::update_task(&conn, &parent).unwrap();
         let (_, ps2) = get_task(&conn, &cid).unwrap();
-        assert_eq!(ps2[0]["summary"], "60%", "parent_summaries 必须取最新值");
+        assert_eq!(ps2[0]["summary"], "60%", "parent_summaries must take the latest value");
 
         let solo = make_task(&conn, &board_id, "S1", "a@t.io", TaskStatus::Todo);
         let (_, ps3) = get_task(&conn, &solo).unwrap();
-        assert!(ps3.is_empty(), "无父任务必须是空数组");
+        assert!(ps3.is_empty(), "a task with no parent must yield an empty array");
     }
 
     fn make_task(

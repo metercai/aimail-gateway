@@ -41,8 +41,8 @@ pub async fn run_retry_worker_with_trigger(
             reqwest::Client::new()
         });
 
-    // 投递并发化(方案 B): relay/metrics 包成 Arc 以便搬进 spawn 的投递任务;
-    // 方法调用与 `&x` 传参靠 deref 自动兼容, 下游签名无需改动。
+    // parallelized delivery (plan B): wrap relay/metrics in Arc so they can move into the spawned delivery tasks;
+    // method calls and `&x` arguments stay compatible via deref; no downstream signature changes needed.
     let smtp_relay = match SmtpRelay::from_config(
         &config.relay,
         Arc::new(email_factory.clone()),
@@ -88,7 +88,7 @@ pub async fn run_retry_worker_with_trigger(
         "Scheduler v1.0 started with trigger channel (quad-flow: overlimit → retry → forward → attachment-expiry)"
     );
 
-    // ── 并发投递(方案 B): 上限 smtp.max_concurrent_deliveries(默认 4) ──
+    // ── parallel delivery (plan B): cap smtp.max_concurrent_deliveries (default 4) ──
     let metrics = Arc::new(metrics);
     let smtp_relay = Arc::new(smtp_relay);
     let delivery_sem = Arc::new(tokio::sync::Semaphore::new(
@@ -108,8 +108,8 @@ pub async fn run_retry_worker_with_trigger(
             }
             Some(mail_uuid) = trigger_rx.recv() => {
                 debug!(operation="scheduler_trigger_wake", %mail_uuid, "Scheduler woken by SMTP receiver trigger");
-                // 先取槽位再 spawn: 排队期间邮件仍是 readying(救援扫描可兜底),
-                // claim 已保证同一封不会重复投递 ⇒ 无需额外 in-flight 集合。
+                // take the slot before spawning: while queued the mail is still readying (the rescue sweep can pick it up),
+                // and claim already guarantees the same mail is not delivered twice => no extra in-flight set needed.
                 let permit = match delivery_sem.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(_) => continue,

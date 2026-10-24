@@ -20,7 +20,7 @@ pub struct A2aInterceptor {
     pub gateway_url: String,
     pub admission_gate: Arc<dyn AdmissionGate>,
     pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
-    /// 命令结果回投策略(board.command_reply)
+    /// command result reply policy (board.command_reply)
     pub reply_policy: ReplyPolicy,
 }
 
@@ -688,7 +688,7 @@ impl InboundInterceptor for A2aInterceptor {
                         sender,
                         response.status
                     );
-                    // 0+B: 结果回投(仅板成员; 主题 [A2A-RESULT] 不以 [A2A] 开头 ⇒ 不回环)
+                    // 0+B: result reply (board members only; subject [A2A-RESULT] does not start with [A2A] => no loopback)
                     let is_member = db::get_member(&conn, &board_id, &sender)
                         .ok()
                         .flatten()
@@ -718,8 +718,8 @@ impl InboundInterceptor for A2aInterceptor {
                         sender,
                         e
                     );
-                    // 0+B: 失败回执(原 TODO)。只回板成员 —— 非成员(含把通知邮件误当命令
-                    // 投回来的对端看板)只写日志, 既防 backscatter 也防自我放大。
+                    // 0+B: failure ack (original TODO). Reply to board members only - non-members (including a peer board
+                    // that bounces a notification mail back as a command) only get a log line, preventing both backscatter and self-amplification.
                     let is_member = db::get_member(&conn, &board_id, &sender)
                         .ok()
                         .flatten()

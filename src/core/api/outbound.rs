@@ -1,11 +1,11 @@
-//! 共享的"外发邮件入队"助手(2026-09-22 提取)。
+//! Shared "outbound mail enqueue" helper (extracted 2026-09-22).
 //!
-//! 动因: welcome 端点内联了一段外发入队逻辑(建记录 + endpoints + metrics + trigger);
-//! 网关新增的"安全员指令确认信"需要同一套动作 ⇒ 按"共享逻辑必须提取公共实现"抽到这里,
-//! 避免第二份副本(此前 pull_intercept 的验签副本已因重复漏修过一次)。
+//! Motive: the welcome endpoint inlined a chunk of outbound enqueue logic (record + endpoints + metrics + trigger);
+//! the gateway's new "safety-officer command confirmation mail" needs the same set of actions => per "shared logic must be extracted into a common implementation" it moves here,
+//! avoiding a second copy (the pull_intercept signature-verification copy already caused one missed fix because of duplication).
 //!
-//! 依赖故意做成**按需注入**(config / email_factory / metrics?/ trigger_tx?), 而不是收 `HttpState`:
-//! 确认信发生在投递路径(deliver.rs)里, 那里没有 HttpState。
+//! Dependencies are deliberately **injected on demand** (config / email_factory / metrics?/ trigger_tx?) instead of taking `HttpState`:
+//! confirmation mails happen on the delivery path (deliver.rs), where there is no HttpState.
 
 use serde_json::json;
 use tracing::{info, warn};
@@ -16,10 +16,10 @@ use crate::core::config::Config;
 use crate::core::email::factory::EmailFactory;
 use tokio::sync::mpsc::Sender;
 
-/// 入队一封**单收件人、无附件**的外发邮件, 并在有 trigger 句柄时唤醒调度器。
+/// Enqueue a **single-recipient, attachment-free** outbound mail and wake the scheduler when a trigger handle is available.
 ///
-/// 返回 `email_id`; 失败返回 `Err(原因)`。确认信失败**不应**影响指令本身的执行结果,
-/// 所以调用方按 warn 处理即可。
+/// Returns `email_id`; failures return `Err(reason)`. A confirmation-mail failure **must not** affect the command's own execution result,
+/// so callers handle it as a warn.
 #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub async fn enqueue_outbound_simple(
     cfg: &Config,
@@ -35,7 +35,7 @@ pub async fn enqueue_outbound_simple(
     let email_id = Uuid::new_v4().to_string();
     let recipients_json = json!({ "to": [to] }).to_string();
 
-    // Endpoint resolution (2026-09-23, S4 e2e 实证): the original helper
+    // Endpoint resolution (2026-09-23, demonstrated by S4 e2e): the original helper
     // hardcoded `protocol: mx`, so confirmations to INTERNAL recipients
     // (registered on this gateway) were dropped by loopback prevention in the
     // SMTP sender and swept away — the ack never reached same-host managers.
@@ -125,9 +125,9 @@ pub async fn enqueue_outbound_simple(
     }
 }
 
-/// 确认信所需的上下文 —— 投递路径(deliver.rs)里没有 `HttpState`, 故按需注入这几件。
-/// Copy: 一次指令可能产生两封确认信(agent 闭环 + 安全员回执), 借用上下文不该被第一次
-/// 调用移走。
+/// Context needed by confirmation mails - the delivery path (deliver.rs) has no `HttpState`, so these are injected on demand.
+/// Copy: one command may produce two confirmation mails (agent closed loop + safety-officer ack); the borrowed context must not be moved by the first
+/// call.
 #[derive(Clone, Copy)]
 pub struct AckCtx<'a> {
     pub cfg: &'a Config,
@@ -136,10 +136,10 @@ pub struct AckCtx<'a> {
     pub trigger_tx: Option<&'a Sender<String>>,
 }
 
-/// 指令处理的失败确认信上下文(2026-09-23): 指令必有回复 ⇒ **非 manager 发件人也必须收到**
-/// "Command failed" 确认信, 否则非 manager 的指令静默无反馈, 发件方无从发现。
-/// sender = 指令邮件发件人(失败确认信收件人); system_id = 目标地址归属系统(路由用);
-/// to_agent(指令目标地址)逐命中不同, 由调用点作参数传入, 不入结构体。
+/// Failure confirmation context for command handling (2026-09-23): every command gets a reply => **a non-manager sender must also receive**
+/// the "Command failed" confirmation mail; otherwise a non-manager's command fails silently and the sender can never notice.
+/// sender = the command mail's sender (failure-confirmation recipient); system_id = the owning system of the target address (for routing);
+/// to_agent (the command target address) differs per hit, so it is passed as a parameter at the call site, not stored in the struct.
 pub struct FailedCommandAck<'a> {
     pub cfg: &'a Config,
     pub email_factory: &'a EmailFactory,

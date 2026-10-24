@@ -135,11 +135,11 @@ pub struct StorageConfig {
     pub pool_size: u32,
     #[serde(default = "default_encryption_enabled")]
     pub encryption: bool,
-    /// 平台 admin-key 文件位置(2026-09-22 加固)。
+    /// Platform admin-key file location (2026-09-22 hardening).
     ///
-    /// 生产应指向 DB 目录**之外**的位置(如 `/etc/aimail/admin.key`, 0600 root): 它同时是该部署的
-    /// 根秘密(派生 DB 加密键与凭据密封键), 与 DB 同目录意味着任何目录级备份都同时泄漏 DB 与根密钥。
-    /// 未配置时沿用历史位置 `<db_path>.admin_key`(仅供测试/CI)。
+    /// In production point it **outside** the DB directory (e.g. `/etc/aimail/admin.key`, 0600 root): it is simultaneously that deployment's
+    /// root secret (derives the DB encryption key and the credential sealing key); sharing the DB directory means any directory-level backup leaks both the DB and the root key.
+    /// When unset, the historical location `<db_path>.admin_key` is kept (tests/CI only).
     #[serde(default)]
     pub admin_key_file: Option<PathBuf>,
     /// Agent-side integration key file (2026-09-26).
@@ -511,12 +511,12 @@ fn default_max_message_size() -> usize {
     10 * 1024 * 1024
 }
 
-/// 并发出站投递的上限。见 `SmtpConfig::max_concurrent_deliveries`。
+/// Cap on concurrent outbound deliveries. See `SmtpConfig::max_concurrent_deliveries`.
 fn default_max_concurrent_deliveries() -> usize {
     4
 }
 
-/// 单次出站 SMTP 投递的硬超时(秒)。见 `SmtpConfig::delivery_timeout_secs`。
+/// Hard timeout (seconds) for a single outbound SMTP delivery. See `SmtpConfig::delivery_timeout_secs`.
 fn default_delivery_timeout_secs() -> u64 {
     30
 }
@@ -612,7 +612,7 @@ pub struct BoardConfig {
     pub sweeper_interval_seconds: u64,
     pub max_active_boards: Option<usize>,
     pub archive_retention_days: Option<u64>,
-    /// 命令结果回投(0+B): off | read_only_and_errors(默认) | all
+    /// Command result reply (0+B): off | read_only_and_errors (default) | all
     #[serde(default = "default_command_reply")]
     pub command_reply: String,
 }
@@ -648,8 +648,8 @@ fn default_sweeper_interval() -> u64 {
 mod smtp_delivery_timeout_tests {
     use super::*;
 
-    /// 既有配置(未写新键)必须仍能加载并取默认 30s —— 生产 config.toml 是长期演进的手写文件,
-    /// 新增 serde 字段漏 default 会导致启动即失败。
+    /// Existing configs (without the new key) must still load and take the default 30s - a production config.toml is a long-lived hand-maintained file,
+    /// and a new serde field missing its default would fail startup immediately.
     #[test]
     fn defaults_when_key_absent() {
         let s: SmtpConfig = toml::from_str("").expect("SmtpConfig must load from empty table");
@@ -689,7 +689,7 @@ max_concurrent_deliveries = 0
         assert_eq!(s.delivery_timeout_secs, 7);
     }
 
-    /// 0 = "没有超时" ⇒ 必须被校验拒绝(否则队头阻塞复现)。
+    /// 0 = "no timeout" => must be rejected by validation (otherwise head-of-line blocking resurfaces).
     #[test]
     fn zero_is_rejected_by_validation() {
         let toml_src = r#"
@@ -726,7 +726,7 @@ delivery_timeout_secs = 0
 
     #[test]
     fn smtp_parsed_bind_garbage_port_defaults_25() {
-        // 端口段不可解析 ⇒ 端口兜底 25(host 段保留原 bind 串, 与 HttpConfig::parsed_bind 同形)。
+        // unparseable port part => port falls back to 25 (the host part keeps the original bind string, same shape as HttpConfig::parsed_bind).
         let c = SmtpConfig {
             bind: "0.0.0.0:abc".to_string(),
             ..SmtpConfig::default()

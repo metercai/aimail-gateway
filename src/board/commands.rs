@@ -1206,7 +1206,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
 
         (conn, board_id.to_string(), notifier)
@@ -1734,7 +1734,7 @@ mod tests {
         );
     }
 
-    // ── continue: 跨会话进度汇报(恢复 362f18e 误删的 verb) ──────────
+    // ── continue: cross-session progress report (restores the verb deleted in error by 362f18e) ──────────
     #[test]
     fn test_continue_updates_summary_and_emits_event() {
         let (conn, board_id, notifier) = setup();
@@ -1748,7 +1748,7 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
         assert_eq!(task.summary, "60%");
-        assert_eq!(task.status, TaskStatus::Running, "continue 不得改任务状态");
+        assert_eq!(task.status, TaskStatus::Running, "continue must not change the task status");
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_events WHERE task_id=?1 AND event_type='continue_request'",
@@ -1756,7 +1756,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1, "continue 必须落一条 continue_request 事件");
+        assert_eq!(n, 1, "continue must record one continue_request event");
     }
 
     #[test]
@@ -1767,7 +1767,7 @@ mod tests {
         assert!(execute_command(&conn, &notifier, &cmd, "worker@t.io").is_err());
     }
 
-    /// role 化生效: 删掉 worker 的 continue 权限后该 verb 必须被拒
+    /// role enforcement: after revoking worker's continue permission, the verb must be rejected
     #[test]
     fn test_continue_enforces_role_permission() {
         let (conn, board_id, notifier) = setup();
@@ -1785,18 +1785,18 @@ mod tests {
         let err = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap_err();
         assert!(
             format!("{err:?}").contains("not permitted"),
-            "删掉角色权限后必须 403, 实际: {err:?}"
+            "must 403 after the role permission is removed, got: {err:?}"
         );
     }
 
-    /// 四个角色的默认播种都要含 continue(与 comment 同级)
+    /// the default seed of all four roles must include continue (same tier as comment)
     #[test]
     fn test_seed_grants_continue_to_all_roles() {
         let (conn, _board_id, _notifier) = setup();
         for role in db::KNOWN_ROLES {
             assert!(
                 db::check_role_permission(&conn, role, "continue").unwrap(),
-                "角色 {role} 缺少 continue 默认权限"
+                "role {role} is missing the continue default permission"
             );
         }
     }
@@ -1813,19 +1813,19 @@ mod tests {
         assert!(execute_command(&conn, &notifier, &cmd, "orch@t.io").is_err());
     }
 
-    /// 'continue' 必须同时挂在**分发臂**和 **KNOWN_VERBS**(角色权限表可授予)两处:
-    /// b633e5b 加了 KNOWN_VERBS 校验却没加条目、362f18e 又整段删了实现 ——
-    /// 这条断言把"两处都得有"钉死, 任一缺失立刻红。
+    /// 'continue' must be present in BOTH the **dispatch arm** and **KNOWN_VERBS** (grantable by the role permission table):
+    /// b633e5b added the KNOWN_VERBS check without the entry, and 362f18e deleted the whole implementation -
+    /// this assertion pins down "both must exist"; if either is missing it goes red immediately.
     #[test]
     fn test_continue_verb_registered_everywhere() {
         assert!(
             db::KNOWN_VERBS.contains(&"continue"),
-            "continue 不在 db::KNOWN_VERBS(角色权限表将无法授予它)"
+            "continue is not in db::KNOWN_VERBS (the role permission table could not grant it)"
         );
         let src = include_str!("commands.rs");
         assert!(
             src.contains("\"continue\" => handle_continue"),
-            "commands.rs 缺少 continue 分发臂"
+            "commands.rs is missing the continue dispatch arm"
         );
     }
 

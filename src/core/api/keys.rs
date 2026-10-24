@@ -153,15 +153,15 @@ pub async fn create_api_key(
         1
     };
 
-    // 层级必须按 Scope 解析后的结果算: 字面串比较会漏掉别名
-    // ("system_admin" → PlatformAdmin), 让 system 管理员造出 platform key。
+    // Tier must be computed from the resolved Scope: literal-string comparison misses aliases
+    // ("system_admin" -> PlatformAdmin), letting a system admin mint a platform key.
     let parsed: Vec<Scope> = scopes
         .iter()
         .filter_map(|s| Scope::parse_db(s.trim()))
         .collect();
-    // 注意: 不能拒收"解析不出 Scope"的串 —— scopes 里还有功能性标记(如 "send",
-    // 发送路径按字面串判定), 历史 key 也在用。层级比较只认解析得出的那几个即可,
-    // 别名("system_admin" → PlatformAdmin)因此不再绕过层级。
+    // Note: do not reject strings that resolve to no Scope - scopes also carry functional markers (e.g. "send",
+    // which the send path checks literally), and historical keys still use them. Tier comparison only honors the resolved ones, so
+    // aliases ("system_admin" -> PlatformAdmin) can no longer bypass the tier.
     let target_level = if parsed.iter().any(|s| matches!(s, Scope::PlatformAdmin)) {
         3
     } else if parsed.iter().any(|s| matches!(s, Scope::SystemAdmin)) {
@@ -241,9 +241,9 @@ pub async fn create_api_key(
     let key_prefix = &raw_key[..8];
     let expires_at = req.expires_at.as_deref();
 
-    // ── system 键: '' 身份槽唯一(UNIQUE(system_id, domain_addr)) ⇒ 已存在时"创建"即轮换 ──
-    // domain_addr 就是身份列, system 键没有地址语义("" 槽只有一行); 点"生成 Key"的语义是
-    // "给我一把能用的新键", 所以这里对已存在的系统键做轮换并使旧键立即失效, 而不是 500。
+    // ── system key: the '' identity slot is unique (UNIQUE(system_id, domain_addr)) => "create" while one exists is a rotation ──
+    // domain_addr is the identity column; system keys have no address semantics (the "" slot has one row). The meaning of clicking "Generate Key" is
+    // "give me a working new key", so an existing system key is rotated and the old key invalidated immediately, instead of a 500.
     if req.category == "system" {
         if let Ok(existing) = state
             .factories
@@ -354,8 +354,8 @@ pub async fn list_api_keys(
             .resolve_api_key_by_email(email)
             .await
         {
-            // 非平台 scope 只能查本系统的键: 这条分支以前直接走全局解析,
-            // agent_admin / system_admin 能跨租户读到别家地址的键元数据。
+            // non-platform scopes may only query this system's keys: this branch used to go through global resolution,
+            // letting agent_admin / system_admin read other tenants' key metadata across addresses.
             Ok(Some(k))
                 if !is_platform_admin_scope(&api_key) && k.system_id != api_key.system_id =>
             {

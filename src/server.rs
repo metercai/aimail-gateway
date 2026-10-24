@@ -62,12 +62,12 @@ impl Server {
         .await
     }
 
-    /// 启动时把库内历史明文凭据材料就地密封(幂等)。
+    /// At startup, seal the DB's historical plaintext credential material in place (idempotent).
     pub async fn reseal_credentials(&self) -> AppResult<(usize, usize)> {
         self.db.reseal_api_keys().await
     }
 
-    /// 启动 fail-closed 判定用: 库内已密封的凭据行数。
+    /// For the startup fail-closed check: the number of sealed credential rows in the DB.
     pub async fn count_sealed_credentials(&self) -> AppResult<usize> {
         self.db.count_sealed_api_keys().await
     }

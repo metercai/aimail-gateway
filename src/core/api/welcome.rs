@@ -418,12 +418,12 @@ pub async fn send_welcome(
 mod tests {
     use super::*;
 
-    /// 用户 2026-09-22 要求: 页脚 `{timestamp}` 由**程序**填充, 且必须是**人类可读**形式;
-    /// 主题标记(小写化后含 "welcome to aimail world")是 agent 侧识别 Role_Calibrator 的稳定锚点。
-    /// 与 body 侧三标签一起构成"同时命中"的识别条件(见 pysdk/aimail_base.py B3 与 tssdk preprocess.ts)。
+    /// 2026-09-22 user requirement: the footer `{timestamp}` is filled in by the **program** and must be in a **human-readable** form;
+    /// the subject marker (contains "welcome to aimail world" once lowercased) is the agent-side stable anchor for identifying Role_Calibrator.
+    /// together with the three body-side labels it forms the "simultaneous hit" identification condition (see pysdk/aimail_base.py B3 and tssdk preprocess.ts).
     #[test]
     fn welcome_body_renders_human_readable_footer_and_stable_marker() {
-        // 与 send_welcome() 内**完全相同**的渲染方式(chrono 本地时区)
+        // the **exact same** rendering as inside send_welcome() (chrono local timezone)
         let ts = chrono::Local::now()
             .format("%Y-%m-%d %H:%M:%S %z")
             .to_string();
@@ -431,7 +431,7 @@ mod tests {
             .replace("{domain}", "example.tm")
             .replace("{timestamp}", &ts);
 
-        // 1) 页脚人类可读: "Sent YYYY-MM-DD HH:MM:SS ±ZZZZ"
+        // 1) footer is human-readable: "Sent YYYY-MM-DD HH:MM:SS ±ZZZZ"
         let footer = body.lines().last().unwrap_or("");
         assert!(
             footer.starts_with("Sent "),
@@ -452,15 +452,61 @@ mod tests {
             parts[2]
         );
 
-        // 2) 正文三标签齐备(识别条件之正文侧)
+        // 2) all three body labels present (body side of the identification condition)
         for k in ["persona:", "signature:", "current_time:"] {
             assert!(body.contains(k), "body must carry label {k}");
         }
 
-        // 3) 主题标记稳定: 个人化后缀不影响小写化子串匹配
+        // 3) subject marker is stable: the personalized suffix does not affect lowercased substring matching
         let subject = format!(
             "Welcome to AIMail World, {}, since {}!",
             "agent1", "2026-09-22"
+        );
+        assert!(subject.to_lowercase().contains("welcome to aimail world"));
+    }
+
+    /// Welcome full chain: gateway template -> bodyproc (same path as records.to_webhook_payload) ->
+    /// local SDK B3 label detection. Verify the three labels **still survive** after process_email_body processing
+    /// (bodyproc only strips the tail signature block; the mid-body labels are unaffected - but this is a **residual runtime risk**,
+    /// it must be pinned by a test, not left to the inference "unaffected by design").
+    ///
+    /// the B3 detection logic is exactly isomorphic to the SDK's:
+    ///   TS:  bodyLc.split('\n').some(ln => ln.trimStart().startsWith(`${k}:`))
+    ///   py:  any(ln.lstrip().startswith(f"{k}:") for ln in _body_lc.splitlines())
+    #[test]
+    fn welcome_body_labels_survive_bodyproc() {
+        use crate::core::email::bodyproc::process_email_body;
+
+        // the exact same rendering as send_welcome()
+        let ts = chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S %z")
+            .to_string();
+        let body = WELCOME_BODY
+            .replace("{domain}", "example.tm")
+            .replace("{timestamp}", &ts);
+
+        // same path as to_webhook_payload: is_html=false (plain-text welcome body)
+        let processed = process_email_body(&body, false);
+
+        // SDK B3 label detection (exactly isomorphic to TS preprocess.ts / py aimail_base.py)
+        let body_lc = processed.body.to_lowercase();
+        for k in ["persona", "signature", "current_time"] {
+            let ok = body_lc
+                .lines()
+                .any(|ln| ln.trim_start().starts_with(&format!("{k}:")));
+            assert!(
+                ok,
+                "label '{k}:' must survive bodyproc — bodyproc only strips the \
+                 tail signature block; mid-body labels are untouched.\n\
+                 processed body:\n{}",
+                processed.body
+            );
+        }
+
+        // the subject marker is not affected by bodyproc (body-only processing), but pin it down as well
+        let subject = format!(
+            "Welcome to AIMail World, {}, since {}!",
+            "agent1", "2026-10-23"
         );
         assert!(subject.to_lowercase().contains("welcome to aimail world"));
     }

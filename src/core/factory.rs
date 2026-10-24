@@ -574,9 +574,9 @@ impl EnvFactory {
         self.db.get_api_key_by_email(email).await
     }
 
-    /// 该域(agent 地址或裸域)归属的 system —— agent_admin 的授权对象是 agent
-    /// (与是否共享域无关), 所以权限判定要落到"同 system", 这里给出解析结果。
-    /// 解析不到(未注册的地址/域)返回 None, 调用方按无权处理。
+    /// The system a domain (agent address or bare domain) belongs to - agent_admin's authorization object is the agent
+    /// (regardless of shared-domain status), so the permission decision must land on "same system"; this returns the resolution result.
+    /// Unresolvable (unregistered address/domain) returns None; the caller treats it as unauthorized.
     pub async fn owning_system_of(&self, domain_addr: &str) -> Option<String> {
         if domain_addr.contains('@') {
             if let Ok(Some(k)) = self.resolve_api_key_by_email(domain_addr).await {

@@ -36,18 +36,18 @@ pub struct Notifier {
     pub attachments_json: Option<String>,
     pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
     pub tasks: RefCell<Vec<JoinHandle<()>>>,
-    /// 命令结果回投策略(config: board.command_reply)
+    /// command result reply policy (config: board.command_reply)
     pub reply_policy: ReplyPolicy,
 }
 
-/// 命令结果回投策略(0+B)。配置项 `board.command_reply`。
+/// Command result reply policy (0+B). Config key `board.command_reply`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyPolicy {
-    /// 完全不回执
+    /// no ack at all
     Off,
-    /// 只读 verb 的成功 + 所有 verb 的失败(默认档)
+    /// success of read-only verbs + failure of every verb (default tier)
     ReadOnlyAndErrors,
-    /// 所有 verb 都回执(变更类成功也回)
+    /// ack for every verb (mutation success included)
     All,
 }
 
@@ -60,7 +60,7 @@ impl ReplyPolicy {
         }
     }
 
-    /// 该结果是否回执(与"是否板成员"无关, 成员门槛由调用方把关)
+    /// whether this result gets an ack (independent of "is board member"; the caller enforces the membership gate)
     pub fn allows(self, verb: &str, ok: bool) -> bool {
         match self {
             Self::Off => false,
@@ -70,7 +70,7 @@ impl ReplyPolicy {
     }
 }
 
-/// 只读 verb: 变更类 verb 的成功已有业务通知, 重复回执=噪音
+/// Read-only verbs: mutation success already has a business notification; a duplicate ack would be noise
 pub fn is_read_only_verb(verb: &str) -> bool {
     matches!(
         verb,
@@ -78,7 +78,7 @@ pub fn is_read_only_verb(verb: &str) -> bool {
     )
 }
 
-/// 回执里 json 段的上限
+/// cap on the json section inside an ack
 pub const COMMAND_REPLY_JSON_CAP: usize = 16 * 1024;
 
 fn truncate_on_char_boundary(s: &str, cap: usize) -> &str {
@@ -95,8 +95,8 @@ fn truncate_on_char_boundary(s: &str, cap: usize) -> &str {
     &s[..end]
 }
 
-/// 构造回执 (subject, body)。主题**绝不以 `[A2A] ` 开头** ——
-/// interceptor 用 `subject.strip_prefix("[A2A] ")` 识别命令, 否则回执会被当成新命令(回环)。
+/// Build the ack (subject, body). The subject must **never start with `[A2A] `** -
+/// the interceptor identifies commands via `subject.strip_prefix("[A2A] ")`; otherwise the ack would be treated as a new command (loopback).
 pub fn format_command_result(
     verb: &str,
     ok: bool,
@@ -129,8 +129,8 @@ impl Notifier {
         self.tasks.borrow_mut().drain(..).collect()
     }
 
-    /// 命令结果回投(0+B): 只回**板成员**(非成员失败只写日志, 防 backscatter 与自我放大),
-    /// 且按 reply_policy 决定是否回该 verb/结果。
+    /// Command result reply (0+B): reply to **board members only** (non-member failures only get a log line, preventing backscatter and self-amplification),
+    /// and decide per reply_policy whether to ack this verb/result.
     pub fn notify_command_result(
         &self,
         to: &str,
@@ -651,7 +651,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         // Just verify it doesn't panic (no email sent since factory is None)
@@ -676,7 +676,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_review_needed(&task);
@@ -700,7 +700,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_approved(&task);
@@ -724,7 +724,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_rejected(&task, "need more data");
@@ -748,7 +748,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_blocked(&task, "worker@t.io");
@@ -772,7 +772,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_unblocked(&task, "orch@t.io");
@@ -796,7 +796,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_cancelled(&task);
@@ -820,7 +820,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_comment(&task, "veri@t.io", "looks good");
@@ -844,7 +844,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         // assignee comments -> notification goes to reviewer
@@ -869,7 +869,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
     }
@@ -892,7 +892,7 @@ mod tests {
             attachments_json: None,
             trigger_tx: None,
             tasks: RefCell::new(Vec::new()),
-            reply_policy: ReplyPolicy::Off, // 测试构造: 默认不回执
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
         };
         let task = make_task();
         notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
@@ -915,7 +915,7 @@ mod reply_tests {
         assert!(p.allows("show", true));
         assert!(
             !p.allows("complete", true),
-            "变更类成功默认不回执(已有业务通知)"
+            "mutation success is not acked by default (a business notification already exists)"
         );
         assert!(p.allows("complete", false));
         assert!(p.allows("anything", false));
@@ -929,7 +929,7 @@ mod reply_tests {
         assert_eq!(s, "[A2A-RESULT] show ok");
         assert!(
             !s.starts_with("[A2A] "),
-            "主题不得以 [A2A] 开头, 否则 interceptor 会当命令(回环)"
+            "the subject must not start with [A2A], otherwise the interceptor treats it as a command (loopback)"
         );
     }
 
@@ -946,7 +946,7 @@ mod reply_tests {
         assert!(b2.contains("已截断") && b2.contains("http://x/tasks"));
         assert!(
             b2.len() < COMMAND_REPLY_JSON_CAP + 4096,
-            "截断后不应远超上限: {}",
+            "after truncation it must not greatly exceed the cap: {}",
             b2.len()
         );
     }

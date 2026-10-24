@@ -11,11 +11,11 @@ use clap::{Parser, Subcommand};
 use crate::core::config::LoggingConfig;
 use crate::core::errors::AppResult;
 
-/// pid-file 路径(clap 字段类型)。默认值 = std::env::temp_dir() 下的
-/// aimail-gateway.pid:unix 无 TMPDIR 时 temp_dir() == /tmp(原字面量
-/// "/tmp/aimail-gateway.pid" 行为逐字不变);Windows ⇒ %LOCALAPPDATA%\Temp(可写,
-/// /tmp 字面量在该平台解析为 C:\tmp 不存在 ⇒ os error 3)。
-/// Deref 到 PathBuf:gateway/advanced 两仓既有 &PathBuf 调用点零改动。
+/// pid-file path (clap field type). Default = under std::env::temp_dir():
+/// aimail-gateway.pid. On unix without TMPDIR, temp_dir() == /tmp (the original literal
+/// "/tmp/aimail-gateway.pid" behaves byte-for-byte the same); on Windows => %LOCALAPPDATA%\Temp (writable;
+/// a /tmp literal resolves to C:\tmp on that platform, which does not exist => os error 3).
+/// Deref to PathBuf: existing &PathBuf call sites in both gateway/advanced repos need zero changes.
 #[derive(Clone, Debug)]
 pub struct PidFile(PathBuf);
 

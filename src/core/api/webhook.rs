@@ -114,8 +114,8 @@ pub async fn process_email_webhook(
     client: &reqwest::Client,
     record: &crate::core::email::storage::EmailRecord,
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
-    // 2026-09-23 (方案 §6.3): 非 manager 发件人的失败确认信上下文; None = 静默(单测/flows)。
-    // sender 取 record.sender(收件人=发件人自己), to_agent 在消费点按命中地址覆盖。
+    // 2026-09-23 (plan §6.3): failure-confirmation context for a non-manager sender; None = silent (unit tests / flows).
+    // sender comes from record.sender (recipient = the sender themselves); to_agent is overridden at the consumption point per hit address.
     failed_ack: Option<crate::core::api::outbound::FailedCommandAck<'_>>,
 ) -> bool {
     // ── 0. Handle manager commands ────────────────────────────
@@ -687,10 +687,10 @@ async fn handle_manager_commands(
     record: &crate::core::email::storage::EmailRecord,
     env_factory: &crate::core::factory::EnvFactory,
     _email_factory: &crate::core::email::factory::EmailFactory,
-    // 2026-09-22: 指令确认信需要入队+触发投递 ⇒ 需要 HttpState; 单测无 state 时传 None
+    // 2026-09-22: the command confirmation mail needs enqueue + delivery trigger => requires HttpState; pass None in unit tests without state
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
-    // 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发件人的失败确认信上下文。
-    // 两路都传 None = 行为与 2026-09-22 之前完全一致(静默); 只有命令路径会同时给两路。
+    // 2026-09-23 (plan §6.3 "every command gets a reply"): failure-confirmation context for a non-manager sender.
+    // both routes None = behavior identical to before 2026-09-22 (silent); only the command path supplies both routes.
     failed_ack: Option<crate::core::api::outbound::FailedCommandAck<'_>>,
 ) -> bool {
     let body = &record.body;
@@ -714,8 +714,8 @@ async fn handle_manager_commands(
             _ => continue,
         };
         if agent_meta.manager_address.is_empty() || record.sender != agent_meta.manager_address {
-            // 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发的指令邮件不消费、不投 agent
-            // (原行为保留), 但**必须回失败确认信** —— 否则发件方完全无反馈。meta 不动。
+            // 2026-09-23 (plan §6.3 "every command gets a reply"): a command mail from a non-manager is not consumed and not delivered to the agent
+            // (original behavior kept), but a **failure confirmation mail must be sent** - otherwise the sender gets no feedback at all. meta untouched.
             if let Some(ref fa) = failed_ack {
                 send_failed_command_ack(
                     fa,
@@ -774,8 +774,8 @@ async fn handle_manager_commands(
                         ""
                     }
                 );
-                // 闭环: agent 先拿到"已生效"的信(pull 模式下它没有别的途径知道自己
-                // 可以按 persona 说话了), 再把回执发给安全员。
+                // closed loop: the agent first receives the "now effective" mail (in pull mode it has no other way to know that
+                // it may now speak as the persona), and only then sends the ack to the safety officer.
                 notify_agent_persona_applied(ack, to_addr, &agent_meta.system_id, per, sig).await;
                 send_command_ack(
                     ack,
@@ -857,9 +857,9 @@ async fn handle_manager_commands(
     false
 }
 
-/// 非 manager 发件人的失败确认信(2026-09-23, 方案 §6.3"失败场景 ⇒ 收到失败确认信")。
-/// 与成功确认信同一发出方(`noreply@{domain}`)与同一正文骨架, Result 段固定 FAILED。
-/// 入队失败只 warn —— 确认信失败不影响指令处理路径本身。
+/// Failure confirmation mail for a non-manager sender (2026-09-23, plan §6.3 "failure scenario => receives a failure confirmation mail").
+/// Same sender (`noreply@{domain}`) and same body skeleton as the success confirmation mail; the Result section is fixed to FAILED.
+/// An enqueue failure only warns - a confirmation-mail failure does not affect the command-handling path itself.
 async fn send_failed_command_ack(
     fa: &crate::core::api::outbound::FailedCommandAck<'_>,
     to_agent: &str,
@@ -901,10 +901,10 @@ async fn send_failed_command_ack(
     }
 }
 
-/// 安全员指令确认信 —— 2026-09-22 用户要求"**指令邮件必有回复**": 成功与失败都回一封。
+/// Safety-officer command confirmation mail - 2026-09-22 user requirement "**every command mail gets a reply**": one mail for success and for failure alike.
 ///
-/// from `noreply@{domain}`(系统发件人) ⇒ 不满足网关的消费条件(sender == meta.manager_address)
-/// ⇒ 不会把确认信当成新指令消费, 无自激回环。失败也回信: 否则静默失败无从发现。
+/// from `noreply@{domain}` (system sender) => it does not meet the gateway's consumption condition (sender == meta.manager_address)
+/// => the confirmation mail is never consumed as a new command; no self-excitation loopback. Failures get a reply too: otherwise silent failures go unnoticed.
 async fn send_command_ack(
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
     to_agent: &str,
@@ -964,13 +964,13 @@ async fn send_command_ack(
     }
 }
 
-/// 「角色已生效」闭环信 —— 发给 agent 本人。安全员回执只到安全员; pull 模式下
-/// agent 没有任何别的途径知道自己已经可以按 persona 说话了。
+/// "Persona now effective" closed-loop mail - sent to the agent itself. The safety-officer ack only reaches the officer; in pull mode
+/// the agent has no other way to learn that it may already speak as the persona.
 ///
-/// 同一网关内部收件人**不能**走 `enqueue_outbound_simple`: pull 模式地址没有
-/// webhook 端点 ⇒ 该 helper 退回 MX ⇒ SMTP sender 的 loopback prevention 直接丢弃
-/// (实测 server.log: `loopback_skip recipient=…`)。内部收件人按 board 通知同款做法
-/// 造一条 inbound 记录(`create_inbound`), 它才走 webhook/pull 投递链。
+/// A recipient **inside** the same gateway **cannot** use `enqueue_outbound_simple`: pull-mode addresses have no
+/// webhook endpoint => the helper falls back to MX => the SMTP sender's loopback prevention drops it outright
+/// (observed in server.log: `loopback_skip recipient=...`). Internal recipients use the same approach as board notifications:
+/// create an inbound record (`create_inbound`), which then goes through the webhook/pull delivery chain.
 async fn notify_agent_persona_applied(
     ack: Option<crate::core::api::outbound::AckCtx<'_>>,
     to_agent: &str,
@@ -985,7 +985,7 @@ async fn notify_agent_persona_applied(
     let email_id = format!("sys_persona_{}", uuid::Uuid::new_v4());
     let domain = from.split('@').nth(1).unwrap_or("").to_lowercase();
     let is_internal = to_agent.to_lowercase().ends_with(&format!("@{}", domain));
-    // 一条正规的 notice 需要自己的 message_id(线程/去重/宿主展示都读它)。
+    // a proper notice needs its own message_id (threading/dedup/host display all read it).
     let headers = serde_json::json!({
         "message_id": format!("<{}@{}>", uuid::Uuid::new_v4(), domain),
     })
@@ -1142,9 +1142,9 @@ mod tests {
         assert!(super::parse_manager_command("approve persona, please see attached").is_none());
     }
 
-    // 2026-09-21 生产实测: 真实批准回信的表体形如
-    //   approve persona / persona: … / signature: <sig> / 空行 / --- / 说明 / -- / <占位符>
-    // 修复前 signature 被贪婪吞下 "---"、说明行与占位符。
+    // 2026-09-21 production observation: a real approval reply body looks like
+    //   approve persona / persona: ... / signature: <sig> / blank line / --- / description / -- / <placeholder>
+    // before the fix, signature greedily swallowed the "---", the description line and the placeholder.
     #[test]
     fn test_parse_persona_approval_stops_at_blank_line() {
         let body = "approve persona\npersona: 我是 pi\nsignature: — pi · AI Agent\n\n---\n\
@@ -1182,7 +1182,7 @@ mod tests {
         }
     }
 
-    // 以破折号开头的**值**要保留(如 "— pi · AI Agent"), 只有整行破折号才是分隔符。
+    // a **value** starting with a dash must be kept (e.g. "— pi · AI Agent"); only an all-dash line is a separator.
     #[test]
     fn test_parse_persona_approval_dash_value_kept() {
         let body = "approve persona\npersona: p\nsignature:\n— pi · AI Agent\n---\nnote";
@@ -1195,7 +1195,7 @@ mod tests {
         }
     }
 
-    // 回信把原信引在**上方**时仍要解析出指令(终止符只在进入 section 后生效)。
+    // when a reply quotes the original mail **above**, the command must still be parsed (terminators only take effect once inside a section).
     #[test]
     fn test_parse_persona_approval_quote_above_command_still_parses() {
         let body = "> On 2026-09-21, pi wrote:\n> persona: old\n\napprove persona\npersona: new p\nsignature: new s";
@@ -1469,23 +1469,23 @@ mod tests {
         assert_eq!(meta.agent_signature, "s2");
     }
 
-    // ── 2026-09-23 (方案 §6.3"指令必有回复"): 非 manager 发件人也必须收到失败确认信 ──
+    // ── 2026-09-23 (plan §6.3 "every command gets a reply"): a non-manager sender must also receive a failure confirmation mail ──
 
-    /// 构造带 ack 能力的 Config(Default + smtp.hostname)。
+    /// Build a Config with ack capability (Default + smtp.hostname).
     fn ack_cfg() -> crate::core::config::Config {
         let mut c = crate::core::config::Config::default();
         c.smtp.hostname = Some("e2e.local".to_string());
         c
     }
 
-    // 非 manager 发指令 ⇒ 不消费(false, 邮件照常投递), 但发件人收到
-    // "Command failed: not authorized" 失败确认信; meta 两个值都不被改写。
+    // a non-manager sends a command => not consumed (false, the mail is delivered as usual), but the sender receives
+    // a "Command failed: not authorized" failure confirmation mail; neither of the two meta values is rewritten.
     #[tokio::test]
     async fn non_manager_command_gets_failed_ack_and_meta_untouched() {
         let (env, ef) = approval_env();
         seed_agent(&env).await;
         let cfg = ack_cfg();
-        // approval_record 固定 sender=mgr@ext.com(= manager);非 manager 场景换发件人。
+        // approval_record has sender=mgr@ext.com (= manager) fixed; the non-manager scenario swaps the sender.
         let mut rec =
             approval_record("approve persona\npersona: rogue persona\nsignature: rogue sig");
         rec.sender = "stranger@ext.com".to_string();
@@ -1501,7 +1501,7 @@ mod tests {
             !super::handle_manager_commands(&rec, &env, &ef, None, fa).await,
             "non-manager command must NOT be consumed"
         );
-        // meta 未被改写
+        // meta not rewritten
         let meta = env
             .resolve_domain_addr_meta("agent@test.com")
             .await
@@ -1512,7 +1512,7 @@ mod tests {
             "meta must stay untouched"
         );
         assert_eq!(meta.agent_signature, "old sig", "meta must stay untouched");
-        // 失败确认信已入队: from noreply@e2e.local → to stranger@ext.com, Command failed
+        // the failure confirmation mail is enqueued: from noreply@e2e.local -> to stranger@ext.com, Command failed
         let acks = env.db.list_emails(50).await.unwrap();
         let ack = acks
             .iter()
@@ -1527,7 +1527,7 @@ mod tests {
         assert!(ack.body.contains("is not the manager of agent@test.com"));
     }
 
-    // 无 failed_ack 上下文(如 flows 路径)⇒ 行为与旧版一致: 不消费、无确认信、meta 不动。
+    // no failed_ack context (e.g. the flows path) => behavior matches the old version: not consumed, no confirmation mail, meta untouched.
     #[tokio::test]
     async fn non_manager_command_without_failed_ack_ctx_stays_silent() {
         let (env, ef) = approval_env();

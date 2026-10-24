@@ -1372,10 +1372,10 @@ pub fn api_key_row(r: &rusqlite::Row) -> rusqlite::Result<ApiKeyRecord> {
 }
 
 impl Database {
-    /// 库内凭据材料密封(2026-09-22): 把历史明文哈希(`sha256(raw_key)`)就地密封成 `v1:...`。
+    /// Sealing of stored credential material (2026-09-22): seal historical plaintext hashes (`sha256(raw_key)`) in place into `v1:...`.
     ///
-    /// 幂等 —— 已密封的行跳过, 因此迁移可中断/重复执行; 也意味着可随时回滚(代码两种形态都接受)。
-    /// 返回 (本次新密封数, 跳过数)。
+    /// Idempotent - already-sealed rows are skipped, so the migration can be interrupted/re-run; it also means it can be rolled back anytime (the code accepts both forms).
+    /// Returns (newly sealed count, skipped count).
     pub async fn reseal_api_keys(&self) -> AppResult<(usize, usize)> {
         use crate::core::api::seal;
         let key = seal::key_ref().ok_or_else(|| {
@@ -1406,7 +1406,7 @@ impl Database {
         .await
     }
 
-    /// 统计已密封的凭据行(启动时 fail-closed 判定: 有密封材料但 admin-key 不可得 ⇒ 拒绝启动)。
+    /// Count sealed credential rows (used by the startup fail-closed check: sealed material present but admin-key unavailable => refuse to start).
     pub async fn count_sealed_api_keys(&self) -> AppResult<usize> {
         self.call_tx(|conn| {
             let n: i64 = conn.query_row(
@@ -1660,7 +1660,7 @@ impl Database {
     /// Verify an API key hash exists and is active.
     /// Returns the full ApiKeyRecord if valid, None if invalid/expired/deactivated.
     pub async fn verify_api_key(&self, key_hash: &str) -> AppResult<Option<ApiKeyRecord>> {
-        // 库内材料可能是密封的("v1:"): 等值查找需同时尝试**密封形态**与历史明文形态(迁移期/回滚期)。
+        // stored material may be sealed ("v1:"): an equality lookup must try both the **sealed form** and the historical plaintext form (migration/rollback windows).
         let sealed = crate::core::api::seal::seal_if_loaded(key_hash);
         let key_hash = key_hash.to_string();
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);

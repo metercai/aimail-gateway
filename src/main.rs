@@ -78,8 +78,8 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
 
     // Create server
     let db_path = config.storage.db_path();
-    // 平台 admin-key 文件: 生产应指向 DB 目录之外(如 /etc/aimail/admin.key, 0600 root);
-    // 未配置时沿用历史位置 <db>.admin_key(仅供测试/CI)。
+    // platform admin-key file: in production point it outside the DB directory (e.g. /etc/aimail/admin.key, 0600 root);
+    // when unset, the historical location <db>.admin_key is kept (tests/CI only).
     let key_path: std::path::PathBuf =
         config.storage.admin_key_file.clone().unwrap_or_else(|| {
             std::path::PathBuf::from(format!("{}.admin_key", db_path.display()))
@@ -139,9 +139,9 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
         print!("{banner}");
     }
 
-    // ── 库内凭据材料密封(2026-09-22 加固) ──────────────────────────────
-    // 根秘密 = 平台 admin-key; 子密钥 = HMAC-SHA256(admin_key, "aimail-gateway:key-seal:v1")。
-    // 目的: 仅拿到 DB(备份/只读副本/逻辑导出/SQL 注入)的人无法再用 key_hash 冒充签名。
+    // ── stored credential material sealing (2026-09-22 hardening) ──────────────────────────────
+    // root secret = the platform admin-key; subkey = HMAC-SHA256(admin_key, "aimail-gateway:key-seal:v1").
+    // goal: someone with only the DB (backup/read-only replica/logical export/SQL injection) can no longer impersonate signatures with key_hash.
     let admin_for_seal = if !admin_key.is_empty() {
         admin_key.clone()
     } else {
@@ -155,13 +155,13 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
             "no platform admin key available — credential material cannot be sealed or opened"
         );
     }
-    // fail closed: 库里已有密封材料却拿不到 admin-key ⇒ 拒绝启动(否则每个签名都会 401)
+    // fail closed: the DB already holds sealed material but the admin-key is unobtainable => refuse to start (otherwise every signature 401s)
     let sealed_rows = server.count_sealed_credentials().await?;
     if let Err(e) = aimail_base::core::api::seal::ensure_loaded(sealed_rows > 0) {
         tracing::error!(operation = "seal_fail_closed", error = %e, "refusing to start");
         return Err(aimail_base::core::errors::AppError::Internal(e));
     }
-    // 幂等迁移: 历史明文哈希就地密封(可中断/可重复; 代码两种形态都接受 ⇒ 可回滚)
+    // idempotent migration: historical plaintext hashes are sealed in place (interruptible/re-runnable; the code accepts both forms => rollback possible)
     match server.reseal_credentials().await {
         Ok((done, already)) => tracing::info!(
             operation = "credential_reseal",

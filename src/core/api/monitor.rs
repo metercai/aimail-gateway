@@ -293,8 +293,8 @@ pub struct HealthStatus {
 mod health_status_tests {
     use super::*;
 
-    /// `/health` 必须暴露 `smtp_port`(u16)——CLI 审批/ping 步骤靠它定位网关 SMTP 监听端口,
-    /// 不再假设协议默认 25(测试环境常配非 25)。
+    /// `/health` must expose `smtp_port` (u16) - the CLI approval/ping steps rely on it to locate the gateway SMTP listen port,
+    /// instead of assuming protocol default 25 (test environments often configure non-25).
     #[test]
     fn health_status_serializes_smtp_port() {
         let h = HealthStatus {

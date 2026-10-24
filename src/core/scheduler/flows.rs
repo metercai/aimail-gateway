@@ -150,7 +150,7 @@ pub(crate) async fn periodic_inspection(
     );
 
     // Attempt delivery
-    // 2026-09-23: 同 immediate_forward —— 确认信需在重试路径也保持生效。
+    // 2026-09-23: same as immediate_forward - the confirmation mail must stay effective on the retry path too.
     let last_error = match delivery_type {
         "webhook" => {
             deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await
@@ -258,8 +258,8 @@ pub(crate) async fn immediate_forward(
     );
 
     // Attempt delivery
-    // 2026-09-23: trigger 句柄透传给 webhook 投递 ⇒ manager 指令确认信在
-    // 调度路径(首次投递)真正生效。此前传 None ⇒ 确认信从未入队(S4 e2e 实证)。
+    // 2026-09-23: pass the trigger handle through to webhook delivery => the manager command confirmation mail actually
+    // takes effect on the scheduling path (first delivery). Previously None was passed => the confirmation mail was never enqueued (proven by S4 e2e).
     let last_error = match delivery_type {
         "webhook" => {
             deliver_webhook(email_factory, http_client, config, record, metrics, trigger).await

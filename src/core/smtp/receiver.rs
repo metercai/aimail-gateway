@@ -191,10 +191,10 @@ fn parse_bounce_dsn(raw: &[u8]) -> Option<BounceDsn> {
 
     // ── message/rfc822 (original email) ──
     let orig_part = find_mime_part(&parsed, "message/rfc822")?;
-    // message/rfc822 的 *分段头部* 只有 Content-Type 之类; 原始邮件的 From/To/Subject/
-    // Message-ID 在**嵌套报文**里 —— 直接读 orig_part.headers 会全取空串, 导致
-    // verify_bounce 永远匹配不上出站记录、NDR 通知不可达(2026-09-22 单测实证:
-    // textbook RFC 3464 DSN 解析成功但 orig_message_id == "")。
+    // message/rfc822 *section headers* only carry things like Content-Type; the original mail's From/To/Subject/
+    // Message-ID live in the **nested message** - reading orig_part.headers directly yields all-empty strings, so
+    // verify_bounce can never match the outbound record and NDR notifications are unreachable (2026-09-22 unit-test proof:
+    // a textbook RFC 3464 DSN parsed fine but orig_message_id == "").
     let orig_raw = orig_part.get_body_raw().ok()?;
     let orig = mailparse::parse_mail(&orig_raw).ok()?;
 
@@ -524,12 +524,12 @@ impl ConnectionHandler {
     /// before any per-message processing.
     pub fn check_deferred_whitelist(&self) -> Result<(), Response> {
         if !self.sender_whitelisted {
-            // 空信封(MAIL FROM:<>)是退信/DSN 的唯一合法形态: 必须放行到后续 bounce 处理
-            // 分支, 否则真实退信会被 550 拒掉、NDR 通知永不可达。
-            // 实测: category-23 B.2 打印 "SMTP ERROR: (550, 'Sender not whitelisted')"。
-            // 安全性: 仅放行到 bounce 分支, 该分支还要 verify_bounce 匹配本地出站记录
-            // 才会生成通知(未匹配的记 bounce_unverified), 不会投递到 agent 收件箱。
-            // None(尚未解析出 MAIL FROM) 不算空信封, 保持原有严格性。
+            // an empty envelope (MAIL FROM:<>) is the only legal shape for bounces/DSN: it must be allowed through to the subsequent bounce handling
+            // branch, otherwise a real bounce gets rejected with 550 and NDR notifications stay unreachable forever.
+            // observed: category-23 B.2 printed "SMTP ERROR: (550, 'Sender not whitelisted')".
+            // safety: it is only allowed into the bounce branch, which still needs verify_bounce to match a local outbound record
+            // before generating a notification (unmatched ones are logged as bounce_unverified); it is never delivered to an agent inbox.
+            // None (MAIL FROM not yet parsed) does not count as an empty envelope; the original strictness is kept.
             if matches!(self.sender.as_deref(), Some(s) if s.trim().is_empty()) {
                 return Ok(());
             }
@@ -1381,7 +1381,7 @@ fn write_response_blocking(
 mod bounce_dsn_format_tests {
     use super::*;
 
-    /// 教科书式 RFC 3464 退信(真实 MTA 形态)。
+    /// A textbook RFC 3464 bounce (real MTA shape).
     const DSN: &[u8] = concat!(
         "From: MAILER-DAEMON@mx.recipient.com\r\n",
         "To: admin@admin.relay\r\n",

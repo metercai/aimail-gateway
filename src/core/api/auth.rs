@@ -57,8 +57,8 @@ fn unauthorized(err: &str) -> Response {
 /// Canonical v1 API signature base string:
 /// `METHOD\npath_and_query\ntimestamp\nsha256_hex(body)` (no trailing newline).
 ///
-/// **唯一实现**: 基座中间件与 advanced(pull_intercept) 都必须调用它, 不得各自复写
-/// (2026-09-22 曾因 advanced 自建副本导致"密封改造漏修一处" ⇒ agent 自有拉取失效)。
+/// **Single implementation**: both the base middleware and advanced (pull_intercept) must call it; no re-implementations
+/// (on 2026-09-22 an advanced-side copy caused a "sealing refactor missed one spot" => the agent's own pull stopped working).
 pub fn signature_base(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
@@ -86,11 +86,11 @@ pub fn compute_api_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// 请求验签:**唯一实现**(基座中间件与 advanced `pull_intercept` 共用, 不得各自复写)。
+/// Request signature verification: **single implementation** (shared by the base middleware and advanced `pull_intercept`; no re-implementations).
 ///
-/// 遍历候选记录: 库内材料可能是密封的(`v1:`) ⇒ 先经 `seal::signing_material` 解封回
-/// `sha256(raw_key)`, 再与 `signature_base(...)` 做常数时间 HMAC 比对; 命中即返回该记录
-/// (含 scopes/category, 供调用方做授权判定)。解封失败只跳过该候选 ⇒ 最终 401(fail closed)。
+/// Iterate candidate records: stored material may be sealed (`v1:`) => first unseal it via `seal::signing_material` back to
+/// `sha256(raw_key)`, then compare against `signature_base(...)` with a constant-time HMAC; on a hit return that record
+/// (including scopes/category, for the caller's authorization decision). A failed unseal only skips that candidate => final 401 (fail closed).
 pub fn verify_request_signature(
     candidates: &[crate::core::storage::ApiKeyRecord],
     method: &str,
@@ -213,7 +213,7 @@ pub async fn auth_layer(
         }
     };
 
-    // 验签走**公共唯一实现**(内部逐候选解封 + 常数时间 HMAC 比对)。
+    // Signature verification goes through the **shared single implementation** (per-candidate unseal + constant-time HMAC comparison).
     let record: Option<ApiKeyRecord> = verify_request_signature(
         &candidates,
         &method,
@@ -351,7 +351,7 @@ pub fn check_whitelist_access(
         return Ok(());
     }
 
-    // ── AgentAdmin: 自己系统内的 agent(授权对象是 agent, 与域名/共享域无关) ──
+    // ── AgentAdmin: agents inside one's own system (the authorization object is the agent, independent of domain/shared domain) ──
     if is_agent_admin_scope(key) && target_system == Some(key.system_id.as_str()) {
         return Ok(());
     }
