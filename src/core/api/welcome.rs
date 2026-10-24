@@ -1,7 +1,12 @@
 //! System welcome mail endpoint (POST /api/v1/system/welcome).
 //!
-//! Single parameter: `to` (agent address). Everything else is fixed in
-//! code:
+//! The endpoint serves both scopes through one handler:
+//!   - agent-scope keys (address-level): `to` is derived from the key's
+//!     own bound address — the client cannot specify recipients.
+//!   - system/platform/agent_admin keys: `to` comes from the request body.
+//!
+//! For the system scopes, single parameter `to` (agent address):
+//! everything else is fixed in code:
 //!   from     = noreply@{smtp.hostname} (system sender, fixed)
 //!   subject  = "Welcome to AIMail world!"
 //!   body     = fixed text (reply-all instructions + project homepage)
@@ -36,14 +41,17 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::core::api::auth::require_scope_any;
+use crate::core::api::auth::{is_agent_scope, require_scope_any};
 use crate::core::api::types::*;
 use crate::core::email::storage::Recipients;
 use crate::core::storage::ApiKeyRecord;
 
 #[derive(Debug, Deserialize)]
 pub struct WelcomeRequest {
-    /// Registered agent address(es) to welcome. The ONLY parameter.
+    /// Registered agent address(es) to welcome. For system-scope keys this
+    /// is the recipient list; for agent-scope keys it is ignored (`to` is
+    /// derived from the key's own address). The body must still be
+    /// schema-shaped — agent clients send `{"to": []}`.
     pub to: Vec<String>,
 }
 
@@ -83,18 +91,53 @@ Sent {timestamp}
 "#;
 
 /// POST /api/v1/system/welcome — send a system welcome mail (from noreply@).
+///
+/// One endpoint, two branches:
+///   - agent-scope key: `to` = the key's own bound address (derived, the
+///     client-supplied body is ignored); a key without a bound address is
+///     rejected.
+///   - system/platform/agent_admin key: `to` from the request body (original
+///     behavior, unchanged).
 pub async fn send_welcome(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
     Json(req): Json<WelcomeRequest>,
 ) -> Result<(StatusCode, Json<WelcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    // ── 1. Scope: system-level admin only ──
-    require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
+    let to: Vec<String> = if is_agent_scope(&api_key) {
+        // ── agent branch: derive `to` from the key's own bound address ──
+        if api_key.email_address.is_empty() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Agent key has no bound address".to_string(),
+                    detail: Some(
+                        "Welcome via an agent key uses the key's own address — this key has none"
+                            .to_string(),
+                    ),
+                }),
+            ));
+        }
+        vec![api_key.email_address.clone()]
+    } else {
+        // ── system branch: original behavior ──
+        require_scope_any(&api_key, &["platform", "system", "agent_admin"])?;
+        req.to
+    };
+    deliver_welcome(&state, &api_key, &to).await
+}
 
+/// Shared welcome delivery core, used by both scope branches of
+/// `send_welcome`: validate `to` → resolve manager cc → build records →
+/// dispatch (MX for external cc, webhook for internal targets).
+async fn deliver_welcome(
+    state: &HttpState,
+    api_key: &ApiKeyRecord,
+    to: &[String],
+) -> Result<(StatusCode, Json<WelcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
     let env = &state.factories.email.env_factory;
 
     // ── 2. Validate `to`: registered, active agent address(es) ──
-    if req.to.is_empty() {
+    if to.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -104,7 +147,7 @@ pub async fn send_welcome(
         ));
     }
     let mut internal: Vec<(String, String)> = Vec::new(); // (email, system_id)
-    for addr in &req.to {
+    for addr in to {
         let a = addr.trim().to_lowercase();
         if a.is_empty() {
             continue;

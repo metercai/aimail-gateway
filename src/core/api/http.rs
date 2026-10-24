@@ -3476,6 +3476,133 @@ mod tests {
         (status, value)
     }
 
+    /// POST round-trip with a v1 signature (same as signed_put, POST verb).
+    async fn signed_post(
+        router: Router,
+        raw_key: &str,
+        identity: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .to_string();
+        let body_bytes = serde_json::to_vec(body).unwrap();
+        let sig = compute_api_signature(
+            &crate::core::api::auth::sha256_hex(raw_key),
+            "POST",
+            path,
+            &ts,
+            &body_bytes,
+        );
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("Content-Type", "application/json")
+            .header("X-Api-Identity", identity)
+            .header("X-Api-Timestamp", &ts)
+            .header("X-Api-Signature", sig)
+            .body(axum::body::Body::from(body_bytes))
+            .unwrap();
+        let resp = tower::ServiceExt::oneshot(router, req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, value)
+    }
+
+    // ─── POST /api/v1/system/welcome — unified endpoint (agent + system) ───
+
+    /// Agent branch: an agent-scope key with a bound, active address gets
+    /// the welcome for ITS OWN address; the body `to` is ignored (a
+    /// bogus address in the body must not change the outcome).
+    #[tokio::test]
+    async fn welcome_agent_branch_derives_to_from_key_and_ignores_body() {
+        let (db, state, _rx, _dir) = probe_fixture("welcome-agent").await;
+        db.insert_system_domain("d1", "sys1", "agent1@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "agent1@x.com", &["agent"], "agentkey01")
+            .await;
+
+        let body = serde_json::json!({"to": ["nobody@nowhere.test"]});
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey01",
+            "sys1",
+            "/api/v1/system/welcome",
+            &body,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert!(resp["email_id"].as_str().is_some(), "body was {resp}");
+        assert!(resp["message_id"].as_str().is_some(), "body was {resp}");
+        // The agent has no manager meta → no cc.
+        assert_eq!(resp["cc"], serde_json::json!([]), "body was {resp}");
+        // The derived record's `to` is the key's own address, not the body.
+        let email_id = resp["email_id"].as_str().unwrap().to_string();
+        let rec = state
+            .factories
+            .email
+            .env_factory
+            .db
+            .get_email(&email_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            rec.recipients.contains("\"to\":[\"agent1@x.com\"]"),
+            "record to must be the key's own address, got {}",
+            rec.recipients
+        );
+    }
+
+    /// Agent branch: an agent-scope key without a bound address is rejected.
+    #[tokio::test]
+    async fn welcome_agent_branch_key_without_bound_address_rejected() {
+        let (db, state, _rx, _dir) = probe_fixture("welcome-agent-nobound").await;
+        seed_key(&db, "sys1", "", &["agent"], "agentkey02").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey02",
+            "sys1",
+            "/api/v1/system/welcome",
+            &serde_json::json!({"to": []}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "body was {resp}");
+    }
+
+    /// System branch regression anchor: a system-scope key still welcomes
+    /// the `to` it names in the body (original behavior, byte-identical).
+    #[tokio::test]
+    async fn welcome_system_branch_still_uses_body_to() {
+        let (db, state, _rx, _dir) = probe_fixture("welcome-system").await;
+        db.insert_system_domain("d1", "sys1", "agent2@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey0003").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "syskey0003",
+            "sys1",
+            "/api/v1/system/welcome",
+            &serde_json::json!({"to": ["agent2@x.com"]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert!(resp["email_id"].as_str().is_some(), "body was {resp}");
+    }
+
     /// State ①: an existing, active address ⇒ {true,true}, two fields only.
     #[tokio::test]
     async fn address_probe_existing_active_address_is_true_true() {
