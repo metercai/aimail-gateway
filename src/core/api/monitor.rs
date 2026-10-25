@@ -39,7 +39,6 @@ struct MetricsInner {
     relay_sent: AtomicU64,
     relay_failed: AtomicU64,
     relay_retried: AtomicU64,
-    rate_limited: AtomicU64,
     whitelist_matches: AtomicU64,
     ip_blacklist_hits: AtomicU64,
     ip_whitelist_rescues: AtomicU64,
@@ -79,7 +78,6 @@ impl Metrics {
                 relay_sent: AtomicU64::new(0),
                 relay_failed: AtomicU64::new(0),
                 relay_retried: AtomicU64::new(0),
-                rate_limited: AtomicU64::new(0),
                 whitelist_matches: AtomicU64::new(0),
                 ip_blacklist_hits: AtomicU64::new(0),
                 ip_whitelist_rescues: AtomicU64::new(0),
@@ -127,10 +125,6 @@ impl Metrics {
 
     pub fn inc_relay_retried(&self) {
         self.inner.relay_retried.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn inc_rate_limited(&self) {
-        self.inner.rate_limited.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn inc_whitelist_matches(&self) {
@@ -225,7 +219,6 @@ impl Metrics {
             auto_reply_sent: self.inner.auto_reply_sent.load(Ordering::Relaxed),
             relay_sent: self.inner.relay_sent.load(Ordering::Relaxed),
             relay_failed: self.inner.relay_failed.load(Ordering::Relaxed),
-            rate_limited: self.inner.rate_limited.load(Ordering::Relaxed),
             whitelist_matches: self.inner.whitelist_matches.load(Ordering::Relaxed),
             ip_blacklist_hits: self.inner.ip_blacklist_hits.load(Ordering::Relaxed),
             ip_whitelist_rescues: self.inner.ip_whitelist_rescues.load(Ordering::Relaxed),
@@ -259,7 +252,6 @@ pub struct MetricsSnapshot {
     pub auto_reply_sent: u64,
     pub relay_sent: u64,
     pub relay_failed: u64,
-    pub rate_limited: u64,
     pub whitelist_matches: u64,
     pub ip_blacklist_hits: u64,
     pub ip_whitelist_rescues: u64,
