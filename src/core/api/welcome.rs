@@ -41,7 +41,7 @@ use serde::Deserialize;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::core::api::auth::{is_agent_scope, require_scope_any};
+use crate::core::api::auth::{is_agent_scope, is_platform_admin_scope, require_scope_any};
 use crate::core::api::types::*;
 use crate::core::email::storage::Recipients;
 use crate::core::storage::ApiKeyRecord;
@@ -178,6 +178,33 @@ async fn deliver_welcome(
         ));
     }
 
+    // ── 2b. Ownership gate (defect 1, 2026-10-25) ──
+    // A non-platform key may only welcome addresses belonging to ITS OWN
+    // system. Without this, any `system`-scoped key could welcome an active
+    // agent address of a different tenant on the same gateway — cross-tenant
+    // delivery, records attributed to the wrong system, and the welcome body
+    // (which drives the target agent's persona/signature) as an injection
+    // surface. Rejection precedes `create_outbound`/`create_inbound`: zero
+    // side effects (no record, no delivery, no cc). Platform keys are
+    // unrestricted — cross-system welcome stays a platform capability.
+    let cross_system = internal
+        .iter()
+        .find(|(_, sid)| sid.as_str() != api_key.system_id.as_str());
+    if let Some((email, target_system)) = cross_system {
+        if !is_platform_admin_scope(api_key) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Welcome recipient belongs to another system".to_string(),
+                    detail: Some(format!(
+                        "'{email}' belongs to system '{target_system}', this key belongs to '{}'",
+                        api_key.system_id
+                    )),
+                }),
+            ));
+        }
+    }
+
     // ── 3. cc: reverse-lookup manager_address, auto-route internal/external ──
     let mut ext_cc: Vec<String> = Vec::new(); // external (MX)
     let mut int_cc: Vec<String> = Vec::new(); // internal (webhook)
@@ -251,7 +278,7 @@ async fn deliver_welcome(
         .smtp
         .hostname
         .as_deref()
-        .or_else(|| state.config.http.hostname.as_deref())
+        .or(state.config.http.hostname.as_deref())
         .unwrap_or("aimail-relay");
     let message_id = format!("<{}@{}>", Uuid::new_v4(), domain);
     // Human-readable local time (gateway tz), e.g. 2026-09-05 08:49:40 +0800.

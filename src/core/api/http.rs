@@ -3526,8 +3526,7 @@ mod tests {
         db.insert_system_domain("d1", "sys1", "agent1@x.com", None, None)
             .await
             .unwrap();
-        seed_key(&db, "sys1", "agent1@x.com", &["agent"], "agentkey01")
-            .await;
+        seed_key(&db, "sys1", "agent1@x.com", &["agent"], "agentkey01").await;
 
         let body = serde_json::json!({"to": ["nobody@nowhere.test"]});
         let (status, resp) = signed_post(
@@ -3596,6 +3595,71 @@ mod tests {
             "sys1",
             "/api/v1/system/welcome",
             &serde_json::json!({"to": ["agent2@x.com"]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert!(resp["email_id"].as_str().is_some(), "body was {resp}");
+    }
+
+    /// Defect 1 (2026-10-25): a `system`-scoped key of system A must NOT
+    /// welcome an active address of system B — 403, and **zero side
+    /// effects**: no email record of any kind lands in the DB (rejection
+    /// precedes `create_outbound`/`create_inbound`).
+    #[tokio::test]
+    async fn welcome_cross_system_system_key_rejected_with_no_side_effects() {
+        let (db, state, _rx, _dir) = probe_fixture("welcome-xsys-system").await;
+        db.insert_system_domain("dA", "sysA", "a@x.com", None, None)
+            .await
+            .unwrap();
+        db.insert_system_domain("dB", "sysB", "b@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sysA", "", &["system"], "xsyskeyA01").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "xsyskeyA01",
+            "sysA",
+            "/api/v1/system/welcome",
+            &serde_json::json!({"to": ["b@x.com"]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN, "body was {resp}");
+        // Zero side effects: no record (inbound or outbound) for any system.
+        let emails = db.list_emails(100).await.unwrap();
+        assert!(
+            emails.is_empty(),
+            "cross-system welcome must create no records, got {} record(s)",
+            emails.len()
+        );
+        let a = db.count_emails_by_system("sysA").await.unwrap();
+        let b = db.count_emails_by_system("sysB").await.unwrap();
+        assert_eq!(a, 0, "sysA must have no welcome record");
+        assert_eq!(b, 0, "sysB must have no welcome record");
+    }
+
+    /// Defect 1 (2026-10-25): a `platform`-scoped key MAY welcome an active
+    /// address of a different system (cross-system is a platform capability,
+    /// unchanged behavior).
+    #[tokio::test]
+    async fn welcome_cross_system_platform_key_allowed() {
+        let (db, state, _rx, _dir) = probe_fixture("welcome-xsys-platform").await;
+        db.insert_system_domain("dA", "sysA", "a@x.com", None, None)
+            .await
+            .unwrap();
+        db.insert_system_domain("dB", "sysB", "b@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sysA", "", &["platform"], "xsyskeyP01").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "xsyskeyP01",
+            "sysA",
+            "/api/v1/system/welcome",
+            &serde_json::json!({"to": ["b@x.com"]}),
         )
         .await;
 
