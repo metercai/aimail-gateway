@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::Path,
-    extract::Query,
+    body::Body,
+    extract::{Path, Query, State},
+    http::header::{CACHE_CONTROL, CONNECTION, CONTENT_TYPE},
     http::StatusCode,
-    response::Json,
+    response::{Json, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -28,11 +29,13 @@ use crate::core::api::keys::{
 use crate::core::api::monitor::health_check;
 use crate::core::api::send::send_email;
 use crate::core::api::types::*;
+use crate::core::api::types::{PULL_HOLD_MAX_MS, SSE_HEARTBEAT_SECS, SSE_MAX_LIFE_SECS};
 use crate::core::api::welcome::send_welcome;
 use crate::core::api::whoami::whoami;
 use crate::core::pending_notifier::{NotifyKey, PendingNotifier, WaitOutcome};
 use crate::core::storage::{ApiKeyRecord, Database, DomainAddrMetaRecord};
 use crate::core::strategy::RouterHook;
+use futures_util::stream::unfold;
 
 pub fn create_router(
     state: HttpState,
@@ -129,6 +132,7 @@ pub fn create_router(
         .route("/api/v1/whitelists", put(update_whitelist_by_params))
         // Admin: pending deliveries (pull-mode for aimail-bridge)
         .route("/api/v1/admin/pending", post(list_pending_deliveries))
+        .route("/api/v1/admin/pending/stream", get(pending_stream))
         .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
         // Admin: probe inbound-endpoint reachability (CLI install webhook plan,
         // 2026-10-13: restored from v1.0; pure TCP classifier — the caller
@@ -2976,7 +2980,7 @@ fn merge_profile_json(old: &str, new: &str) -> String {
 
 // ── Pending deliveries (pull-mode for aimail-bridge) ──
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PendingPollRequest {
     #[serde(default = "default_limit")]
     limit: i64,
@@ -3254,6 +3258,166 @@ async fn ack_pending_deliveries(
 //   means the bridge process is down ⇒ treated as UNREACHABLE (degrade).
 // Loopback targets are rejected by the endpoint itself so a remote GW can
 // never "probe" its own machine.
+
+// ── Pending delivery SSE stream (S2 primary transport) ───────
+//
+// `GET /api/v1/admin/pending/stream` — auth identical to the POST pull
+// (same auth layer; a GET signs with an empty body, `auth.rs`). One
+// long-lived event stream per client:
+//
+//   * connect-time query ⇒ `event: mail` (data == POST response shape,
+//     built by the SAME `group_pending_batches` ⇒ shape parity by
+//     construction, not by test);
+//   * writer wake-ups and the heartbeat both re-query under the caller's
+//     OWN scope filter and emit only rows with `id > watermark`
+//     (at-least-once: a reconnect re-sends unacked rows; clients dedupe
+//     by delivery id — same contract as long-pull);
+//   * `: ping` heartbeat every `heartbeat` (contract:
+//     `SSE_HEARTBEAT_SECS`; defensive — prod runs no proxy, ruling
+//     2026-10-26, so it also doubles as the missed-notify safety net);
+//   * the server closes the stream at `life` (contract:
+//     `SSE_MAX_LIFE_SECS`); clients reconnect with backoff and fall back
+//     to long-poll when the endpoint is absent (e.g. server rollback).
+//
+// The stream NEVER acks — acks stay on `POST /ack`.
+
+struct SseStreamState {
+    db: std::sync::Arc<crate::core::storage::Database>,
+    api_key: crate::core::storage::ApiKeyRecord,
+    nkey: NotifyKey,
+    req: PendingPollRequest,
+    /// Max delivery id already emitted on this connection. 0 = nothing yet.
+    watermark: i64,
+    /// Notifier gen the caller has already observed; wait for gen > this.
+    since: u64,
+    heartbeat: std::time::Duration,
+    life: std::time::Duration,
+    started: tokio::time::Instant,
+    /// Connect-time rows, emitted as the first frame.
+    pending_first: Option<Vec<crate::core::storage::PendingDeliveryRecord>>,
+}
+
+type SseItem = Result<String, std::io::Error>;
+
+fn sse_mail_frame(payload: &serde_json::Value) -> SseItem {
+    Ok(format!("event: mail\ndata: {}\n\n", payload.to_string()))
+}
+
+/// One unfold step. Returns the next frame (mail or ping) plus the
+/// updated state, or `None` when the stream ends (max life).
+async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamState)> {
+    let notifier = PendingNotifier::global();
+
+    // First frame: whatever the connect-time query found.
+    if let Some(records) = st.pending_first.take() {
+        if !records.is_empty() {
+            st.watermark = records.iter().map(|r| r.id).max().unwrap_or(0);
+            return Some((sse_mail_frame(&group_pending_batches(&records)), st));
+        }
+    }
+
+    loop {
+        if st.started.elapsed() >= st.life {
+            return None;
+        }
+        let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
+        // Snapshot AFTER the wait: a notify between the wait and this point
+        // has gen > snapshot ⇒ caught by the NEXT wait; one before has
+        // its row committed ⇒ seen by the re-query below.
+        st.since = notifier.snapshot(&st.nkey);
+
+        match pending_records_for(&st.db, &st.api_key, &st.req).await {
+            Ok((_k, records)) => {
+                let fresh: Vec<_> = records
+                    .into_iter()
+                    .filter(|r| r.id > st.watermark)
+                    .collect();
+                if !fresh.is_empty() {
+                    st.watermark = fresh.iter().map(|r| r.id).max().unwrap_or(st.watermark);
+                    return Some((sse_mail_frame(&group_pending_batches(&fresh)), st));
+                }
+            }
+            Err(_) => {
+                // Transient storage error: keep the stream alive; the next
+                // wake-up re-queries.
+            }
+        }
+        if matches!(outcome, WaitOutcome::Timeout) {
+            return Some((Ok(": ping\n\n".to_string()), st));
+        }
+        // Woke (or storage error) with nothing new: keep waiting.
+    }
+}
+
+/// Build the SSE response for the given caller. `heartbeat`/`life` are
+/// parameters so tests can inject short periods; the public handler passes
+/// the contract constants.
+async fn sse_response(
+    state: State<HttpState>,
+    api_key: crate::core::storage::ApiKeyRecord,
+    heartbeat: std::time::Duration,
+    life: std::time::Duration,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let db = &state.factories.email.env_factory.db;
+    let notifier = PendingNotifier::global();
+    // No filter on the stream: the scope fork IS the range (§2.5).
+    let req = PendingPollRequest {
+        limit: default_limit(),
+        emails: Vec::new(),
+        filter: Vec::new(),
+        timeout_ms: 0,
+    };
+    let (nkey, initial) = pending_records_for(db, &api_key, &req).await?;
+    // Snapshot AFTER the connect query: rows already emitted cannot be
+    // double-emitted by their own notify.
+    let since = notifier.snapshot(&nkey);
+
+    let st = SseStreamState {
+        db: db.clone(),
+        api_key: api_key.clone(),
+        nkey,
+        req,
+        watermark: 0,
+        since,
+        heartbeat,
+        life,
+        started: tokio::time::Instant::now(),
+        pending_first: Some(initial),
+    };
+    let stream = unfold(st, |st| async move { sse_stream_step(st).await });
+    let resp = Response::builder()
+        .header(CONTENT_TYPE, "text/event-stream")
+        .header(CACHE_CONTROL, "no-cache")
+        // Defensive: disable proxy response buffering. Production runs no
+        // reverse proxy (ruling 2026-10-26) — kept so a future proxy
+        // cannot silently buffer the stream.
+        .header("X-Accel-Buffering", "no")
+        .header(CONNECTION, "keep-alive")
+        .body(Body::from_stream(stream));
+    match resp {
+        Ok(r) => Ok(r),
+        Err(_) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "stream build failed".to_string(),
+                detail: None,
+            }),
+        )),
+    }
+}
+
+async fn pending_stream(
+    state: State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    sse_response(
+        state,
+        api_key,
+        std::time::Duration::from_secs(SSE_HEARTBEAT_SECS),
+        std::time::Duration::from_secs(SSE_MAX_LIFE_SECS),
+    )
+    .await
+}
 
 /// Run one probe and classify the outcome. Pure classifier (2026-10-13):
 /// the caller interprets the `error` class against the plan (see
@@ -4342,5 +4506,239 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "body was {resp}");
         assert_eq!(resp["acked"], serde_json::json!(1), "body was {resp}");
+    }
+
+    // ── SSE stream tests (Phase 1.5) ──────────────────────────────
+    // Each test uses a UNIQUE system_id: `PendingNotifier::global()` is
+    // a process-wide static, so a sibling test's notify on the same key
+    // would otherwise wake this test's stream early.
+
+    /// Read up to `want` complete SSE events (frames end with a blank
+    /// line) from a response body, bounded by `timeout`.
+    async fn read_sse_events(body: Body, want: usize, timeout: std::time::Duration) -> Vec<String> {
+        use futures_util::StreamExt;
+        let mut stream = body.into_data_stream();
+        let mut buf = String::new();
+        let mut events = Vec::new();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if events.len() >= want {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let chunk = tokio::time::timeout(remaining, stream.next()).await;
+            match chunk {
+                Ok(Some(Ok(bytes))) => {
+                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = buf.find("\n\n") {
+                        events.push(buf[..pos].to_string());
+                        buf.drain(..=pos + 1);
+                    }
+                }
+                Ok(Some(Err(e))) => {
+                    events.push(format!("#ERR {e}"));
+                    break;
+                }
+                Ok(None) => break, // stream ended
+                Err(_) => break,   // timeout
+            }
+        }
+        events
+    }
+
+    /// Headers per contract + first frame == the POST response shape for
+    /// the same rows (byte-identical `group_pending_batches` output), and
+    /// the agent sees ONLY its own address.
+    #[tokio::test]
+    async fn sse_stream_headers_shape_and_agent_isolation() {
+        let (db, state, _rx, _dir) = probe_fixture("sse-1").await;
+        db.insert_system_domain("d1", "sse1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sse1", "a@x.com", &["agent"], "ssek1key").await;
+        // Two rows, same payload ⇒ one batch; a second address (other key)
+        // must NOT appear.
+        seed_pending(&db, "sse1", "a@x.com", "a@x.com", "hello-1").await;
+        seed_pending(&db, "sse1", "b@x.com", "b@x.com", "hello-1").await;
+
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+        let resp = sse_response(
+            State(state),
+            key,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        // Header contract.
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+        assert_eq!(resp.headers().get("cache-control").unwrap(), "no-cache");
+        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
+        assert_eq!(resp.headers().get("connection").unwrap(), "keep-alive");
+
+        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(3)).await;
+        assert_eq!(events.len(), 1, "expected one mail frame, got {events:?}");
+        assert!(
+            events[0].starts_with("event: mail\ndata: "),
+            "{:?}",
+            events[0]
+        );
+
+        // data payload == POST response shape for the agent's own rows.
+        let records = db
+            .list_pending_by_email("sse1", "a@x.com", 200)
+            .await
+            .unwrap();
+        let expected = group_pending_batches(&records).to_string();
+        assert_eq!(events[0][18..], expected, "shape must equal POST output");
+        // Isolation: only a@x.com present.
+        assert!(expected.contains("a@x.com"));
+        assert!(!expected.contains("b@x.com"));
+    }
+
+    /// system-scope stream sees the whole system (all addresses, all
+    /// distinct payloads).
+    #[tokio::test]
+    async fn sse_stream_system_scope_sees_all() {
+        let (db, state, _rx, _dir) = probe_fixture("sse-2").await;
+        db.insert_system_domain("d1", "sse2", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sse2", "sys@x.com", &["system"], "ssek2key").await;
+        seed_pending(&db, "sse2", "a@x.com", "a@x.com", "p1").await;
+        seed_pending(&db, "sse2", "b@x.com", "b@x.com", "p2").await;
+
+        let key = db.get_api_key_by_email("sys@x.com").await.unwrap().unwrap();
+        let resp = sse_response(
+            State(state),
+            key,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(3)).await;
+        assert_eq!(events.len(), 1, "got {events:?}");
+        let v: serde_json::Value = serde_json::from_str(&events[0][18..]).unwrap();
+        assert_eq!(v["batches"].as_array().unwrap().len(), 2);
+        let all: String = v.to_string();
+        assert!(all.contains("a@x.com") && all.contains("b@x.com"));
+    }
+
+    /// Empty connect + writer wake-up ⇒ mail frame arrives quickly
+    /// (at-least-once: the wake-up re-queries and emits new rows).
+    #[tokio::test]
+    async fn sse_stream_wakes_on_new_mail() {
+        let (db, state, _rx, _dir) = probe_fixture("sse-3").await;
+        db.insert_system_domain("d1", "sse3", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sse3", "a@x.com", &["agent"], "ssek3key").await;
+
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+        let resp = sse_response(
+            State(state),
+            key,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+        // Writer simulation: insert AFTER connect, then notify (exactly
+        // what webhook.rs does post-commit).
+        let db2 = db.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            seed_pending(&db2, "sse3", "x.com", "a@x.com", "late").await;
+            crate::core::pending_notifier::PendingNotifier::global()
+                .notify_email("sse3", "a@x.com");
+            crate::core::pending_notifier::PendingNotifier::global().notify_system("sse3");
+        });
+
+        let started = std::time::Instant::now();
+        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(4)).await;
+        let elapsed = started.elapsed();
+        writer.await.unwrap();
+
+        assert_eq!(events.len(), 1, "got {events:?}");
+        assert!(events[0].starts_with("event: mail"), "{:?}", events[0]);
+        assert!(events[0].contains("late"));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "wake-up took too long: {elapsed:?}"
+        );
+    }
+
+    /// at-least-once: rows sent on connection 1 but NOT acked are
+    /// re-sent on connection 2 (watermark resets per connection).
+    #[tokio::test]
+    async fn sse_stream_reconnect_resends_unacked() {
+        let (db, state, _rx, _dir) = probe_fixture("sse-4").await;
+        db.insert_system_domain("d1", "sse4", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sse4", "a@x.com", &["agent"], "ssek4key").await;
+        seed_pending(&db, "sse4", "a@x.com", "a@x.com", "persist").await;
+
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        // Connection 1: sees the row (and we deliberately do NOT ack).
+        let resp1 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let ev1 = read_sse_events(resp1.into_body(), 1, Duration::from_secs(3)).await;
+        assert_eq!(ev1.len(), 1, "conn1 got {ev1:?}");
+        assert!(ev1[0].contains("persist"));
+
+        // Connection 2: the unacked row is re-sent.
+        let resp2 = sse_response(
+            State(state),
+            key,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let ev2 = read_sse_events(resp2.into_body(), 1, Duration::from_secs(3)).await;
+        assert_eq!(ev2.len(), 1, "conn2 got {ev2:?}");
+        assert!(ev2[0].contains("persist"), "unacked row must be re-sent");
+    }
+
+    /// Heartbeat (injected 100ms) pings while idle; the stream ends at
+    /// the injected max life.
+    #[tokio::test]
+    async fn sse_stream_heartbeat_and_max_life() {
+        let (db, state, _rx, _dir) = probe_fixture("sse-5").await;
+        db.insert_system_domain("d1", "sse5", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sse5", "a@x.com", &["agent"], "ssek5key").await;
+
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+        let resp = sse_response(
+            State(state),
+            key,
+            Duration::from_millis(100),
+            Duration::from_millis(900),
+        )
+        .await
+        .unwrap();
+        // 900ms life @ 100ms heartbeat ⇒ ≥5 pings, then the stream ends.
+        let events = read_sse_events(resp.into_body(), 5, Duration::from_secs(3)).await;
+        assert!(events.len() >= 5, "expected ≥5 pings, got {events:?}");
+        assert!(events.iter().all(|e| e == ": ping"), "{events:?}");
     }
 }
