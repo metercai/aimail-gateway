@@ -3071,24 +3071,25 @@ async fn pending_records_for(
     db: &Database,
     key: &ApiKeyRecord,
     req: &PendingPollRequest,
-) -> Result<(NotifyKey, Vec<crate::core::storage::PendingDeliveryRecord>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<
+    (NotifyKey, Vec<crate::core::storage::PendingDeliveryRecord>),
+    (StatusCode, Json<ErrorResponse>),
+> {
     let nkey = pending_notify_key(key).ok_or_else(|| {
         (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "No bound address".to_string(),
                 detail: Some(
-                    "agent-scope key has no bound address; pull requires a bound address".to_string(),
+                    "agent-scope key has no bound address; pull requires a bound address"
+                        .to_string(),
                 ),
             }),
         )
     })?;
 
     match &nkey {
-        NotifyKey::Email {
-            system_id,
-            email,
-        } => {
+        NotifyKey::Email { system_id, email } => {
             let records = db
                 .list_pending_by_email(system_id, email, req.limit)
                 .await
@@ -3109,7 +3110,8 @@ async fn pending_records_for(
             let effective_filter: Vec<String> = if use_filter {
                 preprocess_pending_filter(&req.filter)
             } else if !req.emails.is_empty() {
-                let mut domains: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut domains: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for email in &req.emails {
                     if let Some(domain) = email.rsplit('@').next() {
                         domains.insert(domain.to_string());
@@ -3222,8 +3224,7 @@ async fn ack_pending_deliveries(
             .await
     } else {
         require_scope_any(&api_key, &["system", "bridge"])?;
-        db.ack_deliveries(&api_key.system_id, &req.ids)
-            .await
+        db.ack_deliveries(&api_key.system_id, &req.ids).await
     }
     .map_err(|e| {
         (
@@ -4129,7 +4130,11 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "body was {resp}");
         // Two distinct payloads ⇒ exactly two batches (grouping preserved).
-        assert_eq!(resp["batches"].as_array().unwrap().len(), 2, "body was {resp}");
+        assert_eq!(
+            resp["batches"].as_array().unwrap().len(),
+            2,
+            "body was {resp}"
+        );
         assert_eq!(
             batch_delivery_emails(&resp),
             vec!["a@x.com", "b@x.com", "c@y.com"],
@@ -4296,7 +4301,11 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(batch_delivery_emails(&resp), vec!["a@x.com"], "body was {resp}");
+        assert_eq!(
+            batch_delivery_emails(&resp),
+            vec!["a@x.com"],
+            "body was {resp}"
+        );
     }
 
     /// Agent ack: cross-address is a no-op, own address is acked.
