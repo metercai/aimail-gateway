@@ -303,6 +303,16 @@ pub async fn process_email_webhook(
                         any_endpoint = true;
                         info!(email_id = %record.id, domain = %d.domain, recipient = %addr,
                               "Inserted pending delivery (pull mode)");
+                        // Wake long-pull / SSE waiters. The insert is already
+                        // committed (the `.call` above resolved), so both the
+                        // system key (bridge/system-scope waiters) and the
+                        // per-address key (agent-scope waiters) are safe to
+                        // signal. Each waiter re-queries under its OWN filter,
+                        // so waking both is always correct: a waiter whose key
+                        // does not match this row simply sees nothing new.
+                        let notifier = crate::core::pending_notifier::PendingNotifier::global();
+                        notifier.notify_system(&d.system_id);
+                        notifier.notify_email(&d.system_id, &addr.to_lowercase());
                         // Mark endpoint success so check_all_endpoints_completed
                         // passes for mixed pull+webhook scenarios.
                         if let Err(e) = email_factory
