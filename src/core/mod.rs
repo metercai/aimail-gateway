@@ -4,6 +4,7 @@ pub mod config;
 pub mod email;
 pub mod errors;
 pub mod factory;
+pub mod pending_notifier;
 pub mod scheduler;
 pub mod scope;
 pub mod server;
