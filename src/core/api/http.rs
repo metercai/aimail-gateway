@@ -30,6 +30,7 @@ use crate::core::api::send::send_email;
 use crate::core::api::types::*;
 use crate::core::api::welcome::send_welcome;
 use crate::core::api::whoami::whoami;
+use crate::core::pending_notifier::{NotifyKey, PendingNotifier, WaitOutcome};
 use crate::core::storage::{ApiKeyRecord, Database, DomainAddrMetaRecord};
 use crate::core::strategy::RouterHook;
 
@@ -2983,6 +2984,11 @@ struct PendingPollRequest {
     emails: Vec<String>,
     #[serde(default)]
     filter: Vec<String>,
+    /// Long-pull hold (ms). 0 = return immediately (current behavior,
+    /// byte-identical); >0 = when the query is empty, wait up to this long
+    /// (clamped to `PULL_HOLD_MAX_MS`) for new mail before returning.
+    #[serde(default)]
+    timeout_ms: i64,
 }
 fn default_limit() -> i64 {
     20
@@ -2993,65 +2999,18 @@ struct AckRequest {
     ids: Vec<i64>,
 }
 
-async fn list_pending_deliveries(
-    state: axum::extract::State<HttpState>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    Json(req): Json<PendingPollRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["system", "bridge"])?;
-
-    let system_id = &api_key.system_id;
-
-    // Build domain filter: prefer `filter` param, fall back to `emails`
-    let use_filter = !req.filter.is_empty();
-
-    // Preprocess filter: domains absorb exact emails and regex, then regex absorbs emails
-    let effective_filter: Vec<String> = if use_filter {
-        preprocess_pending_filter(&req.filter)
-    } else if !req.emails.is_empty() {
-        // Legacy: extract unique domains from email list
-        let mut domains: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for email in &req.emails {
-            if let Some(domain) = email.rsplit('@').next() {
-                domains.insert(domain.to_string());
-            }
-        }
-        domains.into_iter().collect()
-    } else {
-        Vec::new()
-    };
-
-    let use_domains: Option<Vec<String>> = if effective_filter.is_empty() {
-        None
-    } else {
-        Some(effective_filter)
-    };
-
-    let records = state
-        .factories
-        .email
-        .env_factory
-        .db
-        .list_pending_deliveries(system_id, req.limit, use_domains.as_deref())
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                    detail: Some(e.to_string()),
-                }),
-            )
-        })?;
-
-    // Group deliveries by body hash so identical payloads share one copy.
-    // This reduces bridge poll response size when multiple recipients
-    // received the same email (common for mailing-list / broadcast).
+/// Group pending records into batches keyed by payload hash so identical
+/// payloads share one body (mailing-list / broadcast responses stay small).
+/// Single source of truth for the pull response shape — the POST handler
+/// and the SSE `mail` event both use this, so their shapes cannot drift.
+fn group_pending_batches(
+    records: &[crate::core::storage::PendingDeliveryRecord],
+) -> serde_json::Value {
     use std::collections::{hash_map::DefaultHasher, HashMap};
     use std::hash::{Hash, Hasher};
     let mut batches_map: HashMap<i64, Vec<(i64, String, String)>> = HashMap::new();
     let mut batch_order: Vec<(i64, String)> = Vec::new(); // (hash, body)
-    for r in &records {
+    for r in records {
         let mut hasher = DefaultHasher::new();
         r.payload.hash(&mut hasher);
         let h = hasher.finish() as i64;
@@ -3081,7 +3040,146 @@ async fn list_pending_deliveries(
         })
     }).collect();
 
-    Ok(Json(serde_json::json!({ "batches": batches })))
+    serde_json::json!({ "batches": batches })
+}
+
+/// Isolation key for pull waiters — mirrors the storage filters of
+/// [`pending_records_for`] exactly (single source of truth: that function
+/// calls this one). agent ⇒ its own (system_id, lowercased email), or
+/// `None` when the key has no bound address (handler 403s); system/bridge
+/// ⇒ the system key.
+fn pending_notify_key(key: &ApiKeyRecord) -> Option<NotifyKey> {
+    if is_agent_scope(key) {
+        if key.email_address.is_empty() {
+            return None;
+        }
+        return Some(NotifyKey::Email {
+            system_id: key.system_id.clone(),
+            email: key.email_address.to_lowercase(),
+        });
+    }
+    Some(NotifyKey::System(key.system_id.clone()))
+}
+
+/// Resolve the pending rows the calling key may see, per scope.
+/// Agent keys see ONLY their own address (`(system_id, lowercased email)`);
+/// `emails`/`filter` are accepted and ignored — scope IS the range (§2.5).
+/// System/bridge keys see system-wide rows with the existing domain filter.
+/// Returns the matching notifier key so hold/SSE can wait on the same key
+/// the query filtered by.
+async fn pending_records_for(
+    db: &Database,
+    key: &ApiKeyRecord,
+    req: &PendingPollRequest,
+) -> Result<(NotifyKey, Vec<crate::core::storage::PendingDeliveryRecord>), (StatusCode, Json<ErrorResponse>)> {
+    let nkey = pending_notify_key(key).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "No bound address".to_string(),
+                detail: Some(
+                    "agent-scope key has no bound address; pull requires a bound address".to_string(),
+                ),
+            }),
+        )
+    })?;
+
+    match &nkey {
+        NotifyKey::Email {
+            system_id,
+            email,
+        } => {
+            let records = db
+                .list_pending_by_email(system_id, email, req.limit)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Database error".to_string(),
+                            detail: Some(e.to_string()),
+                        }),
+                    )
+                })?;
+            Ok((nkey, records))
+        }
+        NotifyKey::System(system_id) => {
+            require_scope_any(key, &["system", "bridge"])?;
+            let use_filter = !req.filter.is_empty();
+            let effective_filter: Vec<String> = if use_filter {
+                preprocess_pending_filter(&req.filter)
+            } else if !req.emails.is_empty() {
+                let mut domains: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for email in &req.emails {
+                    if let Some(domain) = email.rsplit('@').next() {
+                        domains.insert(domain.to_string());
+                    }
+                }
+                domains.into_iter().collect()
+            } else {
+                Vec::new()
+            };
+            let use_domains: Option<Vec<String>> = if effective_filter.is_empty() {
+                None
+            } else {
+                Some(effective_filter)
+            };
+            let records = db
+                .list_pending_deliveries(system_id, req.limit, use_domains.as_deref())
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Database error".to_string(),
+                            detail: Some(e.to_string()),
+                        }),
+                    )
+                })?;
+            Ok((nkey, records))
+        }
+    }
+}
+
+async fn list_pending_deliveries(
+    state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    Json(req): Json<PendingPollRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let db = &state.factories.email.env_factory.db;
+    let notifier = PendingNotifier::global();
+    let hold =
+        std::time::Duration::from_millis(req.timeout_ms.clamp(0, PULL_HOLD_MAX_MS as i64) as u64);
+
+    // Snapshot BEFORE the query: a notify after this point is either visible
+    // in the query (row committed first) or observed via the wake-up. A notify
+    // before the snapshot has its row visible to the query.
+    let nkey = pending_notify_key(&api_key).ok_or_else(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "No bound address".to_string(),
+                detail: Some(
+                    "agent-scope key has no bound address; pull requires a bound address"
+                        .to_string(),
+                ),
+            }),
+        )
+    })?;
+    let since = notifier.snapshot(&nkey);
+
+    let (_key, mut records) = pending_records_for(db, &api_key, &req).await?;
+
+    if records.is_empty() && !hold.is_zero() {
+        match notifier.wait_since(&nkey, since, hold).await {
+            WaitOutcome::Woke => {
+                records = pending_records_for(db, &api_key, &req).await?.1;
+            }
+            WaitOutcome::Timeout => {}
+        }
+    }
+
+    Ok(Json(group_pending_batches(&records)))
 }
 
 async fn ack_pending_deliveries(
@@ -3089,8 +3187,6 @@ async fn ack_pending_deliveries(
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
     Json(req): Json<AckRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    require_scope_any(&api_key, &["system", "bridge"])?;
-
     const MAX_ACK: usize = 500;
     if req.ids.len() > MAX_ACK {
         return Err((
@@ -3102,22 +3198,42 @@ async fn ack_pending_deliveries(
         ));
     }
 
-    let count = state
-        .factories
-        .email
-        .env_factory
-        .db
-        .ack_deliveries(&req.ids)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
+    let db = &state.factories.email.env_factory.db;
+    // Scope fork: an agent-scope key may ack ONLY its own address (same
+    // ownership check as the list path, §2.5); its scope guard is the bound
+    // email itself. system/bridge keys are restricted to their own system —
+    // the identity comes from the authenticated key, never from the request
+    // body, so cross-system ids affect 0 rows.
+    let count = if is_agent_scope(&api_key) {
+        if api_key.email_address.is_empty() {
+            return Err((
+                StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
-                    error: "Database error".to_string(),
-                    detail: Some(e.to_string()),
+                    error: "No bound address".to_string(),
+                    detail: Some(
+                        "agent-scope key has no bound address; ack requires a bound address"
+                            .to_string(),
+                    ),
                 }),
-            )
-        })?;
+            ));
+        }
+        let email = api_key.email_address.to_lowercase();
+        db.ack_pending_by_email(&api_key.system_id, &email, &req.ids)
+            .await
+    } else {
+        require_scope_any(&api_key, &["system", "bridge"])?;
+        db.ack_deliveries(&api_key.system_id, &req.ids)
+            .await
+    }
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Database error".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
     Ok(Json(serde_json::json!({ "acked": count })))
 }
 
@@ -3954,5 +4070,268 @@ mod tests {
         let res = probe_reachability("240.0.0.1:9").await;
         assert_eq!(res["reachable"], serde_json::json!(false));
         assert_eq!(res["error"], serde_json::json!("timeout"));
+    }
+
+    // ─── POST /api/v1/admin/pending — scope fork, long-pull hold, ack ───
+    //
+    // Baseline golden for the pull response shape (pre-existing for
+    // system/bridge, NEW for agent scope). Agent keys must see ONLY their
+    // own address; hold must wake on new mail; ack must stay inside the
+    // caller's system / address.
+
+    async fn seed_pending(db: &Database, sid: &str, addr: &str, email: &str, body: &str) -> i64 {
+        db.insert_pending_delivery(
+            sid,
+            addr,
+            email,
+            r#"{"From":"from@x.com","Subject":"hi"}"#,
+            &serde_json::json!({"body": body, "subject": "hi"}).to_string(),
+        )
+        .await
+        .unwrap()
+    }
+
+    fn batch_delivery_emails(body: &serde_json::Value) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(batches) = body["batches"].as_array() {
+            for b in batches {
+                if let Some(dels) = b["deliveries"].as_array() {
+                    for d in dels {
+                        out.push(d["email"].as_str().unwrap_or("").to_string());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Baseline golden: system-scope pull sees every pending row of its
+    /// system, grouped by identical payload.
+    #[tokio::test]
+    async fn pull_system_scope_sees_all_rows_grouped_by_body() {
+        let (db, state, _rx, _dir) = probe_fixture("pull-sys").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey01").await;
+        seed_pending(&db, "sys1", "x.com", "a@x.com", "hello").await;
+        seed_pending(&db, "sys1", "x.com", "b@x.com", "hello").await;
+        seed_pending(&db, "sys1", "y.com", "c@y.com", "world").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "syskey01",
+            "sys1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        // Two distinct payloads ⇒ exactly two batches (grouping preserved).
+        assert_eq!(resp["batches"].as_array().unwrap().len(), 2, "body was {resp}");
+        assert_eq!(
+            batch_delivery_emails(&resp),
+            vec!["a@x.com", "b@x.com", "c@y.com"],
+            "body was {resp}"
+        );
+    }
+
+    /// Baseline golden: agent-scope pull sees ONLY its own address, even
+    /// when other addresses in the same system have mail.
+    #[tokio::test]
+    async fn pull_agent_scope_returns_only_own_address() {
+        let (db, state, _rx, _dir) = probe_fixture("pull-agent").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey03").await;
+        seed_pending(&db, "sys1", "x.com", "a@x.com", "mine").await;
+        seed_pending(&db, "sys1", "x.com", "b@x.com", "notmine").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey03",
+            "sys1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        let batches = resp["batches"].as_array().unwrap();
+        assert_eq!(batches.len(), 1, "body was {resp}");
+        assert_eq!(
+            batch_delivery_emails(&resp),
+            vec!["a@x.com"],
+            "body was {resp}"
+        );
+    }
+
+    /// Agent key without a bound address: pull is 403 (no isolation key).
+    #[tokio::test]
+    async fn pull_agent_unbound_address_rejected() {
+        let (db, state, _rx, _dir) = probe_fixture("pull-agent-nobound").await;
+        seed_key(&db, "sys1", "", &["agent"], "agentkey04").await;
+
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey04",
+            "sys1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "body was {resp}");
+    }
+
+    /// Long-pull: an empty hold returns the mail that arrives during the
+    /// hold (woken by the writer's notify), without waiting the full hold.
+    #[tokio::test]
+    async fn pull_agent_hold_wakes_on_new_mail() {
+        let (db, state, _rx, _dir) = probe_fixture("pull-agent-hold").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey05").await;
+
+        let started = std::time::Instant::now();
+        let router = probe_router(&state);
+        let db2 = db.clone();
+        // Simulate the writer's contract (C5 wires this into the webhook):
+        // insert the row, then notify the agent key.
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            seed_pending(&db2, "sys1", "x.com", "a@x.com", "late").await;
+            crate::core::pending_notifier::PendingNotifier::global()
+                .notify_email("sys1", "a@x.com");
+        });
+        let (status, resp) = signed_post(
+            router,
+            "agentkey05",
+            "sys1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20, "timeout_ms": 3000 }),
+        )
+        .await;
+        writer.await.unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(
+            batch_delivery_emails(&resp),
+            vec!["a@x.com"],
+            "body was {resp}"
+        );
+        // Woken by the writer, not by the 3s timeout.
+        assert!(
+            elapsed < Duration::from_millis(2500),
+            "hold was not woken, took {elapsed:?}"
+        );
+    }
+
+    /// Long-pull timeout: no mail arrives ⇒ 200 + empty batches after the
+    /// hold elapses (clients treat it as an ordinary empty round).
+    ///
+    /// Uses a UNIQUE system_id so the process-global notifier key is
+    /// isolated from the sibling `..._wakes_on_new_mail` test (they share
+    /// the same `PendingNotifier::global()` instance, so a same-key notify
+    /// from the other test would otherwise wake this waiter early).
+    #[tokio::test]
+    async fn pull_agent_hold_timeout_returns_empty() {
+        let (db, state, _rx, _dir) = probe_fixture("pull-agent-hold-to").await;
+        db.insert_system_domain("d1", "holdto1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "holdto1", "a@x.com", &["agent"], "agentkey06").await;
+
+        let started = std::time::Instant::now();
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey06",
+            "holdto1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20, "timeout_ms": 800 }),
+        )
+        .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(resp["batches"], serde_json::json!([]), "body was {resp}");
+        assert!(
+            elapsed >= Duration::from_millis(750),
+            "returned before the hold elapsed: {elapsed:?}"
+        );
+    }
+
+    /// Cross-system ack is a no-op (the identity filter is the calling key's
+    /// own system_id — an existing row of another system survives).
+    #[tokio::test]
+    async fn ack_system_key_cannot_ack_other_system_rows() {
+        let (db, state, _rx, _dir) = probe_fixture("ack-xsys").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "", &["system"], "syskey02").await;
+        seed_key(&db, "sys2", "", &["system"], "syskey03").await;
+        let id = seed_pending(&db, "sys1", "x.com", "a@x.com", "x").await;
+
+        // sys2's key tries to ack sys1's row.
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "syskey03",
+            "sys2",
+            "/api/v1/admin/pending/ack",
+            &serde_json::json!({ "ids": [id] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(resp["acked"], serde_json::json!(0), "body was {resp}");
+        // Row is still there for its owner.
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "syskey02",
+            "sys1",
+            "/api/v1/admin/pending",
+            &serde_json::json!({ "limit": 20 }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(batch_delivery_emails(&resp), vec!["a@x.com"], "body was {resp}");
+    }
+
+    /// Agent ack: cross-address is a no-op, own address is acked.
+    #[tokio::test]
+    async fn ack_agent_key_only_acks_own_address() {
+        let (db, state, _rx, _dir) = probe_fixture("ack-agent").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey07").await;
+        let own = seed_pending(&db, "sys1", "x.com", "a@x.com", "mine").await;
+        let other = seed_pending(&db, "sys1", "x.com", "b@x.com", "theirs").await;
+
+        // Try to ack the other address's row: no-op.
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey07",
+            "sys1",
+            "/api/v1/admin/pending/ack",
+            &serde_json::json!({ "ids": [other] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(resp["acked"], serde_json::json!(0), "body was {resp}");
+
+        // Own row: acked.
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "agentkey07",
+            "sys1",
+            "/api/v1/admin/pending/ack",
+            &serde_json::json!({ "ids": [own] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "body was {resp}");
+        assert_eq!(resp["acked"], serde_json::json!(1), "body was {resp}");
     }
 }

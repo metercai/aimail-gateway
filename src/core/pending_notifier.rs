@@ -19,12 +19,11 @@
 //! # Correctness
 //! A writer must call `notify_*` only AFTER the insert has committed.
 //! Then, for a notify at time T and a snapshot at time S:
-//! - T < S ⇒ the row is durable before S ⇒ the step-2 query sees it;
-//! - T > S ⇒ `gen > since` becomes true (either before `wait_since` is
-//!   called, or via the waker) ⇒ `Woke` ⇒ the re-query sees it.
-//! No ordering loses a row. The double-check is the source of truth; the
-//! wake-up is only a latency optimization. A spurious `Woke` costs one
-//! extra query.
+//! when T < S the row is durable before S, so the step-2 query sees it;
+//! when T > S, `gen > since` becomes true (either before `wait_since` is
+//! called, or via the waker) and the re-query sees it. No ordering loses a
+//! row. The double-check is the source of truth; the wake-up is only a
+//! latency optimization. A spurious `Woke` costs one extra query.
 //!
 //! # Cancellation
 //! Waiters hold no per-waiter state: a slot is a shared `Notify` plus a

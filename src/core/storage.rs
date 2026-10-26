@@ -1935,20 +1935,30 @@ impl Database {
         .await
     }
 
-    pub async fn ack_deliveries(&self, ids: &[i64]) -> AppResult<usize> {
+    /// System/bridge-scoped ack: delete rows by id, RESTRICTED to the
+    /// calling key's own system (identity from auth, never from the
+    /// request body) — cross-system ids affect 0 rows.
+    pub async fn ack_deliveries(&self, system_id: &str, ids: &[i64]) -> AppResult<usize> {
         if ids.is_empty() {
             return Ok(0);
         }
+        let sid = system_id.to_string();
         let id_list = ids.to_vec();
         self.call(move |conn| {
             let placeholders: Vec<String> =
-                (1..=id_list.len()).map(|i| format!("?{}", i)).collect();
+                (2..=id_list.len() + 1).map(|i| format!("?{}", i)).collect();
             let sql = format!(
-                "DELETE FROM pending_deliveries WHERE id IN ({})",
+                "DELETE FROM pending_deliveries WHERE system_id = ?1 AND id IN ({})",
                 placeholders.join(",")
             );
-            let count = conn.execute(&sql, rusqlite::params_from_iter(id_list.iter()))?;
-            Ok(count)
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sid)];
+            for id in id_list.iter() {
+                params.push(Box::new(*id));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let n = conn.execute(&sql, param_refs.as_slice())?;
+            Ok(n)
         })
         .await
     }
