@@ -13,6 +13,24 @@ use crate::core::storage::{ApiKeyRecord, SystemDomainRecord, SystemRecord, White
 use crate::core::strategy::ExtensionProviders;
 use hickory_resolver::TokioAsyncResolver;
 
+// ── Pull / stream contract (single source of truth) ────────────────
+
+/// Max server-side hold for a long-pull (`timeout_ms` is clamped to this).
+/// 50s < the 60s read timeout a reverse proxy would typically impose, so a
+/// held response always completes before the proxy gives up. Production has
+/// no proxy today; the margin is kept as defensive headroom.
+pub const PULL_HOLD_MAX_MS: u64 = 50_000;
+
+/// SSE heartbeat cadence (comment line `: ping`). 15s x 3 = 45s < the
+/// client's 90s stream read timeout: three missed pings mean the link is
+/// dead or buffered.
+pub const SSE_HEARTBEAT_SECS: u64 = 15;
+
+/// Max lifetime of one SSE stream before the server closes it. The client
+/// reconnects (at-least-once: unacked rows are re-sent). Bounds one
+/// connection's resources.
+pub const SSE_MAX_LIFE_SECS: u64 = 300;
+
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
 pub struct HttpState {

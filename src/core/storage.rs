@@ -1863,6 +1863,78 @@ impl Database {
         .await
     }
 
+    /// Agent-scoped pending query: rows for ONE (system_id, email) only.
+    /// Ported verbatim from the advanced layer's email-dimension query —
+    /// the isolation key must match the storage filter exactly (§2.5:
+    /// scope IS the range; a key can only ever see its own address).
+    pub async fn list_pending_by_email(
+        &self,
+        system_id: &str,
+        email: &str,
+        limit: i64,
+    ) -> AppResult<Vec<PendingDeliveryRecord>> {
+        let (sid, e) = (system_id.to_string(), email.to_string());
+        let lim = limit.clamp(1, 200);
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, system_id, domain_addr, email, headers, payload, status, created_at
+                 FROM pending_deliveries
+                 WHERE system_id = ?1 AND email = ?2 AND status = 'pending'
+                 ORDER BY id ASC LIMIT ?3",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![sid, e, lim], |r| {
+                    Ok(PendingDeliveryRecord {
+                        id: r.get(0)?,
+                        system_id: r.get(1)?,
+                        domain_addr: r.get(2)?,
+                        email: r.get(3)?,
+                        headers: r.get(4)?,
+                        payload: r.get(5)?,
+                        status: r.get(6)?,
+                        created_at: r.get(7)?,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// Agent-scoped ack: delete ONLY rows whose (system_id, email) match —
+    /// cross-address ids affect 0 rows (ownership check, mirrors the
+    /// advanced layer's ack semantics).
+    pub async fn ack_pending_by_email(
+        &self,
+        system_id: &str,
+        email: &str,
+        ids: &[i64],
+    ) -> AppResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let (sid, e) = (system_id.to_string(), email.to_string());
+        let id_list = ids.to_vec();
+        self.call(move |conn| {
+            let placeholders: Vec<String> =
+                (1..=id_list.len() + 2).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "DELETE FROM pending_deliveries WHERE system_id = ?1 AND email = ?2 AND id IN ({})",
+                placeholders.join(",")
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sid), Box::new(e)];
+            for id in id_list.iter() {
+                params.push(Box::new(*id));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let n = conn.execute(&sql, param_refs.as_slice())?;
+            Ok(n)
+        })
+        .await
+    }
+
     pub async fn ack_deliveries(&self, ids: &[i64]) -> AppResult<usize> {
         if ids.is_empty() {
             return Ok(0);
@@ -1956,6 +2028,93 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].email, "agent@good.test");
+    }
+
+    #[tokio::test]
+    async fn list_pending_by_email_isolates_to_one_address() {
+        let db = temp_db();
+        db.insert_pending_delivery("sys1", "a@x.test", "a@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        db.insert_pending_delivery("sys1", "b@x.test", "b@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        db.insert_pending_delivery("sys2", "a@x.test", "a@x.test", "{}", "{}")
+            .await
+            .unwrap();
+
+        // Same email under a DIFFERENT system is invisible.
+        let rows = db
+            .list_pending_by_email("sys1", "a@x.test", 200)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].system_id, "sys1");
+        assert_eq!(rows[0].email, "a@x.test");
+
+        // Other address of the same system is invisible.
+        let rows = db
+            .list_pending_by_email("sys1", "b@x.test", 200)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].email, "b@x.test");
+
+        // No row ⇒ empty, no error.
+        let rows = db
+            .list_pending_by_email("sys1", "nobody@x.test", 200)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ack_pending_by_email_only_deletes_matching_address() {
+        let db = temp_db();
+        let id_a = db
+            .insert_pending_delivery("sys1", "a@x.test", "a@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        let id_b = db
+            .insert_pending_delivery("sys1", "b@x.test", "b@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        let id_a_sys2 = db
+            .insert_pending_delivery("sys2", "a@x.test", "a@x.test", "{}", "{}")
+            .await
+            .unwrap();
+
+        // Cross-address ids affect 0 rows (ownership check §2.5).
+        let n = db
+            .ack_pending_by_email("sys1", "a@x.test", &[id_b, id_a_sys2])
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "cross-address/cross-system ids must not delete");
+        let remaining = db
+            .list_pending_by_email("sys1", "a@x.test", 200)
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1, "own row must survive");
+
+        // Own id deletes exactly 1.
+        let n = db
+            .ack_pending_by_email("sys1", "a@x.test", &[id_a])
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        let remaining = db
+            .list_pending_by_email("sys1", "a@x.test", 200)
+            .await
+            .unwrap();
+        assert!(remaining.is_empty());
+
+        // Empty ids short-circuits to 0.
+        assert_eq!(
+            db.ack_pending_by_email("sys1", "a@x.test", &[])
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
