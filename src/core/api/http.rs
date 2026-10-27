@@ -4965,6 +4965,64 @@ mod tests {
         );
     }
 
+    /// The slot is per API KEY, not per client id: one process (one
+    /// client id) holding two different agents' keys must get both
+    /// streams — same id on a *different* key is a different slot, so
+    /// it can never 409-occupy or be occupied by the other connection.
+    #[tokio::test]
+    async fn slot_is_per_key_same_client_id_multiple_agents() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-7").await;
+        db.insert_system_domain("d1", "slot7", "a@x.com", None, None)
+            .await
+            .unwrap();
+        db.insert_system_domain("d2", "slot7b", "b@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot7", "a@x.com", &["agent"], "slotk7keya").await;
+        seed_key(&db, "slot7b", "b@x.com", &["agent"], "slotk7keyb").await;
+        let key_a = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+        let key_b = db.get_api_key_by_email("b@x.com").await.unwrap().unwrap();
+
+        // One client id, two keys: both streams must succeed while both
+        // are open (the second must NOT see the first's slot).
+        let r1 = sse_response(
+            State(state.clone()),
+            key_a.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "shared-c1".to_string(),
+        )
+        .await;
+        assert!(r1.is_ok(), "agent A's stream must win its own slot");
+        let r2 = sse_response(
+            State(state.clone()),
+            key_b.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "shared-c1".to_string(),
+        )
+        .await;
+        assert!(
+            r2.is_ok(),
+            "same client id on a DIFFERENT key must not 409 (slot is per key)"
+        );
+        // Cross-check: a genuinely different client on key A is still
+        // blocked — per-key isolation did not weaken the per-key lock.
+        let r3 = sse_response(
+            State(state.clone()),
+            key_a.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "other-c2".to_string(),
+        )
+        .await;
+        assert_eq!(
+            r3.as_ref().unwrap_err().0,
+            StatusCode::CONFLICT,
+            "a different client on the same key must still 409"
+        );
+    }
+
     /// A stranger is 409 while a stream holder is ACTIVE and stays 409
     /// after the holder's max-life rotation (grace window); the holder's
     /// own client is never blocked.
