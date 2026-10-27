@@ -150,6 +150,19 @@ impl SingleSlotLock {
             }
         }
     }
+
+    /// The client id currently occupying (or reserving) `key_id`'s slot, if
+    /// any. Diagnostics only: the 409 "occupied" detail reports THIS id —
+    /// the holder — not the rejected requester's. `None` when the slot is
+    /// free. In a grace window the id is still reported (the slot is reserved
+    /// for that client's reconnect).
+    pub fn holder_id(&self, key_id: i64) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(&key_id)
+            .map(|h| h.client_id.clone())
+    }
 }
 
 impl Clone for SingleSlotLock {
@@ -639,5 +652,19 @@ mod slot_tests {
             let _guard = SlotGuard::new(lock.clone(), 5, "a");
         } // drop ⇒ release with zero grace
         assert!(lock.try_acquire(5, "b", Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn holder_id_reports_holder_not_requester() {
+        let lock = SingleSlotLock::new();
+        assert_eq!(lock.holder_id(9), None, "free slot has no holder");
+        assert!(lock.try_acquire(9, "holder", Duration::from_secs(60)));
+        assert!(!lock.try_acquire(9, "stranger", Duration::from_secs(60)));
+        // The rejected "stranger" never becomes the holder: holder_id must
+        // still name "holder" (the 409 detail prints this, not the
+        // requester's id).
+        assert_eq!(lock.holder_id(9).as_deref(), Some("holder"));
+        // A failed acquire does not disturb the slot at all.
+        assert!(lock.try_acquire(9, "holder", Duration::from_secs(60)));
     }
 }

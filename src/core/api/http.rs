@@ -3434,13 +3434,16 @@ async fn sse_response(
         client_id.as_str(),
         std::time::Duration::from_secs(SLOT_STREAM_LEASE_SECS),
     ) {
+        // Diagnostics: name the HOLDER (whoever currently occupies the slot),
+        // not this rejected requester.
+        let holder = state
+            .delivery_slot
+            .holder_id(api_key.id)
+            .filter(|h| !h.is_empty())
+            .map(|h| format!(" (client {h})"))
+            .unwrap_or_default();
         return Err(occupied_error(format!(
-            "another client holds the mailbox for this key (client {}); retry later",
-            if client_id.is_empty() {
-                "legacy"
-            } else {
-                client_id.as_str()
-            }
+            "another client holds the mailbox for this key{holder}; retry later"
         )));
     }
     let db = &state.factories.email.env_factory.db;
@@ -4916,6 +4919,50 @@ mod tests {
         )
         .await;
         assert_eq!(r4.as_ref().unwrap_err().0, StatusCode::CONFLICT);
+    }
+
+    /// The 409 "occupied" detail must name the HOLDER, not the rejected
+    /// requester (regression: the detail used to print the requester's own
+    /// client id, mislabeling it as the holder).
+    #[tokio::test]
+    async fn slot_stream_409_detail_names_holder_not_requester() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-6").await;
+        db.insert_system_domain("d1", "slot6", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot6", "a@x.com", &["agent"], "slotk6key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        // c1 takes the slot and holds it (a short-lived stream is enough —
+        // we only need the slot claimed while c2 is rejected).
+        let r1 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "holder-c1".to_string(),
+        )
+        .await;
+        assert!(r1.is_ok(), "first connection must win");
+        let r2 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "requester-c2".to_string(),
+        )
+        .await;
+        let (status, Json(e)) = r2.unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        let detail = e.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("holder-c1"),
+            "detail must name the holder, got: {detail:?}"
+        );
+        assert!(
+            !detail.contains("requester-c2"),
+            "detail must not name the rejected requester, got: {detail:?}"
+        );
     }
 
     /// A stranger is 409 while a stream holder is ACTIVE and stays 409
