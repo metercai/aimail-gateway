@@ -3150,8 +3150,21 @@ async fn pending_records_for(
 async fn list_pending_deliveries(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    client_id: ClientId,
     Json(req): Json<PendingPollRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Single-slot claim: long-poll holds the same slot as the stream path.
+    // The lease auto-expires (SLOT_POLL_LEASE_SECS) if the holder dies —
+    // no explicit release; a request is stateless.
+    if !state.delivery_slot.try_acquire(
+        api_key.id,
+        client_id_of(&client_id),
+        std::time::Duration::from_secs(SLOT_POLL_LEASE_SECS),
+    ) {
+        return Err(occupied_error(
+            "another client holds the mailbox for this key; retry later".to_string(),
+        ));
+    }
     let db = &state.factories.email.env_factory.db;
     let notifier = PendingNotifier::global();
     let hold =
@@ -3295,9 +3308,58 @@ struct SseStreamState {
     started: tokio::time::Instant,
     /// Connect-time rows, emitted as the first frame.
     pending_first: Option<Vec<crate::core::storage::PendingDeliveryRecord>>,
+    /// Single-slot claim: released on drop (abrupt disconnect, zero grace)
+    /// or explicitly on the max-life rotation (grace window).
+    guard: SlotGuard,
 }
 
 type SseItem = Result<String, std::io::Error>;
+
+/// `X-Aimail-Client` header: the client's stable process identity for the
+/// single-slot mailbox lock. Absent/empty = legacy client (id "").
+struct ClientId(String);
+
+#[axum::async_trait]
+impl<S> axum::extract::FromRequestParts<S> for ClientId
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        let id = parts
+            .headers
+            .get("X-Aimail-Client")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("")
+            .to_string();
+        Ok(Self(id))
+    }
+}
+
+/// 409 "occupied": another client currently holds this key's mailbox slot
+/// (stream or long-poll). Distinct from auth/scope errors so clients can
+/// back off in place without degrading their transport.
+fn occupied_error(detail: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ErrorResponse {
+            error: "occupied".to_string(),
+            detail: Some(detail),
+        }),
+    )
+}
+
+/// The slot identity for a request: the client id, or "" for legacy
+/// clients that send no `X-Aimail-Client` header.
+fn client_id_of(cid: &ClientId) -> &str {
+    &cid.0
+}
 
 fn sse_mail_frame(payload: &serde_json::Value) -> SseItem {
     Ok(format!("event: mail\ndata: {}\n\n", payload.to_string()))
@@ -3318,6 +3380,11 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
 
     loop {
         if st.started.elapsed() >= st.life {
+            // Max-life rotation: hand the slot back with the grace window
+            // (same client re-acquires on reconnect; a stranger waits out
+            // the grace). An abrupt disconnect instead drops the guard
+            // with zero grace.
+            st.guard.release_on_rotation();
             return None;
         }
         let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
@@ -3357,7 +3424,25 @@ async fn sse_response(
     api_key: crate::core::storage::ApiKeyRecord,
     heartbeat: std::time::Duration,
     life: std::time::Duration,
+    client_id: String,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Single-slot claim BEFORE any work: the first connection wins; a
+    // different client is 409 without building a stream. Same client
+    // (reconnect / rotation) re-acquires and refreshes.
+    if !state.delivery_slot.try_acquire(
+        api_key.id,
+        client_id.as_str(),
+        std::time::Duration::from_secs(SLOT_STREAM_LEASE_SECS),
+    ) {
+        return Err(occupied_error(format!(
+            "another client holds the mailbox for this key (client {}); retry later",
+            if client_id.is_empty() {
+                "legacy"
+            } else {
+                client_id.as_str()
+            }
+        )));
+    }
     let db = &state.factories.email.env_factory.db;
     let notifier = PendingNotifier::global();
     // No filter on the stream: the scope fork IS the range (§2.5).
@@ -3383,6 +3468,7 @@ async fn sse_response(
         life,
         started: tokio::time::Instant::now(),
         pending_first: Some(initial),
+        guard: SlotGuard::new(state.delivery_slot.clone(), api_key.id, client_id.as_str()),
     };
     let stream = unfold(st, |st| async move { sse_stream_step(st).await });
     let resp = Response::builder()
@@ -3409,12 +3495,14 @@ async fn sse_response(
 async fn pending_stream(
     state: State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    client_id: ClientId,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     sse_response(
         state,
         api_key,
         std::time::Duration::from_secs(SSE_HEARTBEAT_SECS),
         std::time::Duration::from_secs(SSE_MAX_LIFE_SECS),
+        client_id.0,
     )
     .await
 }
@@ -3654,6 +3742,7 @@ mod tests {
             extensions: Arc::new(ExtensionProviders::base()),
             dns_resolver: None,
             send_deduper: SendDeduper::new(Duration::from_secs(60), 64),
+            delivery_slot: SingleSlotLock::new(),
         };
         (db, state, trigger_rx, dir)
     }
@@ -4570,6 +4659,7 @@ mod tests {
             key,
             Duration::from_secs(5),
             Duration::from_secs(10),
+            "test-sse-1".to_string(),
         )
         .await
         .unwrap();
@@ -4621,6 +4711,7 @@ mod tests {
             key,
             Duration::from_secs(5),
             Duration::from_secs(10),
+            "test-sse-2".to_string(),
         )
         .await
         .unwrap();
@@ -4648,6 +4739,7 @@ mod tests {
             key,
             Duration::from_secs(5),
             Duration::from_secs(10),
+            "test-sse-3".to_string(),
         )
         .await
         .unwrap();
@@ -4696,6 +4788,7 @@ mod tests {
             key.clone(),
             Duration::from_secs(5),
             Duration::from_secs(2),
+            "test-sse-4".to_string(),
         )
         .await
         .unwrap();
@@ -4709,6 +4802,7 @@ mod tests {
             key,
             Duration::from_secs(5),
             Duration::from_secs(2),
+            "test-sse-4".to_string(),
         )
         .await
         .unwrap();
@@ -4733,6 +4827,7 @@ mod tests {
             key,
             Duration::from_millis(100),
             Duration::from_millis(900),
+            "test-sse-5".to_string(),
         )
         .await
         .unwrap();
@@ -4740,5 +4835,239 @@ mod tests {
         let events = read_sse_events(resp.into_body(), 5, Duration::from_secs(3)).await;
         assert!(events.len() >= 5, "expected ≥5 pings, got {events:?}");
         assert!(events.iter().all(|e| e == ": ping"), "{events:?}");
+    }
+
+    // ─── Single-slot mailbox lock (one client per key) ─────────────
+
+    /// Poll the pending endpoint as `client` (returns status + error body).
+    async fn poll_as(
+        state: &HttpState,
+        key: &crate::core::storage::ApiKeyRecord,
+        client: &str,
+    ) -> (StatusCode, Option<String>) {
+        let req = Json(PendingPollRequest {
+            limit: 10,
+            emails: Vec::new(),
+            filter: Vec::new(),
+            timeout_ms: 0,
+        });
+        let r = list_pending_deliveries(
+            State(state.clone()),
+            axum::extract::Extension(key.clone()),
+            ClientId(client.to_string()),
+            req,
+        )
+        .await;
+        match r {
+            Ok(_) => (StatusCode::OK, None),
+            Err((s, Json(e))) => (s, Some(e.error)),
+        }
+    }
+
+    /// First connection wins; a different client is 409 without building a
+    /// stream; the same client re-acquires (reconnect / rotation).
+    #[tokio::test]
+    async fn slot_stream_first_wins_and_same_client_reacquires() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-1").await;
+        db.insert_system_domain("d1", "slot1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot1", "a@x.com", &["agent"], "slotk1key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        let r1 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "c1".to_string(),
+        )
+        .await;
+        assert!(r1.is_ok(), "first connection must win");
+        let r2 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "c2".to_string(),
+        )
+        .await;
+        assert_eq!(
+            r2.as_ref().unwrap_err().0,
+            StatusCode::CONFLICT,
+            "a different client must be 409 while c1 holds the slot"
+        );
+        let r3 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "c1".to_string(),
+        )
+        .await;
+        assert!(r3.is_ok(), "the same client re-acquires (reconnect)");
+        // Legacy clients (no header ⇒ id "") are just another client.
+        let r4 = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            String::new(),
+        )
+        .await;
+        assert_eq!(r4.as_ref().unwrap_err().0, StatusCode::CONFLICT);
+    }
+
+    /// A stranger is 409 while a stream holder is ACTIVE and stays 409
+    /// after the holder's max-life rotation (grace window); the holder's
+    /// own client is never blocked.
+    #[tokio::test]
+    async fn slot_stream_holder_active_and_rotation_grace() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-2").await;
+        db.insert_system_domain("d1", "slot2", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot2", "a@x.com", &["agent"], "slotk2key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        // Holder consumes the stream to its max life (200ms) ⇒ the
+        // rotation path releases the slot WITH the grace window.
+        let holder = tokio::spawn({
+            let st = state.clone();
+            let k = key.clone();
+            async move {
+                let r = sse_response(
+                    State(st),
+                    k,
+                    Duration::from_millis(50),
+                    Duration::from_millis(200),
+                    "holder-1".to_string(),
+                )
+                .await;
+                if let Ok(resp) = r {
+                    read_sse_events(resp.into_body(), 100, Duration::from_millis(800)).await;
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Stranger blocked while the holder is active.
+        let (s, _) = poll_as(&state, &key, "stranger-1").await;
+        assert_eq!(s, StatusCode::CONFLICT, "stranger 409 while holder active");
+        // The holder's own client is never blocked (refresh).
+        let (s2, _) = poll_as(&state, &key, "holder-1").await;
+        assert_eq!(s2, StatusCode::OK);
+        holder.await.unwrap();
+        // After the rotation, the stranger is still blocked (grace window).
+        let (s3, _) = poll_as(&state, &key, "stranger-2").await;
+        assert_eq!(
+            s3,
+            StatusCode::CONFLICT,
+            "stranger stays 409 during the post-rotation grace window"
+        );
+        // The owner still gets through the grace (reconnect).
+        let (s4, _) = poll_as(&state, &key, "holder-1").await;
+        assert_eq!(s4, StatusCode::OK);
+    }
+
+    /// Abrupt disconnect (the reader stops ⇒ the stream drops) releases the
+    /// slot with ZERO grace: a stranger takes over at once.
+    #[tokio::test]
+    async fn slot_stream_abrupt_drop_zero_grace() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-3").await;
+        db.insert_system_domain("d1", "slot3", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot3", "a@x.com", &["agent"], "slotk3key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        let resp = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "h3".to_string(),
+        )
+        .await
+        .unwrap();
+        // Read one frame, then stop: the body drops ⇒ guard drop (zero grace).
+        let _ev = read_sse_events(resp.into_body(), 1, Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (s, _) = poll_as(&state, &key, "stranger-3").await;
+        assert_eq!(
+            s,
+            StatusCode::OK,
+            "a stranger takes over immediately after an abrupt disconnect"
+        );
+    }
+
+    /// Long-poll lease: while a holder's lease is live the stranger is 409;
+    /// after expiry the stranger takes over (no explicit release exists —
+    /// a dead holder's lease simply expires). The same-client refresh path
+    /// is covered by the types unit tests + slot_poll_blocked_by_stream_holder.
+    #[tokio::test]
+    async fn slot_poll_lease_expiry_takeover() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-4").await;
+        db.insert_system_domain("d1", "slot4", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot4", "a@x.com", &["agent"], "slotk4key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        // Simulate a poll holder with a short lease via the public API.
+        assert!(state
+            .delivery_slot
+            .try_acquire(key.id, "poll-holder", Duration::from_millis(120)));
+        let (s, _) = poll_as(&state, &key, "other-1").await;
+        assert_eq!(s, StatusCode::CONFLICT, "lease live ⇒ stranger 409");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (s3, _) = poll_as(&state, &key, "other-2").await;
+        assert_eq!(
+            s3,
+            StatusCode::OK,
+            "after lease expiry the stranger takes over"
+        );
+    }
+
+    /// The poll path is the SAME slot as the stream path: a live stream
+    /// holder blocks a stranger's poll (not just a stranger's stream).
+    #[tokio::test]
+    async fn slot_poll_blocked_by_stream_holder() {
+        let (db, state, _rx, _dir) = probe_fixture("slot-5").await;
+        db.insert_system_domain("d1", "slot5", "a@x.com", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "slot5", "a@x.com", &["agent"], "slotk5key").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        let resp = sse_response(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_millis(50),
+            Duration::from_secs(10),
+            "stream-holder".to_string(),
+        )
+        .await
+        .unwrap();
+        // Keep the stream alive (actively polled) so the slot stays held.
+        let keeper = tokio::spawn({
+            async move {
+                read_sse_events(resp.into_body(), 100, Duration::from_millis(500)).await;
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (s, detail) = poll_as(&state, &key, "poller-x").await;
+        assert_eq!(
+            s,
+            StatusCode::CONFLICT,
+            "a stranger's poll is 409 while the stream holds"
+        );
+        assert!(
+            detail.as_deref().is_some_and(|d| d.contains("occupied")),
+            "{detail:?}"
+        );
+        // The holder's own client can still poll.
+        let (s2, _) = poll_as(&state, &key, "stream-holder").await;
+        assert_eq!(s2, StatusCode::OK);
+        keeper.await.unwrap();
     }
 }

@@ -120,6 +120,7 @@ impl Server {
                 std::time::Duration::from_secs(config.retry.send_dedupe_window_secs),
                 4096,
             ),
+            delivery_slot: aimail_base::core::api::types::SingleSlotLock::new(),
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──
