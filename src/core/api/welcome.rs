@@ -82,8 +82,12 @@ following three lines, exactly as labelled:
   current_time: <the current time when you reply, in a human-readable form,
                  e.g. 2026-09-22 21:05 UTC>
 
-Your manager will review and apply the approved persona and signature to your
-account. Nothing else changes.
+Your manager will review your draft and approve it by replying with the
+subject set exactly to:
+
+  [CMD] approve persona
+
+The approved persona and signature lines go in the body. Nothing else changes.
 
 Best regards,
 noreply@{domain}
@@ -533,6 +537,14 @@ mod tests {
             "agent1", "2026-09-22"
         );
         assert!(subject.to_lowercase().contains("welcome to aimail world"));
+
+        // 4) the manager reminder: the welcome body must tell the manager to set
+        //    the approval reply's subject to exactly `[CMD] approve persona`
+        //    (the subject-trigger contract the gateway enforces).
+        assert!(
+            body.contains("[CMD] approve persona"),
+            "body must remind the manager of the [CMD] approve persona subject: {body}"
+        );
     }
 
     /// Welcome full chain: gateway template -> bodyproc (same path as records.to_webhook_payload) ->
