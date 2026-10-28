@@ -408,6 +408,9 @@ pub struct SystemResponse {
     pub limits_config: Option<String>,
     pub is_active: bool,
     pub created_at: String,
+    /// Per-system default manager for agent address registration (advanced
+    /// edition: the activation code's delivery address; base: empty).
+    pub manager_address: String,
 }
 
 // ── System domain management types ──
@@ -521,6 +524,7 @@ impl From<SystemRecord> for SystemResponse {
             limits_config: record.limits_config,
             is_active: record.is_active,
             created_at: record.created_at,
+            manager_address: record.manager_address,
         }
     }
 }

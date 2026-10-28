@@ -72,6 +72,7 @@ path = "./data"                           # data directory. DB → {path}/aimail
 
 [admin]
 # email = "admin@yourdomain.com"          # owner contact email (shown on /health), fallback From address for system auto-replies
+# manager_default = "admin@yourdomain.com" # default manager for agent address registration when neither the request nor the system provides one (empty by default)
 
 # ── Board ───────────────────────────────────────────────────────────────
 

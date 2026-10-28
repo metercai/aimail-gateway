@@ -55,6 +55,9 @@ impl SystemStore for BaseSystemStore {
             limits_config: None,
             is_active: true,
             created_at: String::new(),
+            // Base edition has no per-system default; the server falls back
+            // to the config-file default (AdminConfig.manager_default).
+            manager_address: String::new(),
         }))
     }
 }

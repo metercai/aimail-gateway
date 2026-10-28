@@ -334,6 +334,29 @@ pub struct RegisterAddressQuery {
     pub generate_code: bool,
 }
 
+/// Resolve the manager an address registration actually writes.
+///
+/// Precedence (first non-empty wins, values trimmed):
+///   1. explicit `manager_address` from the request body
+///   2. per-system default (`systems.manager_address`; the advanced edition
+///      persists the activation code's delivery address there at activation)
+///   3. config-file default (`[admin] manager_default`, empty by default)
+///
+/// `None` means "no manager source at all" — the address is registered
+/// without a manager row (never a `value=''` whitelist row).
+fn resolve_effective_manager(
+    explicit: Option<&str>,
+    system_default: Option<&str>,
+    config_default: Option<&str>,
+) -> Option<String> {
+    [explicit, system_default, config_default]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|m| !m.is_empty())
+        .map(str::to_string)
+}
+
 /// POST /api/v1/admin/systems/:sid/addresses — Register an agent email address.
 async fn register_address(
     state: axum::extract::State<HttpState>,
@@ -513,6 +536,19 @@ async fn register_address(
         ));
     }
 
+    // ── Effective manager resolution (single authority, server-side) ──
+    // Precedence: explicit request value > per-system default (the advanced
+    // edition persists the activation code's delivery address at activation)
+    // > config-file default (AdminConfig.manager_default, empty by default).
+    // Empty result = register without a manager row — never a value='' row.
+    // The client-side hard gate (CLI register) still refuses zero-source
+    // registrations; this only fills the documented defaults.
+    let effective_manager = resolve_effective_manager(
+        req.manager_address.as_deref(),
+        system.as_ref().map(|s| s.manager_address.as_str()),
+        state.config.admin.manager_default.as_deref(),
+    );
+
     // Verify the domain anchor exists under this system.
     // Lookup key: non-shared → bare domain (e.g. "company.com");
     // shared → system anchor "system_name@bare_domain" (e.g.
@@ -610,7 +646,7 @@ async fn register_address(
             &req.email,
             req.webhook_url.as_deref(),
             req.webhook_secret.as_deref(),
-            req.manager_address.as_deref(),
+            effective_manager.as_deref(),
         )
         .await
     {
@@ -622,8 +658,11 @@ async fn register_address(
                 domain = %bare_domain,
                 "Agent address registered"
             );
-            // Auto-create bidirectional whitelist: agent <-> manager
-            if let Some(manager) = req.manager_address.as_deref() {
+            // Auto-create bidirectional whitelist: agent <-> manager. Uses
+            // the EFFECTIVE manager (explicit or default) — a default manager
+            // that is not whitelisted cannot receive from or reply to the
+            // agent, which would break the closure the default promises.
+            if let Some(manager) = effective_manager.as_deref() {
                 if let Err(e) = state
                     .factories
                     .email
@@ -5174,5 +5213,55 @@ mod tests {
         let (s2, _) = poll_as(&state, &key, "stream-holder").await;
         assert_eq!(s2, StatusCode::OK);
         keeper.await.unwrap();
+    }
+
+    // ─── effective manager resolution (registration defaults) ───
+    //
+    // Precedence: explicit > per-system default > config default. A whitespace
+    // value counts as absent at every level, and "no source" stays None so the
+    // registration writes no manager row (never a `value=''` whitelist row).
+
+    #[test]
+    fn effective_manager_explicit_wins_over_all_defaults() {
+        assert_eq!(
+            resolve_effective_manager(Some("explicit@x.com"), Some("sys@x.com"), Some("cfg@x.com")),
+            Some("explicit@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_manager_system_default_beats_config_default() {
+        assert_eq!(
+            resolve_effective_manager(None, Some("sys@x.com"), Some("cfg@x.com")),
+            Some("sys@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_manager_config_default_is_last_resort() {
+        assert_eq!(
+            resolve_effective_manager(None, None, Some("cfg@x.com")),
+            Some("cfg@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_manager_blank_values_are_absent() {
+        assert_eq!(
+            resolve_effective_manager(Some("   "), Some(""), Some("  \t")),
+            None
+        );
+        assert_eq!(
+            resolve_effective_manager(Some(""), None, Some("cfg@x.com")),
+            Some("cfg@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_manager_trims_surrounding_whitespace() {
+        assert_eq!(
+            resolve_effective_manager(Some("  mgr@x.com  "), None, None),
+            Some("mgr@x.com".to_string())
+        );
     }
 }

@@ -452,6 +452,11 @@ pub struct SystemRecord {
 
     pub is_active: bool,
     pub created_at: String,
+    /// System-level default manager for agent address registration.
+    /// Base edition leaves it empty (resolved from config instead); the
+    /// advanced edition persists the activation code's delivery address
+    /// here at activation. Empty = no per-system default.
+    pub manager_address: String,
 }
 
 #[derive(Debug, Clone)]

@@ -323,6 +323,12 @@ pub struct AdminConfig {
     /// Contact email address of the service owner/operator.
     #[serde(default)]
     pub email: Option<String>,
+    /// Global default manager for agent address registration, read from the
+    /// config file. Empty (default) = no config-level default; the server then
+    /// falls back to the per-system default (advanced) and, if still empty,
+    /// registers the address without a manager row.
+    #[serde(default)]
+    pub manager_default: Option<String>,
 }
 
 // ── Load: Defaults → TOML → Env Override ─────────────────────────────
