@@ -178,7 +178,10 @@ mod tests {
         let plain = "8f14e45fceea167a5a36dedd4bea2543"; // looks like sha256 hex
         let sealed = seal(&key, plain).unwrap();
         assert!(is_sealed(&sealed));
-        assert!(!sealed.contains(plain), "the ciphertext must not contain the plaintext");
+        assert!(
+            !sealed.contains(plain),
+            "the ciphertext must not contain the plaintext"
+        );
         assert_eq!(open(&key, &sealed).unwrap(), plain);
     }
 
@@ -196,7 +199,10 @@ mod tests {
         let sealed = seal(&k(), "secret-hash").unwrap();
         let other =
             derive_seal_key("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
-        assert!(open(&other, &sealed).is_err(), "a different admin-key must not be able to unseal");
+        assert!(
+            open(&other, &sealed).is_err(),
+            "a different admin-key must not be able to unseal"
+        );
     }
 
     #[test]
@@ -209,7 +215,10 @@ mod tests {
         let last = blob.len() - 1;
         blob[last] ^= 0x01;
         let tampered = format!("{SEAL_PREFIX}{}", B64.encode(blob));
-        assert!(open(&key, &tampered).is_err(), "the GCM auth tag must reject tampering");
+        assert!(
+            open(&key, &tampered).is_err(),
+            "the GCM auth tag must reject tampering"
+        );
     }
 
     #[test]
@@ -238,12 +247,19 @@ mod tests {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(admin.as_bytes()).unwrap();
         mac.update(b"aimail-gateway:db:encryption:v1");
         let db_key = mac.finalize().into_bytes();
-        assert_ne!(&seal_key[..], &db_key[..], "the seal subkey must not equal the DB encryption key");
+        assert_ne!(
+            &seal_key[..],
+            &db_key[..],
+            "the seal subkey must not equal the DB encryption key"
+        );
     }
 
     #[test]
     fn ensure_loaded_fails_closed() {
-        assert!(ensure_loaded(false).is_ok(), "no sealed material => nothing to check");
+        assert!(
+            ensure_loaded(false).is_ok(),
+            "no sealed material => nothing to check"
+        );
         // Note: if this process was already initialized by another test, loaded() is true - only assert the "missing key plus sealed material" branch
         if !loaded() {
             assert!(ensure_loaded(true).is_err());

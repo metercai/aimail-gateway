@@ -3362,7 +3362,7 @@ fn client_id_of(cid: &ClientId) -> &str {
 }
 
 fn sse_mail_frame(payload: &serde_json::Value) -> SseItem {
-    Ok(format!("event: mail\ndata: {}\n\n", payload.to_string()))
+    Ok(format!("event: mail\ndata: {}\n\n", payload))
 }
 
 /// One unfold step. Returns the next frame (mail or ping) plus the

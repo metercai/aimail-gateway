@@ -228,11 +228,17 @@ mod tests {
         parent.summary = "60%".to_string();
         db::update_task(&conn, &parent).unwrap();
         let (_, ps2) = get_task(&conn, &cid).unwrap();
-        assert_eq!(ps2[0]["summary"], "60%", "parent_summaries must take the latest value");
+        assert_eq!(
+            ps2[0]["summary"], "60%",
+            "parent_summaries must take the latest value"
+        );
 
         let solo = make_task(&conn, &board_id, "S1", "a@t.io", TaskStatus::Todo);
         let (_, ps3) = get_task(&conn, &solo).unwrap();
-        assert!(ps3.is_empty(), "a task with no parent must yield an empty array");
+        assert!(
+            ps3.is_empty(),
+            "a task with no parent must yield an empty array"
+        );
     }
 
     fn make_task(

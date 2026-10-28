@@ -1748,7 +1748,11 @@ mod tests {
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();
         assert_eq!(task.summary, "60%");
-        assert_eq!(task.status, TaskStatus::Running, "continue must not change the task status");
+        assert_eq!(
+            task.status,
+            TaskStatus::Running,
+            "continue must not change the task status"
+        );
         let n: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM task_events WHERE task_id=?1 AND event_type='continue_request'",
