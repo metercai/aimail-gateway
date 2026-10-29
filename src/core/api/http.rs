@@ -730,8 +730,17 @@ async fn register_address(
         }
         Err(e) if matches!(&e, AppError::Conflict(_)) => {
             // Address already registered — idempotent sync of manager meta
-            // and bidirectional whitelist (register retries are safe)
-            if let Some(manager) = req.manager_address.as_deref() {
+            // and bidirectional whitelist (register retries are safe).
+            //
+            // Uses the SAME `effective_manager` the new path wrote (explicit >
+            // system default > config default), not `req.manager_address`
+            // alone. The Conflict arm only fires on a cross-system collision
+            // (same-system re-register takes the factory upsert Ok path and
+            // never reaches here), so a client that omitted manager_address
+            // expecting the server default still gets the resolved value
+            // instead of the sync silently skipping — the single-resolution
+            // promise holds on this path too.
+            if let Some(manager) = effective_manager.as_deref() {
                 let _ = state
                     .factories
                     .email
@@ -5262,6 +5271,70 @@ mod tests {
         assert_eq!(
             resolve_effective_manager(Some("  mgr@x.com  "), None, None),
             Some("mgr@x.com".to_string())
+        );
+    }
+
+    /// R6 (2026-10-29 QA): the idempotent `already_exists` (409) arm must use
+    /// the SAME effective manager the new path resolves, not
+    /// `req.manager_address` alone. A client that omits `manager_address`
+    /// (expecting the server default) must still get the resolved value synced
+    /// into meta/whitelist instead of the sync silently skipping.
+    ///
+    /// The 409 arm is reached when the address row already belongs to a
+    /// DIFFERENT system while the domain anchor is owned by the requesting
+    /// system (the same-system retry instead takes the factory upsert Ok path
+    /// and never reaches this arm — see the factory's `create_domain`).
+    /// The effective manager here comes from the config-file default, since the
+    /// base `SystemStore` exposes no per-system default.
+    #[tokio::test]
+    async fn register_409_arm_syncs_effective_manager_not_request_only() {
+        let (db, mut state, _rx, _dir) = probe_fixture("reg409").await;
+        // The only manager source available in this fixture: the config default.
+        state.config.admin.manager_default = Some("cfgmgr@default.example".to_string());
+
+        // Anchor (bare domain) owned by the REQUESTING system sysB …
+        db.insert_system_domain("danchor", "sysB", "shared.example", None, None)
+            .await
+            .unwrap();
+        // … but the address row already belongs to a DIFFERENT system sysA.
+        db.insert_system_domain("daddr", "sysA", "agent@shared.example", None, None)
+            .await
+            .unwrap();
+        seed_key(&db, "sysB", "", &["system"], "r6key01x").await;
+
+        // sysB registers the colliding address, OMITTING manager_address.
+        let (status, resp) = signed_post(
+            probe_router(&state),
+            "r6key01x",
+            "sysB",
+            "/api/v1/admin/systems/sysB/addresses",
+            &serde_json::json!({"id": "r1", "email": "agent@shared.example"}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "body was {resp}");
+
+        // The 409 arm synced the EFFECTIVE manager (config default) — not the
+        // absent request value. Before the fix this was None and the meta was
+        // left untouched.
+        let meta = db
+            .get_domain_addr_meta("agent@shared.example")
+            .await
+            .unwrap()
+            .expect("409 arm must have synced the meta row");
+        assert_eq!(
+            meta.manager_address, "cfgmgr@default.example",
+            "409 arm must use the effective manager, got {:?}",
+            meta.manager_address
+        );
+
+        // … and the bidirectional whitelist carries the same manager. The
+        // resolver attributes it to the address's owning system (sysA).
+        let wl = db.list_whitelists("sysA").await.unwrap();
+        assert!(
+            wl.iter().any(|w| w.domain_addr == "agent@shared.example" && w.value == "cfgmgr@default.example"),
+            "409 arm must have synced the manager whitelist, got {:?}",
+            wl
         );
     }
 }
