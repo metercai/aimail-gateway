@@ -5332,7 +5332,9 @@ mod tests {
         // resolver attributes it to the address's owning system (sysA).
         let wl = db.list_whitelists("sysA").await.unwrap();
         assert!(
-            wl.iter().any(|w| w.domain_addr == "agent@shared.example" && w.value == "cfgmgr@default.example"),
+            wl.iter()
+                .any(|w| w.domain_addr == "agent@shared.example"
+                    && w.value == "cfgmgr@default.example"),
             "409 arm must have synced the manager whitelist, got {:?}",
             wl
         );
