@@ -96,18 +96,31 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     // Only when SQLCipher is enabled (storage.encryption = true); base defaults
     // to false, so the DB stays plaintext unless explicitly opted in.
     let db_key: Option<String> = if config.storage.encryption {
-        std::fs::read_to_string(&key_path)
+        // The encryption key is derived from the admin key, which is minted on the FIRST
+        // start. Enabling encryption on a host that has no key file yet would otherwise
+        // open (and write) a PLAINTEXT database and only migrate on the next restart —
+        // a silent plaintext window. Refuse instead: the operator starts once with
+        // encryption disabled (key minted + plaintext DB), then flips it on and the
+        // database is migrated in place on the next start.
+        let raw = std::fs::read_to_string(&key_path)
             .ok()
-            .filter(|k| !k.is_empty())
-            .map(|k| {
-                use hmac::{Hmac, Mac};
-                use sha2::Sha256;
-                type HmacSha256 = Hmac<Sha256>;
-                let mut mac =
-                    HmacSha256::new_from_slice(k.as_bytes()).expect("HMAC-SHA256 key derivation");
-                mac.update(b"aimail-gateway:db:encryption:v1");
-                hex::encode(mac.finalize().into_bytes())
-            })
+            .filter(|k| !k.trim().is_empty());
+        let Some(raw) = raw else {
+            return Err(AppError::Config(format!(
+                "storage.encryption = true requires an existing admin key file ({}): the \
+                 database key is derived from it, and the file is created by the first start. \
+                 Start once with storage.encryption = false, then set it to true — the \
+                 database is migrated to encrypted in place on the next start.",
+                key_path.display()
+            )));
+        };
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac =
+            HmacSha256::new_from_slice(raw.as_bytes()).expect("HMAC-SHA256 key derivation");
+        mac.update(b"aimail-gateway:db:encryption:v1");
+        Some(hex::encode(mac.finalize().into_bytes()))
     } else {
         None
     };

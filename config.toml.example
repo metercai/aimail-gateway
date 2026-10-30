@@ -21,6 +21,8 @@ hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR na
 # max_message_size = 10485760             # max inbound message size in bytes (default 10 MB)
 # max_connections = 100                   # max concurrent SMTP connections (default 100)
 # channel_capacity = 1000                 # internal channel buffer size (default 1000)
+# delivery_timeout_secs = 30              # hard timeout for one outbound delivery (default 30)
+# max_concurrent_deliveries = 4           # concurrent outbound deliveries (default 4)
 
 # ── Webhook / push delivery ─────────────────────────────────────────────
 
@@ -49,14 +51,17 @@ hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR na
 # max_backoff_secs = 300                  # backoff ceiling in seconds (default 300)
 # poll_interval_secs = 5                  # scheduler batch processing interval in seconds (default 5)
 # batch_size = 50                         # max deliveries processed per batch (default 50)
-# readying_stuck_secs = 30                # safety-net: seconds a 'readying' email may stay untriggered before the sweep dead-letters it (default 30)
+# send_dedupe_window_secs = 600           # identical consecutive sends within this window are deduped (default 600)
+# readying_stuck_secs = 30                # safety net: an email stuck in 'readying' longer than this is recovered by the sweep — resent when its payload is complete, discarded when the attachment set was only half written (default 30)
 
 # ── Storage ─────────────────────────────────────────────────────────────
 
 [storage]
 path = "./data"                           # data directory. DB → {path}/aimail.db, attachments → {path}/attachments/ (default ./data)
 # pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
-# encryption = false                      # SQLCipher page-level encryption (default false)
+# encryption = false                      # SQLCipher page-level encryption (default false). Requires the SQLCipher build; the gateway refuses to start when encryption is on and the binary has no SQLCipher, or when no admin key exists yet (the key is derived from it) — start once with false, then flip to true and the database is migrated in place.
+# admin_key_file = "/etc/aimail/admin.key"   # platform admin key file (default {path}/aimail.db.admin_key); keep it off the DB directory
+# system_key_file = "/etc/aimail/system.key" # agent-side system key file (default {path}/<system id>.system.key); written 0600
 # attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)
 # attachment_lifetime_hours = 720         # attachment cleanup age in hours (default 720 = 30 days)
 # attachment_max_attachments = 5          # max attachments per inbound email (default 5)
@@ -80,5 +85,5 @@ path = "./data"                           # data directory. DB → {path}/aimail
 # heartbeat_stale_seconds = 14400         # agent heartbeat TTL before marking stale (default 14400 = 4h)
 # task_timeout_seconds = 259200           # task inactivity timeout before auto-completion (default 259200 = 3d)
 # sweeper_interval_seconds = 900          # board sweeper cron interval (default 900 = 15m)
-# max_active_boards = 5                   # max concurrent active boards per system (default 5)
+# command_reply = "read_only_and_errors"  # reply policy for mail commands: off | read_only_and_errors | all (default read_only_and_errors)
 # archive_retention_days = 90             # archived board retention in days (default unlimited)

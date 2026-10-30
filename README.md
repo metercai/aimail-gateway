@@ -13,7 +13,7 @@ This is **the bidirectional mail gateway built for AI Agents** — it gives Agen
 
 aimail-gateway is a lightweight, high-performance bidirectional Rust mail gateway. It shields Agents from a crowd of legacy mail protocols (SMTP/POP3/IMAP) and sends and receives mail through a native REST API instead:
 
-- **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook and drives the mail pipeline with message events. Mail bodies and headers live in the Agent's local store and stay searchable there; the gateway itself retains nothing — what it holds between delivery and retry is temporary staging, cleared in the end whether delivery succeeded or not.
+- **Inbound:** Traditional solutions rely on IMAP/POP3 polling against a cloud-hosted inbox — high latency, wasted resources. aimail-gateway pushes inbound mail to the Agent in real time via Webhook/SSE and drives the mail pipeline with message events. Mail bodies and headers live in the Agent's local store and stay searchable there; the gateway itself retains nothing — what it holds between delivery and retry is temporary staging, cleared in the end whether delivery succeeded or not.
 - **Outbound:** aimail-gateway provides a general-purpose JSON HTTP send API. An Agent sends mail with a single toolset call. Same-gateway recipients are delivered by an internal Webhook; external addresses go out over SMTP. Two routes in, two routes out — fast and efficient.
 
 On top of native mail send/receive, aimail-gateway is purpose-built for what Agent mail actually looks like:
@@ -32,9 +32,9 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 **Inbound:**
 - **Standard SMTP** — port 25, compatible with any mail client
 - **Multi-domain** — receive mail for multiple domains on one gateway
-- **Webhook push** — real-time HTTP POST to Agent Webhook URL
+- **Webhook/SSE push** — real-time HTTP POST to Agent Webhook URL
 - **Multi-address aggregation** — batch push to multiple recipients at once
-- **Webhook hybrid mode** — push/pull mixed delivery for the same email
+- **Hybrid mode delivery** — push/pull mixed delivery for the same email
 - **Instant rejection of invalid inbound** — invalid recipients, oversized mail, internal-address senders rejected instantly to save resources
 - **Push scheduling** — async queue push, auto-retry on failure, expired resource cleanup
 
@@ -50,7 +50,7 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 - **Default bidirectional whitelist** — unauthorized senders are refused by default; outbound content cannot reach unauthorized recipients
 - **Bound manager** — a manager address per Agent; mail commands govern critical operations and act as a safety net
 - **API key authentication** — an independent key per Agent, HMAC request signing, the plaintext key never crosses the network
-- **Tiered API keys** — system/domain/agent key levels, isolated per scenario and never exposed to each other
+- **Tiered API keys** — platform / system / agent key levels, isolated per scenario and never exposed to each other
 - **Behavior scoping** — role and scope-based behavior limits that avoid risky actions
 - **Loop prevention** — internal recipients never relayed externally, internal senders never accepted inbound, auto-replies never retried, so no cycles can form
 - **Audit logging** — critical operations fully recorded and auditable
@@ -61,7 +61,7 @@ Once an Agent holds a globally unique mail address, its identity is globally ide
 - **Format conversion** — body cleaned and converted to Markdown, directly consumable by LLMs
 - **Information extraction** — sender signature extraction for identity recognition
 - **Thread tracking** — automatic In-Reply-To / References chain maintenance
-- **No long-term archiving** — raw mail is not retained; the Agent stores, searches, and audits on its own
+- **No long-term archiving** — raw mail is not retained; the Agent stores, searches, and audits on its own. The gateway keeps only delivery staging: undelivered pull items expire after `pending_ttl_hours` (72h), attachments after `attachment_lifetime_hours` (720h)
 
 **Collaboration:**
 - **Contact profiling** — dynamic profiles per contact, so replies land better
@@ -101,10 +101,12 @@ bash deploy-bin.sh setup-systemd     # the unit's ExecStart reads /etc/aimail/co
 
 # 3) Upload the runtime config (the deploy script ships the binary and the systemd unit, not the config)
 set -a; . ./.env; set +a
-# if ~/.ssh/id_deploy does not exist the script omits -i and uses your ssh-agent
-ssh -p "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" \
+# -i is added only when the key actually exists (same rule as deploy-bin.sh);
+# otherwise ssh falls back to your ssh-agent
+ID_OPT=(); [ -f "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" ] && ID_OPT=(-i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}")
+ssh -p "${AIMAIL_DEPLOY_PORT:-22}" "${ID_OPT[@]}" \
   "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}" "mkdir -p /etc/aimail /var/aimail"
-scp -P "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" config.toml \
+scp -P "${AIMAIL_DEPLOY_PORT:-22}" "${ID_OPT[@]}" config.toml \
   "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}:/etc/aimail/config.toml"
 
 # 4) Start and check health
@@ -150,6 +152,8 @@ curl -sf http://127.0.0.1:8080/health
 | `attachment_max_size` | `[storage]` | Max attachment size |
 | `timeout_secs` | `[webhook]` | Webhook push timeout (seconds) |
 | `max_attempts` | `[retry]` | Max delivery retry attempts |
+| `manager_default` | `[admin]` | Default manager (safety officer) for agent address registration when neither the request nor the system provides one; empty by default |
+| `encryption` | `[storage]` | SQLCipher page-level encryption, default `false`. Bootstrapping is two-step: start once with `false` (the admin key is minted), then set `true` — the database migrates in place on the next start. Startup fails closed if the build has no SQLCipher or no key exists yet |
 
 ### Example config.toml
 
@@ -167,6 +171,8 @@ hostname = "mail.example.com"           # Required: EHLO/PTR name, must match th
 # max_message_size = 10485760
 # max_connections = 100
 # channel_capacity = 1000
+# delivery_timeout_secs = 30
+# max_concurrent_deliveries = 4
 
 [relay]
 # smtp_server = "smtp://smtp.example.com:587"
@@ -189,12 +195,15 @@ hostname = "mail.example.com"           # Required: EHLO/PTR name, must match th
 # max_backoff_secs = 300
 # poll_interval_secs = 5
 # batch_size = 50
+# send_dedupe_window_secs = 600
 # readying_stuck_secs = 30
 
 [storage]
 path = "./data"
 # pool_size = 25
-# encryption = false
+# encryption = false                    # SQLCipher page encryption; needs a SQLCipher build (default off)
+# admin_key_file = "/etc/aimail/admin.key"
+# system_key_file = "/etc/aimail/system.key"
 # attachment_max_size = 20971520
 # attachment_lifetime_hours = 720
 # attachment_max_attachments = 5
@@ -206,14 +215,23 @@ path = "./data"
 
 [admin]
 # email = "admin@yourdomain.com"
+# manager_default = "admin@yourdomain.com"
 
 [board]
 # heartbeat_stale_seconds = 14400
 # task_timeout_seconds = 259200
 # sweeper_interval_seconds = 900
-# max_active_boards = 5
-# archive_retention_days = 90
+# command_reply = "read_only_and_errors"  # reply policy for mail commands: off | read_only_and_errors | all
+# archive_retention_days = 90             # archived board retention in days (default unlimited)
 ```
+
+### API signature protocol
+
+Every `/api/v1/*` request carries an identity header plus an HMAC-SHA256 signature
+(method, path, timestamp, body) — the raw API key never crosses the wire, and the old
+`X-Api-Key` header is no longer accepted. Header names, key tiers and the canonical
+string-to-sign are specified in
+[docs/API-SIGNATURE-PROTOCOL.md](docs/API-SIGNATURE-PROTOCOL.md).
 
 ### Environment Variable Overrides
 

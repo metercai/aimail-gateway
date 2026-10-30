@@ -33,6 +33,55 @@ pub struct Database {
     pub domain_cache: DomainCacheMap,
 }
 
+/// Fail closed when encryption is requested but the binary has no SQLCipher.
+///
+/// `PRAGMA key` is silently ignored by a plain SQLite build: the database would be
+/// written in PLAINTEXT while the operator believes it is encrypted (proven
+/// 2026-10-30 on the `bundled` build: header "SQLite format 3", readable with no key).
+/// `PRAGMA cipher_version` returns a row only when the SQLCipher codec is compiled in.
+fn ensure_cipher_support(conn: &Connection) -> AppResult<()> {
+    let ver: Option<String> = conn
+        .query_row("PRAGMA cipher_version;", [], |r| r.get(0))
+        .ok();
+    match ver.as_deref().map(str::trim) {
+        Some(v) if !v.is_empty() => Ok(()),
+        _ => Err(AppError::Config(
+            "storage.encryption = true requires a SQLCipher build, but this binary has none \
+             (PRAGMA key would be ignored and the database would be stored in PLAINTEXT). \
+             Rebuild with the bundled-sqlcipher feature, or set storage.encryption = false."
+                .to_string(),
+        )),
+    }
+}
+
+/// Restrict the database (and its WAL sidecars) to owner read/write.
+///
+/// The open path already chmods an EXISTING file; a freshly created database kept the
+/// umask default (observed 0644 on first start), so apply it once after creation too.
+fn lock_down_db_permissions(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut targets = vec![db_path.to_path_buf()];
+        for suffix in ["-wal", "-shm"] {
+            targets.push(std::path::PathBuf::from(format!(
+                "{}{}",
+                db_path.display(),
+                suffix
+            )));
+        }
+        for p in targets {
+            if let Ok(meta) = std::fs::metadata(&p) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o600);
+                let _ = std::fs::set_permissions(&p, perms);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = db_path;
+}
+
 impl Database {
     pub fn open<P: AsRef<Path>>(
         path: P,
@@ -41,7 +90,15 @@ impl Database {
     ) -> AppResult<Self> {
         let path_ref = path.as_ref();
         if let Some(parent) = path_ref.parent() {
+            // Only a directory we create ourselves is safe to lock down to 0700 —
+            // an operator-supplied mount may be shared with other services.
+            let existed = parent.exists();
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            if !existed {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
 
         // Set restrictive file permissions (owner read/write only)
@@ -103,6 +160,12 @@ impl Database {
                 AppError::Internal(format!("Failed to get connection from pool: {}", e))
             })?;
 
+            // Fail closed before touching the schema: a build without SQLCipher would
+            // ignore `PRAGMA key` and store the database in PLAINTEXT.
+            if encryption_key.is_some() {
+                ensure_cipher_support(&conn)?;
+            }
+
             // Auto-detect unencrypted DB and rekey in-place.
             if let Some(enc_key) = encryption_key {
                 if let Err(e) = init_connection(&conn) {
@@ -112,6 +175,7 @@ impl Database {
                              This happens on first restart after admin key provisioning."
                         );
                         drop(conn);
+                        drop(pool);
                         migrate_to_encrypted(path_ref, enc_key)?;
                         let manager2 = SqliteConnectionManager::file(path_ref);
                         let key2 = enc_key.to_string();
@@ -135,6 +199,7 @@ impl Database {
                             ))
                         })?;
                         init_connection(&conn2)?;
+                        lock_down_db_permissions(path_ref);
                         return Ok(Self {
                             pool: pool2,
                             db_file: path_ref.to_path_buf(),
@@ -149,6 +214,7 @@ impl Database {
             }
         }
 
+        lock_down_db_permissions(path_ref);
         Ok(Self {
             db_file: path_ref.to_path_buf(),
             pool,
@@ -229,12 +295,48 @@ fn init_connection(conn: &Connection) -> AppResult<()> {
 }
 
 /// Encrypt a plaintext database with SQLCipher.
+/// Encrypt an existing plaintext database in place (one-time, opt-in via
+/// `storage.encryption = true` after the admin key exists).
+///
+/// `PRAGMA rekey` cannot turn a plaintext database into an encrypted one — it only
+/// changes the key of a database that is already encrypted (SQLCipher 4 returns
+/// "file is not a database"; this was the reason the old implementation never worked).
+/// The supported direction is `sqlcipher_export`: attach an encrypted target, copy every
+/// table into it, then swap the files.
 fn migrate_to_encrypted(path: &Path, key: &str) -> AppResult<()> {
-    let conn = Connection::open(path)?;
-    conn.execute_batch("PRAGMA key = '';")?; // open in plaintext mode explicitly
-    conn.execute_batch(&format!("PRAGMA rekey = '{}';", key))?;
-    drop(conn);
-    tracing::info!("Database encrypted successfully with SQLCipher");
+    let tmp = path.with_extension("enc-tmp");
+    let wal = std::path::PathBuf::from(format!("{}-wal", path.display()));
+    let shm = std::path::PathBuf::from(format!("{}-shm", path.display()));
+    let _ = std::fs::remove_file(&tmp);
+
+    {
+        let conn = Connection::open(path)?;
+        conn.execute_batch("PRAGMA key = '';")?; // explicit plaintext mode
+                                                 // Fold any WAL content into the main file before copying it out.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        let safe_key = key.replace('\'', "''");
+        let sql = format!(
+            "ATTACH DATABASE '{tmp}' AS encrypted KEY '{safe_key}';\n\
+             SELECT sqlcipher_export('encrypted');\n\
+             DETACH DATABASE encrypted;",
+            tmp = tmp.display()
+        );
+        conn.execute_batch(&sql)?;
+    }
+
+    // Keep the plaintext original next to the new file (operator can delete it once
+    // they verified the encrypted database opens) and drop stale WAL sidecars.
+    let backup = path.with_extension("plaintext-bak");
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(path, &backup)?;
+    std::fs::rename(&tmp, path)?;
+    let _ = std::fs::remove_file(&wal);
+    let _ = std::fs::remove_file(&shm);
+    tracing::info!(
+        operation = "db_encrypted",
+        backup = %backup.display(),
+        "Database migrated to SQLCipher (plaintext original kept as .plaintext-bak)"
+    );
     Ok(())
 }
 

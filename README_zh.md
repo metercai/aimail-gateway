@@ -13,7 +13,7 @@
 
 aimail-gateway 是一个轻量而高性能的 Rust 双向邮件网关。它为 Agent 屏蔽了复杂的SMTP/POP3/IMAP等众多传统邮件协议，而以原生的REST API来收发邮件：
 
-- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook 实时推送入站邮件消息，以消息事件驱动邮件处理流程。邮件正文与头部存于 Agent 本地并可检索，gateway 自身不留存 —— 它只保留投递与重试之间的临时暂存，无论投递成功与否，最终都会清除。
+- **收信：** 传统方案里需要依赖 IMAP/POP3 协议轮询访问托管在云端的inbox，延迟高，资源浪费。而aimail-gateway 则通过 Webhook/SSE 实时推送入站邮件消息，以消息事件驱动邮件处理流程。邮件正文与头部存于 Agent 本地并可检索，gateway 自身不留存 —— 它只保留投递与重试之间的临时暂存，无论投递成功与否，最终都会清除。
 - **发信：** aimail-gateway 提供通用的 JSON HTTP 发信接口，Agent 调用 toolset 即可完成发信任务。同 gateway 收件人走内部 Webhook 直投，外部地址则走 SMTP 转发。内外双路由，高效快捷。
 
 aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景特点做了专属优化，包括：
@@ -32,9 +32,9 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 **收信：**
 - SMTP 标准协议入站 — 标准 25 端口，兼容任何邮件客户端
 - 多域名支持 — 同网关接收多个域名的邮件
-- Webhook 推送 — 实时 HTTP POST 到 Agent Webhook URL
+- Webhook/SSE 推送 — 实时 HTTP POST 到 Agent
 - 多地址聚合推送 — 多目标地址聚合一次性推送
-- Webhook 混合模式 — 同一封邮件支持混合(push/pull)模式推送
+- 混合模式推送 — 同一封邮件支持混合(push/pull)模式推送
 - 即时阻断无效入站 — 无效收件人/超大邮件/内地址发件人等即时拒绝，节省资源占用
 - 推送调度 — 异步队列推送，失败自动重试，过期资源自动回收
 
@@ -50,7 +50,7 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 - 默认双向白名单 — 默认拒绝非授权发件人，出站内容无法外发未授权收件地址
 - 绑定安全员 — 为每 Agent 配置安全员地址，配套指令邮件管控关键操作，做安全兜底
 - API Key 认证 — 每 Agent 独立 Key，HMAC 请求签名，明文 Key 不过网
-- 分级API key — 区分 system/domain/agent 等不同级别的key，各场景独立，互不见面
+- 分级API key — 区分 platform/system/agent 等不同级别的key，各场景独立，互不见面
 - 行为限定 — 基于角色和作用域的行为限定，规避行为风险
 - 回环阻断 — 内收件人地址不外发，内发件人地址不入站，自动回复邮件不重试，避免循环调用
 - 审计日志 — 关键操作全记录，可审计追溯
@@ -61,7 +61,7 @@ aimail-gateway 在原生收发邮件基础上，还针对 Agent 邮件的场景�
 - 格式转换 — 正文格式清洗和转换到Markdown, LLM 可直接消费
 - 信息提取 — 发件人签名提取, 有效识别和发现身份
 - 线程追踪 — 自动维护 In-Reply-To / References 链路
-- 不长期归档 — 原始邮件不留存，由Agent自行存储、检索和审计回溯
+- 不长期归档 — 原始邮件不留存，由Agent自行存储、检索和审计回溯；网关只保留投递暂存：未投递的 pull 条目 `pending_ttl_hours`（72h）过期、附件 `attachment_lifetime_hours`（720h）过期
 
 **协作：**
 - 联系人画像 — 为联系人建立动态画像，让回复更善解人意
@@ -101,10 +101,11 @@ bash deploy-bin.sh setup-systemd     # 服务单元的 ExecStart 读 /etc/aimail
 
 # 3) 上传运行时配置（部署脚本只分发二进制与 systemd 单元，不分发配置）
 set -a; . ./.env; set +a
-# 若 ~/.ssh/id_deploy 不存在，脚本会省略 -i 并使用你的 ssh-agent
-ssh -p "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" \
+# 与 deploy-bin.sh 同规则：仅当私钥文件存在时才加 -i，否则走 ssh-agent
+ID_OPT=(); [ -f "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" ] && ID_OPT=(-i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}")
+ssh -p "${AIMAIL_DEPLOY_PORT:-22}" "${ID_OPT[@]}" \
   "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}" "mkdir -p /etc/aimail /var/aimail"
-scp -P "${AIMAIL_DEPLOY_PORT:-22}" -i "${AIMAIL_DEPLOY_KEY:-$HOME/.ssh/id_deploy}" config.toml \
+scp -P "${AIMAIL_DEPLOY_PORT:-22}" "${ID_OPT[@]}" config.toml \
   "${AIMAIL_DEPLOY_USER}@${AIMAIL_DEPLOY_HOST}:/etc/aimail/config.toml"
 
 # 4) 启动并体检
@@ -148,6 +149,8 @@ curl -sf http://127.0.0.1:8080/health
 | `attachment_max_size` | `[storage]` | 附件大小上限 |
 | `timeout_secs` | `[webhook]` | Webhook 推送超时（秒） |
 | `max_attempts` | `[retry]` | 投递失败最大重试次数 |
+| `manager_default` | `[admin]` | agent 地址注册时，请求与系统都没提供 manager 的兜底安全员地址；默认空 |
+| `encryption` | `[storage]` | SQLCipher 页级加密，默认 `false`；两段式：先以 `false` 启动一次（生成 admin key），再改为 `true`，下次启动在原地迁移为加密库。构建不支持 SQLCipher 或 key 尚不存在时启动直接失败（不降级为明文） |
 
 ### config.toml 示例
 
@@ -165,6 +168,8 @@ hostname = "mail.example.com"           # 必填：EHLO/PTR 名，须与 VPS 的
 # max_message_size = 10485760
 # max_connections = 100
 # channel_capacity = 1000
+# delivery_timeout_secs = 30
+# max_concurrent_deliveries = 4
 
 [relay]
 # smtp_server = "smtp://smtp.example.com:587"
@@ -187,12 +192,15 @@ hostname = "mail.example.com"           # 必填：EHLO/PTR 名，须与 VPS 的
 # max_backoff_secs = 300
 # poll_interval_secs = 5
 # batch_size = 50
+# send_dedupe_window_secs = 600
 # readying_stuck_secs = 30
 
 [storage]
 path = "./data"
 # pool_size = 25
-# encryption = false
+# encryption = false                    # SQLCipher 页级加密；需 SQLCipher 构建（默认关闭）
+# admin_key_file = "/etc/aimail/admin.key"
+# system_key_file = "/etc/aimail/system.key"
 # attachment_max_size = 20971520
 # attachment_lifetime_hours = 720
 # attachment_max_attachments = 5
@@ -204,14 +212,21 @@ path = "./data"
 
 [admin]
 # email = "admin@yourdomain.com"
+# manager_default = "admin@yourdomain.com"
 
 [board]
 # heartbeat_stale_seconds = 14400
 # task_timeout_seconds = 259200
 # sweeper_interval_seconds = 900
-# max_active_boards = 5
-# archive_retention_days = 90
+# command_reply = "read_only_and_errors"  # 邮件指令回复策略：off | read_only_and_errors | all
+# archive_retention_days = 90             # 归档看板保留天数（默认不限）
 ```
+
+### API 签名协议
+
+`/api/v1/*` 的每个请求都带身份头 + HMAC-SHA256 签名（方法/路径/时间戳/正文），明文 Key 不过网，
+旧的 `X-Api-Key` 头已不再接受。头名称、key 分级与待签名字符串规范见
+[docs/API-SIGNATURE-PROTOCOL.md](docs/API-SIGNATURE-PROTOCOL.md)。
 
 ### 环境变量覆盖
 

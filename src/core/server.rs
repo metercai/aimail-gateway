@@ -255,6 +255,32 @@ pub struct AdminKeys {
 /// system_id = ?1`, so a client declaring the instance's system id still resolves it.
 pub const SYSTEM_KEY_DOMAIN_ADDR: &str = ".system";
 
+/// Write a secret file with 0600 permissions.
+///
+/// `fs::write` inherits the umask (observed 0664 for the admin key), which leaves
+/// platform credentials group/world readable. `mode()` only applies at creation, so
+/// an existing file is chmod-ed explicitly afterwards as well.
+fn write_secret_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(contents)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
 /// Generate and persist the API keys. Returns the cleartext keys (one-time display).
 pub async fn setup_admin_key(
     db: &crate::core::storage::Database,
@@ -461,7 +487,7 @@ pub fn persist_provisioned_keys(
     // repeated here — 2026-09-26 found this block printing a second, identical
     // `admin_key_colocated` warning on every boot (d835f22). One owner per advisory.
     if !keys.admin_key.is_empty() {
-        if let Err(e) = std::fs::write(&admin_path, &keys.admin_key) {
+        if let Err(e) = write_secret_file(&admin_path, keys.admin_key.as_bytes()) {
             tracing::warn!(operation = "admin_key_write_failed", path = %admin_path.display(), %e, "Failed to write admin key file");
         }
     }
@@ -489,7 +515,9 @@ pub fn persist_provisioned_keys(
     match action {
         SystemKeyAction::NotProvisioned => String::new(),
         SystemKeyAction::WriteNew => {
-            if let Err(e) = std::fs::write(&system_path, format!("{}\n", keys.system_key)) {
+            if let Err(e) =
+                write_secret_file(&system_path, format!("{}\n", keys.system_key).as_bytes())
+            {
                 tracing::warn!(operation = "system_key_write_failed", path = %system_path.display(), %e, "Failed to write system key file");
             }
             format!(

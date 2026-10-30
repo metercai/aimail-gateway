@@ -1,5 +1,6 @@
 .cargo/
-Cargo.lock
+# Cargo.lock is tracked on purpose: this is a binary crate, and the Dockerfile builds
+# with --locked so image builds cannot drift from the reviewed dependency set.
 target/
 outputs/
 attachments/
@@ -12,3 +13,4 @@ config.toml
 a2a_board/
 data/
 config.toml
+.hermes

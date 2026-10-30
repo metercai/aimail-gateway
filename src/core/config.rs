@@ -616,7 +616,6 @@ pub struct BoardConfig {
     pub task_timeout_seconds: u64,
     #[serde(default = "default_sweeper_interval")]
     pub sweeper_interval_seconds: u64,
-    pub max_active_boards: Option<usize>,
     pub archive_retention_days: Option<u64>,
     /// Command result reply (0+B): off | read_only_and_errors (default) | all
     #[serde(default = "default_command_reply")]
@@ -629,7 +628,6 @@ impl Default for BoardConfig {
             heartbeat_stale_seconds: default_heartbeat_stale(),
             task_timeout_seconds: default_task_timeout(),
             sweeper_interval_seconds: default_sweeper_interval(),
-            max_active_boards: Some(5),
             archive_retention_days: None,
             command_reply: default_command_reply(),
         }
