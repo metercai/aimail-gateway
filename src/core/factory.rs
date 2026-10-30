@@ -245,7 +245,8 @@ impl EnvFactory {
         Ok(())
     }
 
-    /// Resolve webhook URL and secret for a domain, falling back to system defaults.
+    /// Resolve webhook URL and secret for a domain (the record's own
+    /// fields — no fallback).
     pub async fn resolve_webhook_for_domain(
         &self,
         domain_record: &SystemDomainRecord,

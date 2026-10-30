@@ -9,13 +9,10 @@
 /// system — system-level management (domains, whitelists, agent keys)
 ///   Scoped to a single system.
 ///
-/// domain — domain-level management (domain addresses, domain whitelists)
-///   Scoped to a single domain. Created by system admin for domain isolation.
-///
 /// agent_admin — agent-level management within a system (agent keys, agent whitelists, agent stats)
 ///   Scoped to a single system. Cannot manage domains or system-level configuration.
 ///
-/// Agent — self-service (send email, manage own whitelist, rotate own key)
+/// agent — self-service (send email, manage own whitelist, rotate own key)
 ///   Scoped to a single email address.
 ///
 /// bridge — relay-bridge operations (pending deliveries poll + ack only)

@@ -1,5 +1,6 @@
 //! StrangerInterceptor — handles inbound emails from non-whitelisted senders
-//! with recognized universal commands ([WHOAMI], [VERIFY], [HELP], ...).
+//! with recognized universal commands ([WHOAMI]; [VERIFY] / [HELP] are
+//! reserved but not yet implemented).
 //!
 //! Entry points (SMTP receiver + send API) inject X-Mail-Stranger + X-Mail-Command
 //! headers before creating the EmailRecord. This interceptor reads those headers

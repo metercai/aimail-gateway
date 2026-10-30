@@ -1199,11 +1199,11 @@ async fn rename_agent_address(
 /// rejected by the owner for the same data-security reason.
 ///
 /// `valid` is derived from the **real** schema: `system_domains` has one
-/// liveness column, `is_active` (`core/storage.rs` CREATE TABLE), and
-/// no migration adds a validity/expiry column to it (the migrations in
-/// `core/storage.rs` only extend `ip_blacklist` / `systems` /
-/// `activation_codes`). So `valid = is_active` — there is no date column to
-/// consult. `exists` = a `system_domains` row whose `domain_addr` equals the
+/// liveness column, `is_active` (`core/storage.rs` CREATE TABLE), and the
+/// migrations in `core/storage.rs` only create tables — no ALTER TABLE adds a
+/// validity/expiry column to any of them. So `valid = is_active` — there is
+/// no date column to consult. `exists` = a `system_domains` row whose
+/// `domain_addr` equals the
 /// probe AND belongs to the probed system.
 ///
 /// The struct having no other fields is load-bearing: the unit tests assert
