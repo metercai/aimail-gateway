@@ -1179,6 +1179,20 @@ mod tests {
     use rusqlite::Connection;
     use std::cell::RefCell;
 
+    static TEST_DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// Per-test storage root. The notify helpers open `{root}/a2a_board/{board_id}.db`,
+    /// so a root shared between parallel tests makes them race on `init_schema`
+    /// ("database is locked") — the unique root removes the shared file entirely.
+    fn unique_board_dir() -> String {
+        let n = TEST_DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tid = std::thread::current().id();
+        std::env::temp_dir()
+            .join(format!("aimail-commands-test-{tid:?}-{n}"))
+            .to_string_lossy()
+            .to_string()
+    }
+
     fn setup() -> (Connection, String, Notifier) {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
@@ -1230,12 +1244,10 @@ mod tests {
 
         let notifier = Notifier {
             email_factory: None,
-            // temp dir — notify helpers open_board_db on this path and
-            // must never create a2a_board/ under the repo root.
-            board_db_path: std::env::temp_dir()
-                .join("aimail-commands-test")
-                .to_string_lossy()
-                .to_string(),
+            // Per-test unique root — notify helpers open_board_db on this path;
+            // a shared root would make parallel tests race on init_schema
+            // ("database is locked"). Also keeps a2a_board/ out of the repo.
+            board_db_path: unique_board_dir(),
             system_id: "test".to_string(),
             board_short_id: board.short_id.clone(),
             board_email: board.board_email.clone(),
