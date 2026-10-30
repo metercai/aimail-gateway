@@ -637,43 +637,66 @@ pub fn create_task(conn: &Connection, task: &Task) -> AppResult<()> {
     Ok(())
 }
 
-pub fn get_task(conn: &Connection, task_id: &str) -> AppResult<Task> {
-    conn.query_row(
-        "SELECT id, short_id, board_id, title, body, status, assignee, reviewer,
+/// Fetch a task by full id (e.g. `t_T1_a3f8c21b`) or, failing that, by
+/// short_id (e.g. `T1`). Each board has its own SQLite database, so a
+/// short_id is unique within this board's task table — the fallback is
+/// unambiguous. This lets both the email command flow (`[A2A] complete T1`)
+/// and the HTTP tools address tasks the way the board docs and the product's
+/// own notification prompts do.
+pub fn get_task(conn: &Connection, task_ref: &str) -> AppResult<Task> {
+    const SELECT: &str = "SELECT id, short_id, board_id, title, body, status, assignee, reviewer,
                 parent_ids, tags, summary, metadata, created_by, created_at, updated_at,
                 completed_at, cancelled_at, deadline
-         FROM tasks WHERE id = ?1",
-        params![task_id],
-        |row| {
-            Ok(Task {
-                id: row.get(0)?,
-                short_id: row.get(1)?,
-                board_id: row.get(2)?,
-                title: row.get(3)?,
-                body: row.get(4)?,
-                status: parse_task_status(&row.get::<_, String>(5)?),
-                assignee: row.get(6)?,
-                reviewer: row.get(7)?,
-                parent_ids: row
-                    .get::<_, String>(8)
-                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
-                    .unwrap_or_default(),
-                tags: row
-                    .get::<_, String>(9)
-                    .map(|s| serde_json::from_str(&s).unwrap_or_default())
-                    .unwrap_or_default(),
-                summary: row.get(10)?,
-                metadata: row.get(11)?,
-                created_by: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
-                completed_at: row.get(15)?,
-                cancelled_at: row.get(16)?,
-                deadline: row.get(17)?,
-            })
-        },
-    )
-    .map_err(Into::into)
+         FROM tasks WHERE ";
+    let by = |col: &str| {
+        conn.query_row(
+            &format!("{}{} = ?1", SELECT, col),
+            params![task_ref],
+            task_from_row,
+        )
+    };
+    match by("id") {
+        Ok(t) => Ok(t),
+        Err(rusqlite::Error::QueryReturnedNoRows) => by("short_id").map_err(Into::into),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Resolve a task reference (full id `t_T1_a3f8c21b` or short_id `T1`) to
+/// the task's full id. Used at the command/tool entry points so that
+/// downstream writes (status updates, events) operate on the real id.
+/// Errors if neither form matches.
+pub fn resolve_task_id(conn: &Connection, task_ref: &str) -> AppResult<String> {
+    get_task(conn, task_ref).map(|t| t.id)
+}
+
+fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        short_id: row.get(1)?,
+        board_id: row.get(2)?,
+        title: row.get(3)?,
+        body: row.get(4)?,
+        status: parse_task_status(&row.get::<_, String>(5)?),
+        assignee: row.get(6)?,
+        reviewer: row.get(7)?,
+        parent_ids: row
+            .get::<_, String>(8)
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default(),
+        tags: row
+            .get::<_, String>(9)
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default(),
+        summary: row.get(10)?,
+        metadata: row.get(11)?,
+        created_by: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        completed_at: row.get(15)?,
+        cancelled_at: row.get(16)?,
+        deadline: row.get(17)?,
+    })
 }
 
 pub fn list_tasks(
@@ -1017,6 +1040,44 @@ mod tests {
         let found = get_task(&conn, &task.id).unwrap();
         assert_eq!(found.short_id, "T1");
         assert_eq!(found.status, TaskStatus::Ready);
+    }
+
+    #[test]
+    fn test_get_task_resolves_short_id() {
+        // A-flow and the HTTP tools address tasks by short_id
+        // ("[A2A] complete T1"); get_task must fall back to it.
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+
+        let by_short = get_task(&conn, "T1").unwrap();
+        assert_eq!(by_short.id, task.id);
+
+        // full id still resolves first (no ambiguity: a short_id that
+        // collides with no full id falls through, one that matches a
+        // full id is that task)
+        let by_full = get_task(&conn, &task.id).unwrap();
+        assert_eq!(by_full.id, task.id);
+
+        assert!(get_task(&conn, "T99").is_err());
+    }
+
+    #[test]
+    fn test_get_task_full_id_wins_over_short_fallback() {
+        // A full id that does not exist must NOT be mistaken for a
+        // short_id lookup of another task: the id query misses, and the
+        // short_id fallback only matches if the id string happens to be
+        // some task's short_id. Guard the intended precedence explicitly.
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+
+        // "T1" is a valid short_id → resolves to the task
+        assert_eq!(get_task(&conn, "T1").unwrap().id, task.id);
+        // the same task's full id resolves to itself
+        assert_eq!(get_task(&conn, &task.id).unwrap().id, task.id);
+        // an id that matches neither misses
+        assert!(get_task(&conn, &format!("t_X_{}", &board_id[..8])).is_err());
     }
 
     #[test]

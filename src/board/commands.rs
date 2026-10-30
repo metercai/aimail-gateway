@@ -18,36 +18,72 @@ pub fn execute_command(
     cmd: &A2aCommand,
     sender: &str,
 ) -> AppResult<CommandResponse> {
+    // Resolve a short_id reference ("T1") to the full task id before
+    // dispatch for task-scoped verbs, so every downstream write (status
+    // updates, events with foreign keys) operates on the real id. Full
+    // ids pass through unchanged; an unknown reference fails with a
+    // clear error ack. Board-level verbs ignore task_id and are left
+    // untouched.
+    const TASK_SCOPED: &[&str] = &[
+        "complete",
+        "continue",
+        "approve",
+        "verify",
+        "reject",
+        "block",
+        "unblock",
+        "heartbeat",
+        "comment",
+        "cancel",
+        "assign",
+        "reassign",
+        "edit",
+        "deadline",
+        "reopen",
+        "output",
+        "show",
+    ];
+    let cmd = if let Some(raw) = &cmd.task_id {
+        if !raw.is_empty() && TASK_SCOPED.contains(&cmd.verb.as_str()) {
+            let mut c = cmd.clone();
+            c.task_id = Some(db::resolve_task_id(conn, raw)?);
+            c
+        } else {
+            cmd.clone()
+        }
+    } else {
+        cmd.clone()
+    };
     match cmd.verb.as_str() {
-        "complete" => handle_complete(conn, notifier, cmd, sender),
-        "continue" => handle_continue(conn, notifier, cmd, sender),
-        "approve" => handle_approve(conn, notifier, cmd, sender),
-        "review" => handle_review(conn, notifier, cmd, sender),
+        "complete" => handle_complete(conn, notifier, &cmd, sender),
+        "continue" => handle_continue(conn, notifier, &cmd, sender),
+        "approve" => handle_approve(conn, notifier, &cmd, sender),
+        "review" => handle_review(conn, notifier, &cmd, sender),
         // Q2: "verify" is deliberately the same handler as "approve" —
         // both verbs complete the review gate; kept as an alias for
         // clients that use verify/reject terminology.
-        "verify" => handle_approve(conn, notifier, cmd, sender),
-        "reject" => handle_reject(conn, notifier, cmd, sender),
-        "block" => handle_block(conn, notifier, cmd, sender),
-        "unblock" => handle_unblock(conn, notifier, cmd, sender),
-        "heartbeat" => handle_heartbeat(conn, cmd, sender),
-        "comment" => handle_comment(conn, notifier, cmd, sender),
-        "cancel" => handle_cancel(conn, notifier, cmd, sender),
-        "assign" => handle_reassign(conn, notifier, cmd, sender),
-        "reassign" => handle_reassign(conn, notifier, cmd, sender),
-        "edit" => handle_edit(conn, cmd, sender),
-        "deadline" => handle_deadline(conn, cmd, sender),
-        "reopen" => handle_reopen(conn, notifier, cmd, sender),
-        "output" => handle_output(conn, notifier, cmd, sender),
-        "show" => handle_show(conn, cmd, sender),
-        "list" => handle_list(conn, cmd, sender),
-        "members" => handle_members(conn, cmd, sender),
-        "roles" => handle_roles(conn, cmd, sender),
-        "status" => handle_board_status(conn, cmd, sender),
-        "gateway-info" => handle_gateway_info(conn, cmd),
-        "create" => handle_create(conn, notifier, cmd, sender),
-        "refresh" => handle_refresh(conn, notifier, cmd, sender),
-        "arbitrate" => handle_arbitrate(conn, notifier, cmd, sender),
+        "verify" => handle_approve(conn, notifier, &cmd, sender),
+        "reject" => handle_reject(conn, notifier, &cmd, sender),
+        "block" => handle_block(conn, notifier, &cmd, sender),
+        "unblock" => handle_unblock(conn, notifier, &cmd, sender),
+        "heartbeat" => handle_heartbeat(conn, &cmd, sender),
+        "comment" => handle_comment(conn, notifier, &cmd, sender),
+        "cancel" => handle_cancel(conn, notifier, &cmd, sender),
+        "assign" => handle_reassign(conn, notifier, &cmd, sender),
+        "reassign" => handle_reassign(conn, notifier, &cmd, sender),
+        "edit" => handle_edit(conn, &cmd, sender),
+        "deadline" => handle_deadline(conn, &cmd, sender),
+        "reopen" => handle_reopen(conn, notifier, &cmd, sender),
+        "output" => handle_output(conn, notifier, &cmd, sender),
+        "show" => handle_show(conn, &cmd, sender),
+        "list" => handle_list(conn, &cmd, sender),
+        "members" => handle_members(conn, &cmd, sender),
+        "roles" => handle_roles(conn, &cmd, sender),
+        "status" => handle_board_status(conn, &cmd, sender),
+        "gateway-info" => handle_gateway_info(conn, &cmd),
+        "create" => handle_create(conn, notifier, &cmd, sender),
+        "refresh" => handle_refresh(conn, notifier, &cmd, sender),
+        "arbitrate" => handle_arbitrate(conn, notifier, &cmd, sender),
         _ => Ok(CommandResponse {
             status: "error".to_string(),
             task: None,
@@ -1083,7 +1119,10 @@ fn handle_arbitrate(
     let task = if task_id.is_empty() {
         None
     } else {
-        db::get_task(conn, &task_id).ok()
+        // Best-effort: an unknown reference just means no task context.
+        db::resolve_task_id(conn, &task_id)
+            .ok()
+            .and_then(|full| db::get_task(conn, &full).ok())
     };
     let board_id = task.as_ref().map(|t| t.board_id.as_str()).unwrap_or("");
     let requester_role = db::get_member(conn, board_id, sender)?
@@ -1286,6 +1325,21 @@ mod tests {
         let (conn, board_id, notifier) = setup();
         let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
         let cmd = make_cmd("complete", Some(&tid), None);
+        let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
+        assert_eq!(resp.status, "ok");
+        let task = db::get_task(&conn, &tid).unwrap();
+        assert_eq!(task.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn test_complete_by_short_id() {
+        // The email A-flow parses the subject as "[A2A] complete T1" and
+        // passes the short_id straight through — this must resolve to the
+        // task, matching the docs and the product's own notification
+        // prompts.
+        let (conn, board_id, notifier) = setup();
+        let tid = make_task(&conn, &board_id, "T1", "worker@t.io");
+        let cmd = make_cmd("complete", Some("T1"), None);
         let resp = execute_command(&conn, &notifier, &cmd, "worker@t.io").unwrap();
         assert_eq!(resp.status, "ok");
         let task = db::get_task(&conn, &tid).unwrap();

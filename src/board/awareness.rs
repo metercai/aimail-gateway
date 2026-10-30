@@ -129,8 +129,8 @@ pub fn list_roles(conn: &Connection) -> AppResult<HashMap<String, Vec<String>>> 
 /// Report liveness for a task: only the assignee may heartbeat; a Ready
 /// task moves to Running; other statuses reject. Touches updated_at and
 /// records a heartbeat event.
-pub fn heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()> {
-    let mut task = db::get_task(conn, task_id)?;
+pub fn heartbeat(conn: &Connection, task_ref: &str, actor: &str) -> AppResult<()> {
+    let mut task = db::get_task(conn, task_ref)?;
     if task.assignee != actor {
         return Err(crate::core::errors::AppError::Forbidden(
             "only assignee can heartbeat".to_string(),
@@ -145,12 +145,13 @@ pub fn heartbeat(conn: &Connection, task_id: &str, actor: &str) -> AppResult<()>
             task.status
         )));
     }
-    db::touch_task(conn, task_id)?;
+    // task_ref may be a short_id; the event/touch writes need the real id.
+    db::touch_task(conn, &task.id)?;
     db::insert_event(
         conn,
         &TaskEvent {
             id: 0,
-            task_id: task_id.to_string(),
+            task_id: task.id.clone(),
             event_type: "heartbeat".to_string(),
             actor: actor.to_string(),
             payload: None,
