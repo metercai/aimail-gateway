@@ -147,9 +147,13 @@ pub(crate) async fn insert_exhaustion_notification(
 
     let notification_id = format!("wn-{}", uuid::Uuid::new_v4());
 
-    // Build endpoints JSON for webhook delivery to the agent
+    // Build endpoints JSON for webhook delivery to the agent.
+    // Key is the real agent address (lowercased) — NOT a fixed "notification"
+    // label — so the push loop's 2-tier resolve can find the webhook secret
+    // and the X-AIMail-Email header carries the actual recipient.
+    let endpoint_key = record.sender.to_lowercase();
     let endpoints_json = serde_json::json!({
-        "notification": {
+        endpoint_key: {
             "url": url,
             "status": "pending"
         }
@@ -251,5 +255,102 @@ pub(crate) async fn insert_exhaustion_notification(
             info!(operation="overlimit_notification_inserted", email_id = %record.id, notification_id = %notification_id, "Overlimit webhook notification record inserted");
             trigger_first_delivery(trigger, &notification_id, "notification_trigger_failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::strategy::BaseSystemStore;
+    use crate::core::storage::Database;
+    use std::sync::Arc;
+
+    fn env() -> (EmailFactory, AttachmentFactory) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-exhaust-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Arc::new(Database::open(dir.join("aimail.db"), 4, None).unwrap());
+        let ef = EmailFactory::new(
+            db.clone(),
+            std::path::PathBuf::from("/tmp/aimailgw-exhaust-att"),
+            Arc::new(BaseSystemStore),
+        );
+        let af = AttachmentFactory::new(db, std::path::PathBuf::from("/tmp/aimailgw-exhaust-att"));
+        (ef, af)
+    }
+
+    /// B5: the overlimit notification's endpoint must be keyed by the REAL
+    /// sender address (so the push loop resolves the webhook secret and the
+    /// X-AIMail-Email header is correct) — NOT a fixed "notification" label
+    /// that no domain lookup can ever resolve.
+    #[tokio::test]
+    async fn overlimit_notification_endpoint_keyed_by_sender_address() {
+        let (ef, af) = env();
+        // The exhausted mail's sender is a registered push agent.
+        ef.env_factory
+            .create_domain(
+                "d1",
+                "sys1",
+                "worker@corp.local",
+                Some("http://hook/agent"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.smtp.hostname = Some("e2e.local".to_string());
+
+        let record = EmailRecord {
+            id: "orig-1".to_string(),
+            status: "pending".to_string(),
+            system_id: "sys1".to_string(),
+            direction: "outbound".to_string(),
+            sender: "worker@corp.local".to_string(),
+            recipients: r#"{"to":["ext@example.com"],"cc":[],"rcpt":["ext@example.com"]}"#
+                .to_string(),
+            endpoints: None,
+            subject: "Quarterly report".to_string(),
+            body: "body".to_string(),
+            headers: None,
+            attachments: None,
+            send_count: 3,
+            last_sent_at: String::new(),
+            next_retry_at: None,
+            max_attempts: 3,
+            created_at: String::new(),
+            sender_signature: None,
+        };
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        insert_exhaustion_notification(&ef, &af, &cfg, &record, Some(&tx)).await;
+
+        let rec = ef
+            .list(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("[Overlimit]"))
+            .expect("overlimit notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("overlimit notification must carry endpoints");
+        assert!(
+            eps.contains("worker@corp.local"),
+            "endpoint key must be the real sender address: {eps}"
+        );
+        assert!(
+            !eps.contains("\"notification\""),
+            "endpoint key must not be the fixed 'notification' label: {eps}"
+        );
+        assert!(
+            eps.contains("http://hook/agent"),
+            "endpoint must hold the resolved webhook url: {eps}"
+        );
     }
 }

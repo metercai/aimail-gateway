@@ -212,6 +212,16 @@ impl Notifier {
         });
         let handle = tokio::spawn(async move {
             let result = if is_internal {
+                // Push-mode internal recipients need the webhook endpoint
+                // attached, otherwise process_email_webhook sees an empty
+                // endpoints_map and completes + deletes the mail silently.
+                // Pull-mode recipients resolve to no endpoint ("{}") and stay
+                // covered by the recipients pre-scan.
+                let eps = factory
+                    .env_factory
+                    .build_endpoints_for_recipients(std::slice::from_ref(&to))
+                    .await;
+                let eps = (eps != "{}").then_some(eps);
                 factory
                     .create_inbound(
                         &email_id,
@@ -220,7 +230,7 @@ impl Notifier {
                         &to,
                         &subject,
                         &body,
-                        None,
+                        eps.as_deref(),
                         None,
                         inbound_headers.as_deref(),
                         3,

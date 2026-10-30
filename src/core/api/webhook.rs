@@ -373,7 +373,10 @@ pub async fn process_email_webhook(
         if let Some(s) = endpoint_secret {
             secret = s;
         } else {
-            match env_factory.lookup_domain_addr(domain).await {
+            // 2-tier resolve (full address → bare domain), matching the pull
+            // pre-scan; a bare-domain registration with an address-keyed
+            // endpoint must still sign.
+            match env_factory.resolve_domain_from_address(domain).await {
                 Ok(Some(domain_record)) => {
                     match env_factory.resolve_webhook_for_domain(&domain_record).await {
                         Ok((_domain_url, domain_secret)) => {
@@ -1133,6 +1136,16 @@ async fn notify_new_manager(
     })
     .to_string();
     let res = if is_internal {
+        // Push-mode internal recipients need the webhook endpoint attached,
+        // otherwise process_email_webhook sees an empty endpoints_map and
+        // completes + deletes the mail silently. Pull-mode recipients resolve
+        // to no endpoint ("{}") and stay covered by the recipients pre-scan.
+        let eps = ack
+            .email_factory
+            .env_factory
+            .build_endpoints_for_recipients(&[new_manager.to_string()])
+            .await;
+        let eps = (eps != "{}").then_some(eps);
         ack.email_factory
             .create_inbound(
                 &email_id,
@@ -1141,7 +1154,7 @@ async fn notify_new_manager(
                 new_manager,
                 &subject,
                 &body,
-                None,
+                eps.as_deref(),
                 None,
                 Some(headers.as_str()),
                 3,
@@ -1323,6 +1336,16 @@ async fn notify_agent_persona_applied(
     })
     .to_string();
     let res = if is_internal {
+        // Push-mode internal recipients need the webhook endpoint attached,
+        // otherwise process_email_webhook sees an empty endpoints_map and
+        // completes + deletes the mail silently. Pull-mode recipients resolve
+        // to no endpoint ("{}") and stay covered by the recipients pre-scan.
+        let eps = ack
+            .email_factory
+            .env_factory
+            .build_endpoints_for_recipients(&[to_agent.to_string()])
+            .await;
+        let eps = (eps != "{}").then_some(eps);
         ack.email_factory
             .create_inbound(
                 &email_id,
@@ -1331,7 +1354,7 @@ async fn notify_agent_persona_applied(
                 to_agent,
                 subject,
                 &body,
-                None,
+                eps.as_deref(),
                 None,
                 Some(headers.as_str()),
                 3,
@@ -2245,5 +2268,330 @@ mod tests {
             .find(|m| m.subject.starts_with("[AIMail] Command failed"))
             .expect("incomplete transfer must get a failed ack");
         assert!(ack.body.contains("To:"));
+    }
+
+    // ─── P1-2 path b: internal notification records must carry push endpoints ───
+
+    // A push-mode internal recipient (webhook-registered) gets the endpoint
+    // attached — without it process_email_webhook sees an empty endpoints_map
+    // and completes + deletes the mail silently.
+    #[tokio::test]
+    async fn new_manager_notice_internal_push_recipient_carries_endpoint() {
+        let (env, ef) = approval_env();
+        let cfg = ack_cfg();
+        // New manager registered on THIS gateway with a push webhook.
+        env.create_domain(
+            "d2",
+            "sys1",
+            "newmgr@e2e.local",
+            Some("http://hook/2"),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        super::notify_new_manager(
+            Some(crate::core::api::outbound::AckCtx {
+                cfg: &cfg,
+                email_factory: &ef,
+                metrics: None,
+                trigger_tx: None,
+            }),
+            "newmgr@e2e.local",
+            "agent@test.com",
+            "sys1",
+        )
+        .await;
+        let rec = ef
+            .list(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.starts_with("[AIMail] You are now the manager"))
+            .expect("notice must be enqueued");
+        assert_eq!(
+            rec.direction, "inbound",
+            "internal recipient stays on the inbound chain"
+        );
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("push-mode internal recipient must carry the webhook endpoint");
+        assert!(
+            eps.contains("http://hook/2"),
+            "endpoint must hold the webhook url: {eps}"
+        );
+        assert!(
+            eps.contains("newmgr@e2e.local"),
+            "endpoint key must be the recipient: {eps}"
+        );
+    }
+
+    // The persona-applied closed-loop mail (sent to the agent itself) carries
+    // the same push endpoint.
+    #[tokio::test]
+    async fn persona_applied_notice_internal_push_agent_carries_endpoint() {
+        let (env, ef) = approval_env();
+        let cfg = ack_cfg();
+        // system_sender = noreply@e2e.local (ack_cfg), so an internal agent
+        // must sit in the e2e.local domain.
+        env.create_domain(
+            "d1",
+            "sys1",
+            "agent@e2e.local",
+            Some("http://hook/1"),
+            None,
+            Some("mgr@ext.com"),
+        )
+        .await
+        .unwrap();
+
+        super::notify_agent_persona_applied(
+            Some(crate::core::api::outbound::AckCtx {
+                cfg: &cfg,
+                email_factory: &ef,
+                metrics: None,
+                trigger_tx: None,
+            }),
+            "agent@e2e.local",
+            "sys1",
+            "persona-x",
+            "sig-x",
+        )
+        .await;
+        let rec = ef
+            .list(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.starts_with("[AIMail] Persona applied"))
+            .expect("persona notice must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("push-mode internal agent must carry the webhook endpoint");
+        assert!(
+            eps.contains("http://hook/1"),
+            "endpoint must hold the webhook url: {eps}"
+        );
+    }
+
+    // Pull-mode internal recipients resolve to no endpoint — the record stays
+    // endpoint-less and the recipients pre-scan covers delivery.
+    #[tokio::test]
+    async fn new_manager_notice_pull_recipient_stays_without_endpoint() {
+        let (env, ef) = approval_env();
+        let cfg = ack_cfg();
+        // Registered with NO webhook url => pull mode.
+        env.create_domain("d3", "sys1", "pullmgr@e2e.local", None, None, None)
+            .await
+            .unwrap();
+
+        super::notify_new_manager(
+            Some(crate::core::api::outbound::AckCtx {
+                cfg: &cfg,
+                email_factory: &ef,
+                metrics: None,
+                trigger_tx: None,
+            }),
+            "pullmgr@e2e.local",
+            "agent@test.com",
+            "sys1",
+        )
+        .await;
+        let rec = ef
+            .list(10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.starts_with("[AIMail] You are now the manager"))
+            .expect("notice must be enqueued");
+        // Pull-mode recipient: no webhook url resolves to no endpoint — the
+        // record stays endpoint-less (delivery is covered by the recipients
+        // pre-scan), so a push endpoint must NOT be fabricated.
+        assert!(
+            rec.endpoints
+                .as_deref()
+                .map(str::trim)
+                .map_or(true, |e| e == "{}" || e.is_empty()),
+            "pull-mode recipient must not carry a fake push endpoint: {:?}",
+            rec.endpoints
+        );
+        assert!(
+            rec.endpoints
+                .as_deref()
+                .map_or(true, |e| !e.contains("http://")),
+            "pull-mode endpoint must not contain a url: {:?}",
+            rec.endpoints
+        );
+    }
+
+    // ─── P1-2 path b + B4: push loop resolves the secret via 2-tier lookup ───
+
+    /// One-shot raw HTTP capture: read the full request (headers + body per
+    /// Content-Length), reply 200. Returns a receiver that yields the complete
+    /// raw request bytes once the POST arrives — the caller must `recv` AFTER
+    /// triggering delivery (recv-ing here would deadlock, since the URL is
+    /// only known to the caller after this returns).
+    fn raw_http_capture() -> (std::sync::mpsc::Receiver<Vec<u8>>, std::net::SocketAddr) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            // Read until the header block is complete.
+            let head_end = loop {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break None;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = find_bytes(&buf, b"\r\n\r\n") {
+                    break Some(pos + 4);
+                }
+                if buf.len() > 65536 {
+                    break None;
+                }
+            };
+            let head_end = match head_end {
+                Some(p) => p,
+                None => {
+                    let _ = tx.send(buf);
+                    return;
+                }
+            };
+            // Read the body per Content-Length.
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_lowercase();
+            let content_len = head
+                .lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix("content-length:")
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
+            while buf.len() < head_end + content_len {
+                let n = sock.read(&mut tmp).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let _ = tx.send(buf);
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        });
+        (rx, addr)
+    }
+
+    /// Index of the first occurrence of `needle` in `hay` (bytes).
+    fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() || hay.len() < needle.len() {
+            return None;
+        }
+        (0..=hay.len() - needle.len()).find(|&i| &hay[i..i + needle.len()] == needle)
+    }
+
+    // B4: an address-keyed endpoint whose domain is registered as a BARE
+    // domain must still be signed — the push loop resolves full address →
+    // bare domain (same strength as the pull pre-scan).
+    #[tokio::test]
+    async fn push_loop_signs_bare_domain_registration_with_address_keyed_endpoint() {
+        let (env, ef) = approval_env();
+        // Bare-domain registration (type 4): "corp.local" holds the secret.
+        env.create_domain(
+            "d4",
+            "sys1",
+            "corp.local",
+            Some("http://hook/corp"),
+            Some("bare-secret-42"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let (cap_rx, addr) = raw_http_capture();
+        let url = format!("http://{addr}/hook");
+        let rec = ef
+            .create_inbound(
+                "wb-sign-test-1",
+                "sys1",
+                "noreply@e2e.local",
+                "alice@corp.local",
+                "hello",
+                "body",
+                Some(
+                    &serde_json::json!({
+                        "alice@corp.local": { "url": url, "status": "pending" }
+                    })
+                    .to_string(),
+                ),
+                None,
+                None,
+                3,
+            )
+            .await
+            .unwrap();
+
+        let client = reqwest::Client::new();
+        let ok = super::process_email_webhook(
+            &env,
+            &ef,
+            &ack_cfg(),
+            &client,
+            &rec,
+            Some(crate::core::api::outbound::AckCtx {
+                cfg: &ack_cfg(),
+                email_factory: &ef,
+                metrics: None,
+                trigger_tx: Some(&tx),
+            }),
+            None,
+        )
+        .await;
+        assert!(ok, "push delivery must report success");
+
+        // The capture thread sends the raw request once the POST arrives.
+        let raw = cap_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("POST must reach the capture server within 10s");
+
+        // Split the captured request into head and body.
+        let head_end = find_bytes(&raw, b"\r\n\r\n").expect("request must have a header block");
+        let head = String::from_utf8_lossy(&raw[..head_end]).to_string();
+        let body = &raw[head_end + 4..];
+        assert!(!body.is_empty(), "POST must carry the webhook payload body");
+
+        let header_val = |name: &str| -> Option<String> {
+            head.lines().find_map(|l| {
+                let lower = l.to_lowercase();
+                lower
+                    .strip_prefix(name)
+                    .map(|v| v.trim().trim_start_matches(':').trim().to_string())
+            })
+        };
+        let got_sig = header_val("x-webhook-signature:")
+            .filter(|s| !s.is_empty())
+            .expect("POST must carry a non-empty signature header: {head}");
+
+        // The signature must be the HMAC over the BARE-DOMAIN secret — an
+        // empty-secret (unsigned) HMAC is a different value, so this also
+        // proves the 2-tier resolve found the secret.
+        let (expected_sig, _ts) = sign_payload(b"bare-secret-42", body);
+        assert_eq!(
+            got_sig, expected_sig,
+            "signature must be HMAC over the bare-domain secret (2-tier resolve), not the empty secret"
+        );
+
+        assert_eq!(
+            header_val("x-aimail-email:"),
+            Some("alice@corp.local".to_string()),
+            "X-AIMail-Email must carry the real recipient address: {head}"
+        );
     }
 }

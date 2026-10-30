@@ -1205,38 +1205,23 @@ async fn send_filtered_notification(
         filtered.len()
     );
 
-    // Insert into the database so the scheduler picks it up for SMTP delivery
-    let email_id = Uuid::new_v4().to_string();
-
-    // Build proper recipients JSON: {"to":[sender],"cc":[]}
-    let recipients_json = crate::core::email::storage::Recipients {
-        to: vec![sender.to_string()],
-        cc: vec![],
-        rcpt: vec![sender.to_string()],
-    }
-    .to_json();
-
-    if let Err(e) = email_factory
-        .create_outbound(
-            &email_id,
-            system_id,
-            auto_reply_from.as_str(),
-            &recipients_json,
-            &subject,
-            &body,
-            None, // endpoints
-            None, // attachments
-            None, // headers
-            1,    // max_attempts: notification emails need only 1 attempt
-        )
-        .await
+    // Enqueue via the shared helper: it resolves the webhook endpoint for
+    // internal recipients and routes them through the webhook processor,
+    // so the notification is not swallowed by SMTP loopback prevention.
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        config,
+        email_factory,
+        None,
+        Some(trigger_tx),
+        system_id,
+        auto_reply_from.as_str(),
+        sender,
+        &subject,
+        &body,
+    )
+    .await
     {
         warn!(operation = "notification_insert_failed", error = %e, "Failed to insert filtered-recipient email into database");
-    } else {
-        if let Err(e) = trigger_tx.try_send(email_id.clone()) {
-            warn!(operation="trigger_full_filtered_notif", error=%e,
-                  email_id=%email_id, "Trigger channel full for filtered notification");
-        }
     }
 }
 
@@ -1283,35 +1268,23 @@ async fn send_unregistered_notification(
         unregistered.len()
     );
 
-    let email_id = Uuid::new_v4().to_string();
-    let recipients_json = crate::core::email::storage::Recipients {
-        to: vec![sender.to_string()],
-        cc: vec![],
-        rcpt: vec![sender.to_string()],
-    }
-    .to_json();
-
-    if let Err(e) = email_factory
-        .create_outbound(
-            &email_id,
-            system_id,
-            auto_reply_from.as_str(),
-            &recipients_json,
-            &subject,
-            &body,
-            None, // endpoints
-            None, // attachments
-            None, // headers
-            1,
-        )
-        .await
+    // Enqueue via the shared helper: it resolves the webhook endpoint for
+    // internal recipients and routes them through the webhook processor,
+    // so the notification is not swallowed by SMTP loopback prevention.
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        config,
+        email_factory,
+        None,
+        Some(trigger_tx),
+        system_id,
+        auto_reply_from.as_str(),
+        sender,
+        &subject,
+        &body,
+    )
+    .await
     {
         warn!(operation = "unregistered_insert_failed", error = %e, "Failed to insert unregistered-address notification");
-    } else {
-        if let Err(e) = trigger_tx.try_send(email_id.clone()) {
-            warn!(operation="trigger_full_unregistered_notif", error=%e,
-                  email_id=%email_id, "Trigger channel full for unregistered notification");
-        }
     }
 }
 
@@ -1349,7 +1322,10 @@ fn normalize_thread_headers(headers: &mut std::collections::HashMap<String, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_thread_headers, resolve_fallback_domain};
+    use super::{
+        normalize_thread_headers, resolve_fallback_domain, send_filtered_notification,
+        send_unregistered_notification,
+    };
 
     #[test]
     fn thread_headers_fold_onto_record_keys() {
@@ -1436,6 +1412,160 @@ mod tests {
         assert_eq!(
             resolve_fallback_domain("alice@", Some("relay.example"), None),
             "relay.example"
+        );
+    }
+
+    // ─── P1-2 path a: notifications must route internal recipients through webhook ───
+
+    fn notify_env() -> (
+        crate::core::config::Config,
+        crate::core::email::factory::EmailFactory,
+    ) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-notify-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(
+            crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap(),
+        );
+        let ef = crate::core::email::factory::EmailFactory::new(
+            db,
+            std::path::PathBuf::from("/tmp/aimailgw-notify-att"),
+            std::sync::Arc::new(crate::base::strategy::BaseSystemStore),
+        );
+        let cfg = crate::core::config::Config::default();
+        (cfg, ef)
+    }
+
+    // P1-2 path a: filtered-recipient notification to an INTERNAL sender must
+    // carry the webhook endpoint + delivery_type:webhook header, otherwise the
+    // SMTP sender's loopback prevention silently drops it.
+    #[tokio::test]
+    async fn filtered_notification_internal_sender_carries_webhook_endpoint() {
+        let (cfg, ef) = notify_env();
+        ef.env_factory
+            .create_domain(
+                "d1",
+                "sys1",
+                "alice@test.com",
+                Some("http://hook.internal/hook"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_filtered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "alice@test.com",
+            &["bob@ext.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Filtered recipients"))
+            .expect("filtered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("internal notification must carry endpoints");
+        assert!(
+            eps.contains("http://hook.internal/hook"),
+            "endpoints must hold the webhook url: {eps}"
+        );
+        let headers: serde_json::Value =
+            serde_json::from_str(rec.headers.as_deref().expect("headers")).unwrap();
+        assert_eq!(
+            headers.get("delivery_type").and_then(|v| v.as_str()),
+            Some("webhook"),
+            "internal recipient must be routed through the webhook processor"
+        );
+    }
+
+    // P1-2 path a: a notification to an EXTERNAL sender keeps the MX envelope.
+    #[tokio::test]
+    async fn filtered_notification_external_sender_falls_back_to_mx() {
+        let (cfg, ef) = notify_env();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_filtered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "bob@ext.com",
+            &["ghost@example.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Filtered recipients"))
+            .expect("filtered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("external notification must carry the mx envelope");
+        assert!(
+            eps.contains("\"mx\""),
+            "external recipient must fall back to mx: {eps}"
+        );
+    }
+
+    // P1-2 path a: unregistered-address notification follows the same routing.
+    #[tokio::test]
+    async fn unregistered_notification_internal_sender_carries_webhook_endpoint() {
+        let (cfg, ef) = notify_env();
+        ef.env_factory
+            .create_domain(
+                "d1",
+                "sys1",
+                "alice@test.com",
+                Some("http://hook.internal/hook"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_unregistered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "alice@test.com",
+            &["nobody@test.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Unregistered addresses"))
+            .expect("unregistered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("internal notification must carry endpoints");
+        assert!(
+            eps.contains("http://hook.internal/hook"),
+            "endpoints must hold the webhook url: {eps}"
         );
     }
 }
