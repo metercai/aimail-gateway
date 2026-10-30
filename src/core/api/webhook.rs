@@ -2414,14 +2414,14 @@ mod tests {
             rec.endpoints
                 .as_deref()
                 .map(str::trim)
-                .map_or(true, |e| e == "{}" || e.is_empty()),
+                .is_none_or(|e| e == "{}" || e.is_empty()),
             "pull-mode recipient must not carry a fake push endpoint: {:?}",
             rec.endpoints
         );
         assert!(
             rec.endpoints
                 .as_deref()
-                .map_or(true, |e| !e.contains("http://")),
+                .is_none_or(|e| !e.contains("http://")),
             "pull-mode endpoint must not contain a url: {:?}",
             rec.endpoints
         );
