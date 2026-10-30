@@ -258,6 +258,21 @@ pub async fn batch_generate_codes(
     Ok(Json(serde_json::json!({ "raw_codes": raw_codes })))
 }
 
+/// HTTP status for an activation error message.
+///
+/// Single place for the contract: a code that was already consumed is `410 Gone`
+/// (the same answer the closed-source editions give), not a 5xx. Asserted by
+/// `activation_error_status_maps_double_spend_to_gone` below.
+fn activation_error_status(msg: &str) -> StatusCode {
+    if msg.contains("expired") || msg.contains("already redeemed") {
+        StatusCode::GONE
+    } else if msg.contains("bound to a different address") || msg.contains("invalid") {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
 pub async fn activate_address_handler(
     State(state): State<HttpState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -343,12 +358,7 @@ pub async fn activate_address_handler(
     .await
     .map_err(|e| {
         record_activation_failure(ip);
-        let code = match e.to_string().as_str() {
-            s if s.contains("expired") => StatusCode::GONE,
-            s if s.contains("bound to a different address") => StatusCode::FORBIDDEN,
-            s if s.contains("invalid") => StatusCode::FORBIDDEN,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
-        };
+        let code = activation_error_status(&e.to_string());
         (
             code,
             Json(ErrorResponse {
@@ -497,5 +507,45 @@ mod tests {
             .expect("key lookup")
             .expect("one key must exist");
         assert_eq!(key.scopes, vec!["agent".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod activation_status_tests {
+    use super::activation_error_status;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn activation_error_status_maps_double_spend_to_gone() {
+        // A second redeem of a consumed code must be 410, not 500 (v1.0.7 contract).
+        assert_eq!(
+            activation_error_status("activation code already redeemed"),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            activation_error_status("Activation code already claimed"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unknown wording must not silently become 410"
+        );
+    }
+
+    #[test]
+    fn activation_error_status_keeps_existing_mapping() {
+        assert_eq!(
+            activation_error_status("activation code expired"),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            activation_error_status("code bound to a different address"),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            activation_error_status("invalid code"),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            activation_error_status("boom"),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
