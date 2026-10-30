@@ -150,7 +150,7 @@ curl -sf http://127.0.0.1:8080/health
 | `timeout_secs` | `[webhook]` | Webhook 推送超时（秒） |
 | `max_attempts` | `[retry]` | 投递失败最大重试次数 |
 | `manager_default` | `[admin]` | agent 地址注册时，请求与系统都没提供 manager 的兜底安全员地址；默认空 |
-| `encryption` | `[storage]` | SQLCipher 页级加密，默认 `false`；两段式：先以 `false` 启动一次（生成 admin key），再改为 `true`，下次启动在原地迁移为加密库。构建不支持 SQLCipher 或 key 尚不存在时启动直接失败（不降级为明文） |
+| `encryption` | `[storage]` | SQLCipher 页级加密，默认 `false`；需用 `--features sqlcipher` 构建（默认构建无 SQLCipher，会拒绝 `true`）。两段式：先以 `false` 启动一次（生成 admin key），再改为 `true`，下次启动在原地迁移为加密库 |
 
 ### config.toml 示例
 

@@ -48,7 +48,7 @@ fn ensure_cipher_support(conn: &Connection) -> AppResult<()> {
         _ => Err(AppError::Config(
             "storage.encryption = true requires a SQLCipher build, but this binary has none \
              (PRAGMA key would be ignored and the database would be stored in PLAINTEXT). \
-             Rebuild with the bundled-sqlcipher feature, or set storage.encryption = false."
+             Rebuild with the `sqlcipher` feature, or set storage.encryption = false."
                 .to_string(),
         )),
     }

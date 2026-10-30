@@ -19,6 +19,17 @@ path = "src/bin/health.rs"
 name = "aimail_base"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Opt-in database-at-rest encryption (SQLCipher). It pulls a vendored OpenSSL
+# into the build, which the default musl/static release deliberately avoids:
+#
+#   cargo build --release --features sqlcipher
+#
+# With this feature off, `storage.encryption = true` is rejected at startup
+# instead of silently writing a plaintext database.
+sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }
@@ -50,7 +61,7 @@ thiserror = "2"
 async-trait = "0.1"
 
 # Database (SQLite with bundled libsqlite3)
-rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.24"
 

@@ -90,8 +90,7 @@ jobs:
             | `macos-arm64` | macOS 11+ (Apple Silicon) |
             | `windows-amd64` | Windows 10+ |
 
-            All TLS crypto is pure Rust (ring/rustls) — no OpenSSL required on any platform.
-            Basic edition: starts with a locally-issued admin key (printed at startup);
-            the activation-code flow belongs to the advanced edition.
+            All TLS is pure Rust (rustls/ring) and SQLite is bundled — no OpenSSL and no
+            system libraries are required on any platform.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

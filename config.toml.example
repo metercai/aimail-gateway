@@ -59,7 +59,13 @@ hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR na
 [storage]
 path = "./data"                           # data directory. DB → {path}/aimail.db, attachments → {path}/attachments/ (default ./data)
 # pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
-# encryption = false                      # SQLCipher page-level encryption (default false). Requires the SQLCipher build; the gateway refuses to start when encryption is on and the binary has no SQLCipher, or when no admin key exists yet (the key is derived from it) — start once with false, then flip to true and the database is migrated in place.
+# encryption = false                      # SQLCipher page-level encryption (default false).
+#                                         # Needs a binary built with `--features sqlcipher`; the
+#                                         # default build has no SQLCipher and refuses to start with
+#                                         # `true` (it would otherwise write a plaintext database).
+#                                         # The key is derived from the admin key file, so start once
+#                                         # with `false`, then flip to `true`: the existing database
+#                                         # is migrated in place on the next start.
 # admin_key_file = "/etc/aimail/admin.key"   # platform admin key file (default {path}/aimail.db.admin_key); keep it off the DB directory
 # system_key_file = "/etc/aimail/system.key" # agent-side system key file (default {path}/<system id>.system.key); written 0600
 # attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)
