@@ -1,6 +1,6 @@
 [package]
 name = "aimail-gateway"
-version = "1.0.6"
+version = "1.0.7"
 edition = "2021"
 description = "Lightweight SMTP ↔ HTTP bidirectional email gateway for hybrid human–agent group conversations."
 license = "MPL-2.0"
