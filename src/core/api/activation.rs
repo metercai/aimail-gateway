@@ -82,6 +82,17 @@ pub async fn activate_address_code(
             "activation code is bound to a different address".into(),
         ));
     }
+    // Atomically claim the code (UPDATE ... WHERE claimed = 0) so concurrent
+    // redemptions of the same code cannot both create keys.
+    let claimed = db
+        .claim_activation_code(&hash, email_address)
+        .await
+        .map_err(|e| crate::core::errors::AppError::Internal(format!("claim code: {e}")))?;
+    if !claimed {
+        return Err(crate::core::errors::AppError::Internal(
+            "activation code already redeemed".into(),
+        ));
+    }
 
     let (raw_key, key_hash, key_prefix) = {
         use rand::Rng;
@@ -449,5 +460,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(rec.scopes, vec!["agent".to_string()]);
+    }
+
+    // P1-1: concurrent redemptions of one code must yield exactly one key —
+    // the claim is an atomic UPDATE ... WHERE claimed = 0, so the loser
+    // gets affected=0 (or a None lookup if it reads after the claim) and is
+    // rejected instead of minting a second key. The exact loser message
+    // depends on interleaving, so we assert the invariant, not the wording.
+    #[tokio::test]
+    async fn concurrent_activation_of_same_code_yields_single_key() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-race", "race@test.com").await;
+
+        let (r1, r2) = tokio::join!(
+            activate_address_code(&db, "addr-test-race", "race@test.com", &factory),
+            activate_address_code(&db, "addr-test-race", "race@test.com", &factory),
+        );
+        let ok_count = [r1.as_ref(), r2.as_ref()]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+        assert_eq!(ok_count, 1, "exactly one concurrent redemption may succeed");
+        let loser = [r1, r2]
+            .into_iter()
+            .find_map(|r| r.err())
+            .expect("one side must fail");
+        let msg = loser.to_string();
+        assert!(
+            msg.contains("already redeemed") || msg.contains("invalid or expired"),
+            "loser must be rejected, got: {msg}"
+        );
+        // Exactly one key minted for the address.
+        let key = db
+            .get_api_key_by_email("race@test.com")
+            .await
+            .expect("key lookup")
+            .expect("one key must exist");
+        assert_eq!(key.scopes, vec!["agent".to_string()]);
     }
 }

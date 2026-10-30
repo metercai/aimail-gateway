@@ -1861,16 +1861,22 @@ impl Database {
     }
 
     /// Mark an activation code as claimed.
-    pub async fn claim_activation_code(&self, code_hash: &str, claimed_by: &str) -> AppResult<()> {
+    /// Returns true if the claim succeeded (code existed and was unclaimed),
+    /// false if the code was already claimed or no longer present.
+    pub async fn claim_activation_code(
+        &self,
+        code_hash: &str,
+        claimed_by: &str,
+    ) -> AppResult<bool> {
         let (code_hash, claimed_by) = (code_hash.to_string(), claimed_by.to_string());
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.call(move |conn| {
-            conn.execute(
+            let affected = conn.execute(
                 "UPDATE activation_codes SET claimed = 1, claimed_at = ?2, claimed_by = ?3
                  WHERE code_hash = ?1 AND claimed = 0",
                 params![code_hash, now, claimed_by],
             )?;
-            Ok(())
+            Ok(affected == 1)
         })
         .await
     }
