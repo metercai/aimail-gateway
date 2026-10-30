@@ -92,6 +92,8 @@ impl Database {
         if let Some(parent) = path_ref.parent() {
             // Only a directory we create ourselves is safe to lock down to 0700 —
             // an operator-supplied mount may be shared with other services.
+            // (cfg-gated: on Windows nothing below reads it, and -D warnings would fire.)
+            #[cfg(unix)]
             let existed = parent.exists();
             std::fs::create_dir_all(parent)?;
             #[cfg(unix)]

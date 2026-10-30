@@ -59,9 +59,40 @@ jobs:
       - name: Unit tests
         run: cargo test --locked
 
+  # ── Cross-platform check ───────────────────────────────────────────────
+  # Why a separate job: the Linux gate cannot see code that only breaks on
+  # Windows (cfg-gated variables, platform-only APIs). v1.0.7 shipped red on the
+  # windows leg for exactly that reason, after the Linux gate was green.
+  check-windows:
+    name: check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust (pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-1.98.1-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-1.98.1-cargo-
+
+      - name: Check (all targets, warnings are errors)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo check --locked --all-targets
+
   # ── Release build: v* tags only ──
   build:
-    needs: gate
+    needs: [gate, check-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     env:
@@ -125,7 +156,7 @@ jobs:
           path: aimail-gateway-${{ matrix.platform }}${{ matrix.ext }}
 
   release:
-    needs: [gate, build]
+    needs: [gate, check-windows, build]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
