@@ -276,8 +276,8 @@ pub(crate) async fn cascade_delete_attachment(
 /// references) using the shared cascade logic. Also deletes the email
 /// record itself.
 ///
-/// Public so the advanced edition's product-release path reuses the base
-/// deletion semantics instead of re-implementing them.
+/// Public so callers that release resources reuse these deletion semantics
+/// instead of re-implementing them.
 pub async fn cleanup_completed_email(
     attachment_factory: &AttachmentFactory,
     email_factory: &EmailFactory,

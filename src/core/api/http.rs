@@ -338,8 +338,7 @@ pub struct RegisterAddressQuery {
 ///
 /// Precedence (first non-empty wins, values trimmed):
 ///   1. explicit `manager_address` from the request body
-///   2. per-system default (`systems.manager_address`; the advanced edition
-///      persists the activation code's delivery address there at activation)
+///   2. per-system default (`systems.manager_address`, persisted at activation)
 ///   3. config-file default (`[admin] manager_default`, empty by default)
 ///
 /// `None` means "no manager source at all" — the address is registered
@@ -537,9 +536,9 @@ async fn register_address(
     }
 
     // ── Effective manager resolution (single authority, server-side) ──
-    // Precedence: explicit request value > per-system default (the advanced
-    // edition persists the activation code's delivery address at activation)
-    // > config-file default (AdminConfig.manager_default, empty by default).
+    // Precedence: explicit request value > per-system default (persisted at
+    // activation) > config-file default (AdminConfig.manager_default, empty by
+    // default).
     // Empty result = register without a manager row — never a value='' row.
     // The client-side hard gate (CLI register) still refuses zero-source
     // registrations; this only fills the documented defaults.
@@ -826,8 +825,8 @@ async fn list_system_domains(
     {
         Ok(records) => {
             // Enrich address-type records with their per-agent meta so the
-            // response matches the advanced edition (base previously returned
-            // empty manager_address / agent_signature / agent_persona).
+            // response carries manager_address / agent_signature / agent_persona
+            // instead of empty strings.
             let metas = state
                 .factories
                 .email
@@ -1201,8 +1200,8 @@ async fn rename_agent_address(
 ///
 /// `valid` is derived from the **real** schema: `system_domains` has one
 /// liveness column, `is_active` (`core/storage.rs` CREATE TABLE), and
-/// neither this repo nor `aimail-advanced` adds a validity/expiry column to
-/// it (advanced only ALTERs `ip_blacklist` / `systems` / `system_quotas` /
+/// no migration adds a validity/expiry column to it (the migrations in
+/// `core/storage.rs` only extend `ip_blacklist` / `systems` /
 /// `activation_codes`). So `valid = is_active` — there is no date column to
 /// consult. `exists` = a `system_domains` row whose `domain_addr` equals the
 /// probe AND belongs to the probed system.
@@ -1508,8 +1507,8 @@ pub async fn create_whitelist(
             )?;
             Some(api_key.id)
         };
-        // Whitelist per-key limit enforced by advanced edition
-        // via RouterHook middleware (POST /api/v1/whitelists intercept).
+        // Whitelist per-key limit is enforced by a request interceptor in builds
+        // that install one (POST /api/v1/whitelists intercept).
         match state
             .factories
             .email

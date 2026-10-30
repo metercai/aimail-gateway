@@ -129,7 +129,7 @@ impl Database {
         // the write failed immediately with SQLITE_BUSY, surfacing as a 500
         // `{"error":"DB error","detail":"internal error: database is locked"}`
         // on write endpoints. Reproduced deterministically by
-        // advanced/e2e-open-apply.py's renewal step (2026-09-21); `WAL` itself
+        // an e2e renewal scenario (2026-09-21); `WAL` itself
         // is a persistent database property, so only `busy_timeout` needs to be
         // (re)applied per connection.
         let manager = if let Some(key) = encryption_key {
@@ -265,7 +265,7 @@ impl Database {
             // transaction can succeed. Acquiring the write lock up front makes
             // the per-connection busy_timeout (5s) actually apply and removes
             // the read-then-upgrade failure (2026-09-21; reproduced by
-            // advanced/e2e-open-apply.py's renewal step under scheduler writes).
+            // a renewal scenario under scheduler writes, 2026-09-21).
             let tx = conn
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(|e| {
@@ -555,9 +555,8 @@ pub struct SystemRecord {
     pub is_active: bool,
     pub created_at: String,
     /// System-level default manager for agent address registration.
-    /// Base edition leaves it empty (resolved from config instead); the
-    /// advanced edition persists the activation code's delivery address
-    /// here at activation. Empty = no per-system default.
+    /// Persisted at activation (the activation code's delivery address); empty
+    /// = no per-system default, callers fall back to the config file.
     pub manager_address: String,
 }
 
@@ -1004,8 +1003,8 @@ COMMIT;
         Ok(())
     }
 
-    // Get the webhook config for a domain.
-    // get_webhook_for_domain moved to AdvancedStorage (queries systems table)
+    // NOTE: the per-domain webhook lookup lives in the storage layer that owns
+    // the `systems` table, not in this module.
 
     /// Get a system domain record by domain name (uses cache).
     pub async fn get_system_domain_by_name(
@@ -1640,8 +1639,8 @@ impl Database {
 
     /// Align an existing key's category + scopes in place (2026-09-26).
     ///
-    /// Used by the advanced standalone bootstrap to bring a legacy system-category admin
-    /// key up to the platform-category shape: the raw key value is untouched, so the
+    /// Used by bootstrap paths that must bring a legacy system-category admin key up
+    /// to the platform-category shape: the raw key value is untouched, so the
     /// credential seal (`key_hash`) and every secret derived from the raw key keep working.
     /// Only `category` and `scopes` change.
     pub async fn update_api_key_category_and_scopes(
@@ -1793,9 +1792,9 @@ impl Database {
         }).await
     }
 
-    /// Connection pool accessor for cross-edition consumers (aimail-advanced
-    /// AdvancedStorage wraps the base pool). Not dead code — consumed
-    /// cross-crate, which the compiler cannot see from this crate alone.
+    /// Connection pool accessor for out-of-tree consumers that wrap this pool.
+    /// Not dead code — consumed cross-crate, which the compiler cannot see from
+    /// this crate alone.
     #[allow(dead_code)]
     pub fn raw_pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
@@ -1876,7 +1875,7 @@ impl Database {
         .await
     }
 
-    /// Delete an activation code after use (base edition: no accumulation).
+    /// Delete an activation code after use (codes are single-use, no accumulation).
     pub async fn delete_activation_code(&self, code_hash: &str) -> AppResult<()> {
         let code_hash = code_hash.to_string();
         self.call(move |conn| {
@@ -1971,9 +1970,9 @@ impl Database {
     }
 
     /// Agent-scoped pending query: rows for ONE (system_id, email) only.
-    /// Ported verbatim from the advanced layer's email-dimension query —
-    /// the isolation key must match the storage filter exactly (§2.5:
-    /// scope IS the range; a key can only ever see its own address).
+    /// Email-dimension query: the isolation key must match the storage filter
+    /// exactly (§2.5: scope IS the range; a key can only ever see its own
+    /// address).
     pub async fn list_pending_by_email(
         &self,
         system_id: &str,
@@ -2010,8 +2009,8 @@ impl Database {
     }
 
     /// Agent-scoped ack: delete ONLY rows whose (system_id, email) match —
-    /// cross-address ids affect 0 rows (ownership check, mirrors the
-    /// advanced layer's ack semantics).
+    /// cross-address ids affect 0 rows (ownership check: ids outside the
+    /// (system_id, email) scope are simply not matched).
     pub async fn ack_pending_by_email(
         &self,
         system_id: &str,

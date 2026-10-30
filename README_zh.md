@@ -225,8 +225,7 @@ path = "./data"
 ### API 签名协议
 
 `/api/v1/*` 的每个请求都带身份头 + HMAC-SHA256 签名（方法/路径/时间戳/正文），明文 Key 不过网，
-旧的 `X-Api-Key` 头已不再接受。头名称、key 分级与待签名字符串规范见
-[docs/API-SIGNATURE-PROTOCOL.md](docs/API-SIGNATURE-PROTOCOL.md)。
+旧的 `X-Api-Key` 头已不再接受。头名称、key 分级与待签名字符串规范见签名协议参考文档（内部资料，可向维护者索取）。
 
 ### 环境变量覆盖
 

@@ -15,8 +15,8 @@ use crate::core::email::utils::strip_persona;
 use crate::core::storage::ApiKeyRecord;
 
 /// POST /api/v1/send — Create an outbound email record via API.
-/// Base edition: scope + bare-domain check only; the advanced wrapper
-/// layers system/admission/rate prechecks before the shared core.
+/// Scope + bare-domain check only; callers that need system/admission/rate
+/// prechecks do them before calling the shared core.
 pub async fn send_email(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
@@ -44,16 +44,15 @@ pub async fn send_email(
     send_email_core(state, api_key, req).await
 }
 
-/// Shared send core (no edition strategy gates).
-/// Base routes to it directly; the advanced wrapper does system/admission/rate
-/// prechecks first then calls this.
+/// Shared send core (no strategy gates). Callers that need
+/// system/admission/rate prechecks do them first, then call this.
 pub async fn send_email_core(
     state: State<HttpState>,
     api_key: Extension<ApiKeyRecord>,
     req: SendEmailRequest,
 ) -> Result<(StatusCode, Json<SendEmailResponse>), (StatusCode, Json<ErrorResponse>)> {
-    // Note: scope + bare-domain checks are done by the caller (base
-    // `send_email` or the advanced wrapper) before reaching this core.
+    // Note: scope + bare-domain checks are done by the caller before reaching
+    // this core.
 
     // ── 2. Validate sender matches API key (persona-aware) ──
 

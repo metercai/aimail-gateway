@@ -610,8 +610,9 @@ impl InboundInterceptor for A2aInterceptor {
             };
 
             // ── Lifecycle gate (D): archived / frozen boards stop here ──
-            // Base lifecycle: active → archived (terminal, no clear).
-            // Advanced adds frozen (system expired) / thawed on renewal.
+            // Lifecycle: active → archived (terminal, no clear). A suspension
+            // state (frozen) and thawing on renewal exist for deployments that
+            // expire systems.
             // Commands to a board past its active life are refused with a
             // log — the mail is not delivered (PassThrough) and no verb is
             // processed. Completed boards stay open (their verbs finish the

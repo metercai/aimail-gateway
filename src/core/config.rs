@@ -34,7 +34,7 @@ pub struct HttpConfig {
     #[serde(default = "default_http_listen_addr")]
     pub bind: String,
     /// Public hostname for the HTTP API (used for display and logging).
-    /// Kept in base edition for api_endpoint_url(); TLS moved to advanced.
+    /// Used by api_endpoint_url() for display and logging.
     #[serde(default)]
     pub hostname: Option<String>,
 }
@@ -325,8 +325,8 @@ pub struct AdminConfig {
     pub email: Option<String>,
     /// Global default manager for agent address registration, read from the
     /// config file. Empty (default) = no config-level default; the server then
-    /// falls back to the per-system default (advanced) and, if still empty,
-    /// registers the address without a manager row.
+    /// falls back to the per-system default and, if still empty, registers the
+    /// address without a manager row.
     #[serde(default)]
     pub manager_default: Option<String>,
 }

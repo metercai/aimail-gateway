@@ -204,7 +204,7 @@ impl Metrics {
         self.inner.started_at.elapsed().as_secs()
     }
 
-    /// Return the version string (e.g. "advanced-4457df2").
+    /// Return the version string (e.g. "gateway-4457df2").
     pub fn version(&self) -> &'static str {
         self.inner.version
     }

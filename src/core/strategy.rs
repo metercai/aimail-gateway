@@ -1,8 +1,8 @@
-// Strategy traits for edition-specific behavior injection.
+// Strategy traits: extension points that let a build inject behaviour without
+// forking the core (outbound transforms such as DKIM signing, delivery paths,
+// rate limiting, admission limits, extra HTTP routes).
 //
-// Advanced edition adds: SPF+PTR, an outbound message transform
-// (DKIM signing), MX direct delivery, GCRA rate limiting, DB-backed
-// admission limits, and extra HTTP routes (/metrics etc).
+// Every hook has a no-op default, so the shared core runs unchanged.
 
 use crate::core::email::storage::EmailRecord;
 use async_trait::async_trait;
@@ -10,9 +10,8 @@ use std::sync::Arc;
 
 // ── OutboundTransform ─────────────────────────────────────────────────
 
-/// Neutral outbound message transform hook. The base edition installs a
-/// no-op implementation; editions that modify outbound messages
-/// (e.g. DKIM signing) install their own.
+/// Outbound message transform hook. The default implementation is a no-op; a
+/// build that modifies outbound messages (e.g. DKIM signing) installs its own.
 #[async_trait]
 pub trait OutboundTransform: Send + Sync {
     /// Transform `raw` before sending. Return `None` to send the original.
@@ -33,8 +32,8 @@ pub trait OutboundTransform: Send + Sync {
 
 // ── AdmissionGate ─────────────────────────────────────────────────────
 
-/// Neutral per-system admission hook. The base edition installs a no-op
-/// implementation; editions with per-system limits install their own.
+/// Per-system admission hook. The default implementation is a no-op; a build
+/// with per-system limits installs its own.
 ///
 /// Every check must run BEFORE the corresponding create/send side effect;
 /// `Err` means reject (the caller maps it to the `quota_exceeded` /
@@ -53,7 +52,7 @@ pub trait AdmissionGate: Send + Sync {
 
 // ── RouterHook ────────────────────────────────────────────────────────
 
-/// Hooks into router construction to add edition-specific HTTP routes.
+/// Hooks into router construction to add extra HTTP routes.
 pub trait RouterHook: Send + Sync {
     fn mount(&self, router: axum::Router) -> axum::Router;
 }
@@ -61,7 +60,7 @@ pub trait RouterHook: Send + Sync {
 // ── InboundInterceptor ─────────────────────────────────────────────────
 
 /// Intercepts inbound emails BEFORE webhook delivery.
-/// Allows edition-specific handling (e.g. a2a_board commands).
+/// Allows implementation-specific handling (e.g. a2a_board commands).
 pub enum InterceptorDecision {
     /// Email was handled — skip webhook delivery entirely.
     Handled,
@@ -101,9 +100,8 @@ pub trait SystemStore: Send + Sync {
 
 // ── ExtensionProviders ─────────────────────────────────────────────
 
-/// Bundle of edition-specific extension points.
-/// Base edition: all fields default to no-op implementations.
-/// Advanced edition: each field can be replaced individually.
+/// Bundle of extension points. All fields default to no-op implementations and
+/// each can be replaced individually.
 pub struct ExtensionProviders {
     pub admission_gate: Arc<dyn AdmissionGate>,
     pub outbound: Arc<dyn OutboundTransform>,

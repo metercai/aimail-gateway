@@ -17,7 +17,7 @@ use super::batch::process_batch;
 use super::flows::immediate_forward;
 
 /// Scheduler that wakes on interval ticks and an mpsc trigger from SMTP receiver
-/// Returns an error if SMTP delivery cannot be initialized — fatal for base edition.
+/// Returns an error if SMTP delivery cannot be initialized — fatal.
 #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
 pub async fn run_retry_worker_with_trigger(
     email_factory: EmailFactory,
@@ -65,7 +65,7 @@ pub async fn run_retry_worker_with_trigger(
             Some(relay)
         }
         Err(e) => {
-            error!(operation="smtp_relay_fatal", %e, "SMTP relay not configured — base edition cannot deliver email");
+            error!(operation="smtp_relay_fatal", %e, "SMTP relay not configured — cannot deliver email");
             return Err(e);
         }
     };

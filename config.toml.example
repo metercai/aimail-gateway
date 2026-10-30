@@ -1,4 +1,4 @@
-# aimail-gateway example configuration (base edition, MPL-2.0)
+# aimail-gateway example configuration (MPL-2.0)
 # Copy to config.toml and edit for your environment:
 #
 #   cp config.toml.example config.toml

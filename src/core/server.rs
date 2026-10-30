@@ -159,7 +159,7 @@ pub fn spawn_http_single_port(
 ) -> JoinHandle<AppResult<()>> {
     let http_cfg = config.http.clone();
     tokio::spawn(async move {
-        // ── Plain HTTP (the advanced edition fronts this with its own TLS) ──
+        // ── Plain HTTP (a deployment that terminates TLS in-process wraps this) ──
         let listener = bind_with_reuseaddr(&http_cfg.bind)
             .await
             .unwrap_or_else(|e| panic!("HTTP bind failed on {}: {}", http_cfg.bind, e));
@@ -465,7 +465,7 @@ fn system_key_action(system_key_expected: bool, minted: bool) -> SystemKeyAction
 
 /// Write the provisioned keys to disk and return the one-time console banner.
 ///
-/// Shared by the base and advanced binaries so both announce the same thing: the
+/// Shared by every binary that provisions keys, so all of them announce the same thing: the
 /// gateway-side admin key file (never handed to agents) and the agent-side system key
 /// file (`<storage dir>/<system id>.system.key`). Colocation with the DB is warned about
 /// for both, for the same reason (a directory backup would leak the deployment root

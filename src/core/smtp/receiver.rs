@@ -32,7 +32,7 @@ pub fn temp_fail(msg: &str) -> Response {
     Response::custom(451, msg.to_string())
 }
 
-/// SMTP inbound handler (base edition): pure business logic, no security
+/// SMTP inbound handler: pure business logic, no transport security
 /// checks, no rate limiting, no quotas, no TLS.
 ///
 /// `ConnectionHandler` (impl `mailin::Handler`) is instantiated per connection
@@ -209,8 +209,8 @@ fn parse_bounce_dsn(raw: &[u8]) -> Option<BounceDsn> {
 }
 
 // ── Shared business core (inherent methods) ─────────────────────────────
-// Edition-independent business bodies that the trait impls above — and the
-// advanced edition's `AdvancedSmtpHandler` — delegate to.
+// Business bodies shared by every handler implementation: the trait impls
+// above and any extension handler delegate here.
 
 impl ConnectionHandler {
     /// Shared MAIL FROM business body.
@@ -277,8 +277,8 @@ impl ConnectionHandler {
 
 impl Handler for ConnectionHandler {
     fn helo(&mut self, _ip: IpAddr, _domain: &str) -> Response {
-        // Base edition: no EHLO/HELO domain validation. The advanced edition
-        // performs HELO policy checks in its own handler.
+        // No EHLO/HELO domain validation in this build. A handler that needs
+        // HELO policy checks implements them before delegating here.
         ok()
     }
 
@@ -555,10 +555,9 @@ impl ConnectionHandler {
     /// verification, MIME parse, attachment validation, recipient filtering,
     /// board learning, DB insert, attachment save, and scheduler trigger.
     ///
-    /// Called AFTER `check_deferred_whitelist` (and, for the advanced
-    /// edition, after its mid-pipeline security). `att_count` / `att_size`
-    /// are per-system attachment limits (advanced edition); `None`
-    /// falls back to the global config limits.
+    /// Called AFTER `check_deferred_whitelist` and any earlier pipeline
+    /// checks. `att_count` / `att_size` are optional per-system attachment
+    /// limits; `None` falls back to the global config limits.
     pub fn process_data_end_post(
         &mut self,
         att_count: Option<usize>,
@@ -659,7 +658,7 @@ impl ConnectionHandler {
             };
 
         // ── Attachment limit enforcement ───────────────────────────
-        // Per-system limits (advanced edition) override global config.
+        // Per-system limits (when provided) override the global config.
         if let Err(e) = EmailFactory::validate_attachments(
             &self.config.storage,
             &attachments,
@@ -1191,15 +1190,13 @@ impl ConnectionHandler {
         }
     }
 }
-/// Drive one inbound SMTP session with an edition-specific handler.
+/// Drive one inbound SMTP session with a pluggable handler.
 ///
-/// Generic over `H: mailin::Handler` so the base and advanced editions run
-/// independent handlers through the same transport loop:
-///   - base: `ConnectionHandler` (pure business logic, no TLS)
-///   - advanced: `AdvancedSmtpHandler` (business logic + its own security;
-///     TLS is added in a later phase by swapping this loop for its own)
+/// Generic over `H: mailin::Handler`, so different implementations run through
+/// the same transport loop; `ConnectionHandler` is the pure business-logic
+/// implementation used by this build.
 ///
-/// `handler` is built by the caller from its edition-specific dependencies.
+/// `handler` is built by the caller from its own dependencies.
 pub fn handle_smtp_session_blocking<H: Handler>(
     mut stream: std::net::TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -1343,14 +1340,13 @@ pub fn handle_smtp_session_blocking<H: Handler>(
                         }
                     }
                     crate::Action::NoReply => {}
-                    // Defensive: Action::UpgradeTls is unreachable in the base
-                    // edition — the session never enables STARTTLS, so mailin
-                    // keeps TlsState::Unavailable and a client STARTTLS line
-                    // gets a 503 from the FSM before it ever produces this
-                    // action. This arm only guarantees a clean disconnect
-                    // (never a plaintext downgrade) should the variant ever
-                    // surface; the advanced edition's own copy of this loop
-                    // replaces it with the real rustls handshake.
+                    // Defensive: Action::UpgradeTls is unreachable here — this
+                    // loop never enables STARTTLS, so mailin keeps
+                    // TlsState::Unavailable and a client STARTTLS line gets a
+                    // 503 from the FSM before this action can be produced.
+                    // This arm only guarantees a clean disconnect (never a
+                    // plaintext downgrade); a loop that performs TLS replaces
+                    // it with the real handshake.
                     crate::Action::UpgradeTls => {
                         tracing::warn!(
                             operation = "smtp_tls_unexpected",

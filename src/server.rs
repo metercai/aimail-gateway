@@ -35,7 +35,11 @@ impl Server {
         }
 
         let db = Database::open(&db_path, 25, db_key)?;
-        let metrics = Arc::new(Metrics::with_version(concat!("base-", env!("GIT_VERSION"))));
+        // Neutral prefix: the version string identifies the binary, not an edition.
+        let metrics = Arc::new(Metrics::with_version(concat!(
+            "gateway-",
+            env!("GIT_VERSION")
+        )));
 
         Ok(Self {
             config,
@@ -130,8 +134,8 @@ impl Server {
             http_state.clone(),
         ));
         let router_hook: Arc<dyn RouterHook> = base_hook;
-        // Base SMTP inbound handler: pure business logic, no security, no
-        // rate/limits, no TLS (the base edition stays free of those concerns).
+        // SMTP inbound handler: pure business logic — no security layer, no
+        // rate limits, no TLS (those concerns live outside this path).
         let smtp_handler = aimail_base::core::smtp::receiver::ConnectionHandler::new(
             Arc::new(config.clone()),
             http_state.factories.email.clone(),

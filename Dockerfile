@@ -2,18 +2,36 @@
 # GIT_COMMIT drives the version string embedded by build.rs (there is no .git in
 # the build context, so it must be passed explicitly).
 ARG GIT_COMMIT=unknown
+# Restricted build environments: point APT_MIRROR at a reachable Debian mirror,
+# e.g. --build-arg APT_MIRROR=mirrors.aliyun.com (default = the image's own sources).
+ARG APT_MIRROR=
 FROM rust:slim-bookworm AS builder
 
-# cc/gcc ship with the Rust image; rusqlite is compiled with bundled SQLCipher,
-# whose vendored OpenSSL needs perl + make.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config perl make \
+# The Rust image ships cc/gcc and only perl-base (no FindBin); the vendored
+# OpenSSL build needs the full `perl` package plus make. pkg-config keeps
+# openssl-sys happy on hosts that provide a system OpenSSL.
+RUN if [ -n "$APT_MIRROR" ]; then \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+            /etc/apt/sources.list.d/debian.sources 2>/dev/null || \
+        sed -i "s|deb.debian.org|$APT_MIRROR|g; s|security.debian.org|$APT_MIRROR|g" \
+            /etc/apt/sources.list 2>/dev/null || true; \
+    fi \
+    && apt-get update && apt-get install -y --no-install-recommends make pkg-config perl \
     && rm -rf /var/lib/apt/lists/*
+
+# build.rs reads GIT_VERSION (no .git in the context) — without this the version
+# string would fall back to "unknown". ARG must be re-declared inside the stage:
+# a global ARG is not visible to ENV after FROM.
+ARG GIT_COMMIT
+ENV GIT_VERSION=$GIT_COMMIT
 
 WORKDIR /build
 
-# Dependency layer first: source edits below do not invalidate it.
+# Dependency layer first: source edits below do not invalidate it. `vendor/` must
+# come along — `mailin` is a path dependency and cargo fails to resolve the
+# workspace without it even for the warm-up build.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 RUN mkdir -p src/bin \
     && : > src/lib.rs \
     && echo 'fn main() {}' > src/main.rs \

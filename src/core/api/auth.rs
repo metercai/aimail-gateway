@@ -57,8 +57,9 @@ fn unauthorized(err: &str) -> Response {
 /// Canonical v1 API signature base string:
 /// `METHOD\npath_and_query\ntimestamp\nsha256_hex(body)` (no trailing newline).
 ///
-/// **Single implementation**: both the base middleware and advanced (pull_intercept) must call it; no re-implementations
-/// (on 2026-09-22 an advanced-side copy caused a "sealing refactor missed one spot" => the agent's own pull stopped working).
+/// **Single implementation**: every request path (inline middleware and the pull
+/// intercept) must call it; no re-implementations (on 2026-09-22 a second copy
+/// missed one spot of a sealing refactor and the agent's own pull stopped working).
 pub fn signature_base(method: &str, path: &str, timestamp: &str, body: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(body);
@@ -86,7 +87,8 @@ pub fn compute_api_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Request signature verification: **single implementation** (shared by the base middleware and advanced `pull_intercept`; no re-implementations).
+/// Request signature verification: **single implementation** (shared by the inline
+/// middleware and the pull intercept; no re-implementations).
 ///
 /// Iterate candidate records: stored material may be sealed (`v1:`) => first unseal it via `seal::signing_material` back to
 /// `sha256(raw_key)`, then compare against `signature_base(...)` with a constant-time HMAC; on a hit return that record

@@ -96,7 +96,7 @@ impl BoardRegistry {
         );
     }
 
-    /// Drop a board address (advanced: system released / board cleared).
+    /// Drop a board address (system released / board cleared).
     pub fn remove(&self, board_email: &str) {
         let mut map = self.entries.write().unwrap();
         map.remove(board_email.to_lowercase().as_str());

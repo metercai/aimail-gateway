@@ -151,7 +151,7 @@ pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Set a board's status (advanced lifecycle: freeze / thaw).
+/// Set a board's status (lifecycle transitions such as freeze / thaw).
 /// Returns true if a board row was updated.
 pub fn set_board_status(conn: &Connection, board_id: &str, status: &str) -> AppResult<bool> {
     let n = conn.execute(
@@ -161,8 +161,8 @@ pub fn set_board_status(conn: &Connection, board_id: &str, status: &str) -> AppR
     Ok(n > 0)
 }
 
-/// Summary of one board row (used by the advanced expiry sweep to
-/// reconcile board status with system expiry state).
+/// Summary of one board row (used by sweeps that reconcile board status with
+/// system expiry state).
 #[derive(Debug, Clone)]
 pub struct BoardRef {
     pub id: String,
@@ -225,8 +225,8 @@ pub fn list_boards(storage_path: &str) -> AppResult<Vec<BoardRef>> {
     Ok(out)
 }
 
-/// Delete a board's data file (and its WAL/SHM sidecars).
-/// Used by the advanced release path — clears a board's occupied resources.
+/// Delete a board's data file (and its WAL/SHM sidecars), releasing a board's
+/// occupied resources.
 pub fn delete_board_file(storage_path: &str, board_id: &str) -> AppResult<()> {
     let dir = std::path::Path::new(storage_path).join("a2a_board");
     let db_path = dir.join(format!("{board_id}.db"));

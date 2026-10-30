@@ -42,8 +42,8 @@ pub fn strip_persona(address: &str) -> (String, String) {
 }
 
 /// Detect if text contains CJK characters (unified ideographs + CJK
-/// punctuation + fullwidth forms). Same ranges as the advanced-edition
-/// notification templates; shared here so both base and advanced can reuse it.
+/// punctuation + fullwidth forms). The same ranges the notification templates
+/// use, shared here so every caller agrees on what counts as CJK.
 pub fn has_cjk(text: &str) -> bool {
     text.chars()
         .any(|c| matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3000}'..='\u{303f}' | '\u{ff00}'..='\u{ffef}'))

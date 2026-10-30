@@ -429,7 +429,8 @@ impl EnvFactory {
     }
 
     /// Check if a value is whitelisted for a given scope.
-    /// Uses DomainResolver to determine lookup keys (base=exact, advanced=fallback).
+    /// Uses DomainResolver to determine lookup keys (exact match first, then the
+    /// resolver's fallback rules).
     pub async fn check_whitelisted(
         &self,
         domain_addr: &str,

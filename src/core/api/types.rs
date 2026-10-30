@@ -408,8 +408,8 @@ pub struct SystemResponse {
     pub limits_config: Option<String>,
     pub is_active: bool,
     pub created_at: String,
-    /// Per-system default manager for agent address registration (advanced
-    /// edition: the activation code's delivery address; base: empty).
+    /// Per-system default manager for agent address registration (persisted at
+    /// activation; empty when the system has no default).
     pub manager_address: String,
 }
 

@@ -230,8 +230,8 @@ path = "./data"
 Every `/api/v1/*` request carries an identity header plus an HMAC-SHA256 signature
 (method, path, timestamp, body) — the raw API key never crosses the wire, and the old
 `X-Api-Key` header is no longer accepted. Header names, key tiers and the canonical
-string-to-sign are specified in
-[docs/API-SIGNATURE-PROTOCOL.md](docs/API-SIGNATURE-PROTOCOL.md).
+string-to-sign are specified in the signature-protocol reference, which is kept
+internal (available from the maintainers on request).
 
 ### Environment Variable Overrides
 

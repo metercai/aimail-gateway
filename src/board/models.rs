@@ -18,9 +18,9 @@ pub struct Board {
     pub criteria_confirmed_at: Option<String>,
     pub created_at: String,
     pub completed_at: Option<String>,
-    /// Owning system id (orchestrator's system at creation). Legacy boards
-    /// have NULL. Advanced uses this to freeze/unfreeze/clear a system's
-    /// boards on product-expiry transitions.
+    /// Owning system id (orchestrator's system at creation). Legacy boards have
+    /// NULL. Used by sweeps that freeze/unfreeze/clear a system's boards when
+    /// its service state changes.
     pub system_id: Option<String>,
 }
 
@@ -34,9 +34,9 @@ pub enum BoardStatus {
     Completed,
     #[serde(rename = "archived")]
     Archived,
-    /// Service frozen (advanced edition only — product validity expired).
-    /// Frozen boards reject commands; they thaw back to Active on renewal.
-    /// Base edition never creates or checks this state.
+    /// Service suspended (validity expired). Suspended boards reject commands;
+    /// they return to Active when the suspension is lifted. This build never
+    /// creates the state, but must round-trip it.
     #[serde(rename = "frozen")]
     Frozen,
 }

@@ -1,6 +1,6 @@
 pub mod daemon;
 pub mod graceful;
-// Shared CLI utilities — used by both gateway and advanced binaries.
+// Shared CLI utilities.
 
 use std::path::PathBuf;
 #[cfg(not(unix))]
@@ -15,7 +15,7 @@ use crate::core::errors::AppResult;
 /// aimail-gateway.pid. On unix without TMPDIR, temp_dir() == /tmp (the original literal
 /// "/tmp/aimail-gateway.pid" behaves byte-for-byte the same); on Windows => %LOCALAPPDATA%\Temp (writable;
 /// a /tmp literal resolves to C:\tmp on that platform, which does not exist => os error 3).
-/// Deref to PathBuf: existing &PathBuf call sites in both gateway/advanced repos need zero changes.
+/// Deref to PathBuf so existing &PathBuf call sites need zero changes.
 #[derive(Clone, Debug)]
 pub struct PidFile(PathBuf);
 

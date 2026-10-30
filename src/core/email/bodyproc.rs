@@ -375,8 +375,8 @@ fn is_disclaimer_continuation(line: &str) -> bool {
 
 /// Assemble layers into a single markdown body with quote markers.
 /// Labels adapt to the body's language (`cn`): Chinese bodies get
-/// Chinese labels, everything else English — same has_cjk convention as
-/// the advanced-edition notification templates.
+/// Chinese labels, everything else English — the same has_cjk convention the
+/// notification templates use.
 fn assemble_layers(layers: &[Layer], cn: bool) -> String {
     if layers.is_empty() {
         return String::new();

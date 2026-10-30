@@ -2,8 +2,8 @@
 //!
 //! Single-process premise: the writer (webhook insert, `core/api/webhook.rs`)
 //! and the waiters (pull handlers, SSE streams) share one process and one
-//! SQLite file — the advanced layer embeds the gateway as a base library,
-//! so there is exactly one writer task and any number of waiter tasks.
+//! SQLite file — the process embedding this library keeps exactly one writer
+//! task and any number of waiter tasks.
 //! An in-process signal is sufficient; no DB polling, no PG LISTEN, no
 //! Redis. (Multi-instance deployments are not the current shape; if they
 //! arrive, this module's backend changes — the waiter protocol below does

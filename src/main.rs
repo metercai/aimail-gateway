@@ -138,7 +138,7 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     let admin_key = keys.admin_key.clone();
 
     // ── Persist both keys + announce the agent-side one (2026-09-26 owner ruling) ──
-    // Shared helper (base + advanced) so both binaries behave and speak identically:
+    // Shared helper so every binary that provisions keys behaves and speaks identically:
     // the admin key stays on the gateway side, the system key is what an agent host uses
     // (`aimail install -k`).
     let banner = aimail_base::core::server::persist_provisioned_keys(

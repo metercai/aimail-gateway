@@ -1,4 +1,4 @@
-// Base edition: no-op strategy implementations.
+// Default (no-op) strategy implementations.
 // Every trait method is a safe passthrough.
 
 use async_trait::async_trait;
@@ -55,8 +55,8 @@ impl SystemStore for BaseSystemStore {
             limits_config: None,
             is_active: true,
             created_at: String::new(),
-            // Base edition has no per-system default; the server falls back
-            // to the config-file default (AdminConfig.manager_default).
+            // No per-system default here; the server falls back to the
+            // config-file default (AdminConfig.manager_default).
             manager_address: String::new(),
         }))
     }
