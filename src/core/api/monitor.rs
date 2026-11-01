@@ -18,6 +18,7 @@ pub async fn health_check(state: axum::extract::State<HttpState>) -> Json<Health
         version: state.metrics.version(),
         owner_email: state.config.admin.email.clone(),
         smtp_port: state.config.smtp.parsed_bind().1,
+        health_extra: state.health_extra.clone(),
     })
 }
 
@@ -280,6 +281,10 @@ pub struct HealthStatus {
     /// SMTP listen port (from `[smtp] bind`). Clients use this to reach the
     /// gateway's SMTP listener instead of assuming the protocol default 25.
     pub smtp_port: u16,
+    /// Edition-specific extras (e.g. the advanced machine-binding report).
+    /// Serialized as an object merged into the response when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_extra: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -296,9 +301,31 @@ mod health_status_tests {
             version: "base",
             owner_email: None,
             smtp_port: 12526,
+            health_extra: None,
         };
         let v: serde_json::Value = serde_json::to_value(&h).expect("serialize");
         assert_eq!(v.get("smtp_port").and_then(|x| x.as_u64()), Some(12526));
         assert_eq!(v.get("status").and_then(|x| x.as_str()), Some("ok"));
+        // health_extra must be absent (not null) when the edition adds nothing.
+        assert!(v.get("health_extra").is_none(), "{v}");
+    }
+
+    #[test]
+    fn health_status_carries_edition_extras() {
+        let h = HealthStatus {
+            status: "ok",
+            uptime_secs: 3,
+            version: "adv",
+            owner_email: None,
+            smtp_port: 25,
+            health_extra: Some(serde_json::json!({ "machine_binding": "hardware" })),
+        };
+        let v: serde_json::Value = serde_json::to_value(&h).expect("serialize");
+        assert_eq!(
+            v.get("health_extra")
+                .and_then(|x| x.get("machine_binding"))
+                .and_then(|x| x.as_str()),
+            Some("hardware")
+        );
     }
 }

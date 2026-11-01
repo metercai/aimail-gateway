@@ -232,6 +232,9 @@ pub struct HttpState {
     /// long-poll paths (409 occupied otherwise). Shared across handler
     /// clones (Arc-backed).
     pub delivery_slot: SingleSlotLock,
+    /// Optional extra `/health` fields (edition-specific, e.g. the
+    /// advanced machine-binding derivation report). `None` → omitted.
+    pub health_extra: Option<serde_json::Value>,
 }
 
 // ── First-delivery dispatch (single authority) ──────────────────────

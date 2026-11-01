@@ -152,6 +152,7 @@ impl Server {
                 4096,
             ),
             delivery_slot: aimail_base::core::api::types::SingleSlotLock::new(),
+            health_extra: None,
         };
 
         // ── Register interceptors (a2a_board, [WHOAMI]) ──

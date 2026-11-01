@@ -3874,6 +3874,7 @@ mod tests {
             dns_resolver: None,
             send_deduper: SendDeduper::new(Duration::from_secs(60), 64),
             delivery_slot: SingleSlotLock::new(),
+            health_extra: None,
         };
         (db, state, trigger_rx, dir)
     }
