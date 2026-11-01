@@ -31,7 +31,6 @@ pub struct EnvFactory {
     /// D3: `[webhook] allow_private_targets` policy — refused by default;
     /// read at registration (delivery re-checks with the same value).
     webhook_allow_private: bool,
-    allow_unidentified_keys: bool,
 }
 
 impl EnvFactory {
@@ -222,7 +221,6 @@ impl EnvFactory {
             signature_cache: None,
             last_used_tracker: Arc::new(LastUsedTracker::new()),
             webhook_allow_private: false,
-            allow_unidentified_keys: false,
         }
     }
 
@@ -240,20 +238,6 @@ impl EnvFactory {
     pub fn with_webhook_policy(mut self, allow_private: bool) -> Self {
         self.webhook_allow_private = allow_private;
         self
-    }
-
-    /// D1: attach the identity policy from `[api] allow_unidentified_keys`.
-    /// `true` re-enables the degraded empty-identity fallback (SQL-capped at
-    /// 64 candidates); `false` (default) refuses empty identities with
-    /// 401 `identity_required` before any body read or database access.
-    pub fn with_identity_policy(mut self, allow_unidentified: bool) -> Self {
-        self.allow_unidentified_keys = allow_unidentified;
-        self
-    }
-
-    /// D1: whether the degraded empty-identity fallback is enabled.
-    pub fn allows_unidentified_keys(&self) -> bool {
-        self.allow_unidentified_keys
     }
 
     /// Access the board registry (RCPT substantive check).

@@ -678,7 +678,7 @@ impl MailFactories {
         storage_path: &std::path::Path,
         system_store: Arc<dyn SystemStore>,
     ) -> Self {
-        Self::new_with_signature_auth(db, storage_path, system_store, 120, false, false, false)
+        Self::new_with_signature_auth(db, storage_path, system_store, 120, false, false)
     }
 
     /// Like `new`, but wires the D9 API signature freshness window and
@@ -692,7 +692,6 @@ impl MailFactories {
         signature_window_secs: u64,
         replay_protection: bool,
         webhook_allow_private: bool,
-        allow_unidentified_keys: bool,
     ) -> Self {
         let attachments_dir = storage_path.join("attachments");
         let board_registry = Arc::new(crate::board::registry::BoardRegistry::new());
@@ -703,8 +702,7 @@ impl MailFactories {
             .env_factory
             .with_signature_auth(signature_window_secs, replay_protection)
             .with_board_registry(board_registry)
-            .with_webhook_policy(webhook_allow_private)
-            .with_identity_policy(allow_unidentified_keys);
+            .with_webhook_policy(webhook_allow_private);
         Self {
             email: Arc::new(email_factory),
             attachment: Arc::new(AttachmentFactory::new(db, attachments_dir)),

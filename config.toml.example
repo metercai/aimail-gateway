@@ -49,7 +49,6 @@ hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR na
 [api]
 # signature_window_secs = 120     # freshness window for X-Api-Timestamp, ±window in seconds (default 120; was a hardcoded 300). Client/server clocks must agree within ±window (NTP both sides).
 # replay_protection = false       # remember verified signatures (identity+timestamp+method+path, TTL=window, cap 10 000); an in-window re-send → 409 "replayed". Default false (window-only, pre-D9 behaviour).
-# allow_unidentified_keys = false  # D1: allow an empty/missing X-Api-Identity to fall back to a 64-key candidate scan. Default false — such requests 401 identity_required before any body read or database access, and a valid identity reaches all of its keys (no silent 64-cap).
 
 [retry]
 # max_attempts = 3                        # max delivery attempts before NDR (default 3)

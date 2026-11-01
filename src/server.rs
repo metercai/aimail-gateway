@@ -112,16 +112,6 @@ impl Server {
             );
         }
 
-        if config.api.allow_unidentified_keys {
-            info!(
-                operation = "unidentified_keys_enabled",
-                "D1: [api] allow_unidentified_keys = true — requests with an empty \
-                 X-Api-Identity fall back to a 64-key candidate scan; without this flag \
-                 they are refused with 401 identity_required before any body read or \
-                 database access."
-            );
-        }
-
         let db_arc = Arc::new(db.clone());
 
         let system_store: Arc<dyn aimail_base::core::strategy::SystemStore> =
@@ -140,7 +130,6 @@ impl Server {
                 config.api.signature_window_secs,
                 config.api.replay_protection,
                 config.webhook.allow_private_targets,
-                config.api.allow_unidentified_keys,
             ),
             metrics: metrics.clone(),
             config: config.clone(),

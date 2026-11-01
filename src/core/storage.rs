@@ -1771,10 +1771,8 @@ impl Database {
     /// Candidate keys for signature verification, by caller identity.
     ///
     /// Identity is the key's `domain_addr` (address-scoped keys) or its
-    /// `system_id` (system-level keys). An empty identity (D1 degraded mode,
-    /// `[api] allow_unidentified_keys`) matches active, unexpired keys **capped
-    /// at 64 in SQL** — the full table never enters memory, and the cap is
-    /// enforced by the query, not by a silent `.take()` after the fact.
+    /// `system_id` (system-level keys). It must be non-empty — the auth layer
+    /// refuses empty identities before any database access (D1).
     ///
     /// The returned `key_hash` (= sha256 of the raw key) is the HMAC secret:
     /// the client derives the same value offline, so the raw key never
@@ -1783,14 +1781,12 @@ impl Database {
         let identity = identity.to_string();
         self.call(move |conn| {
             let mut results = Vec::new();
+            // Fail closed: an empty identity matches no key. Without this
+            // guard, `domain_addr = ''` / `system_id = ''` would match every
+            // system-level key (their domain_addr is empty) — a full-table
+            // scan by brute force. The auth layer already refuses empty
+            // identities before any DB access; this is the second line.
             if identity.is_empty() {
-                // D1: cap the degraded scan in SQL — never load the whole
-                // key table into memory for an unidentified caller.
-                let mut stmt = conn.prepare(
-                    "SELECT id, system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category, activation_code_hash, activation_expires_at, claimed_at FROM api_keys WHERE is_active = 1 AND (expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now')) LIMIT 64",
-                )?;
-                let rows = stmt.query_map([], api_key_row)?;
-                for row in rows { results.push(row?); }
                 return Ok(results);
             }
             let mut stmt = conn.prepare(

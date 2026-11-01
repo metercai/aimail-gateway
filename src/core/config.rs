@@ -43,12 +43,6 @@ pub struct ApiConfig {
     /// window is rejected with 409 `replayed`. Default false — window-only
     /// checking (pre-D9 behaviour, tighter window).
     pub replay_protection: bool,
-    /// D1: allow requests with an empty/missing `X-Api-Identity` to fall back
-    /// to a candidate scan (capped at 64 keys in SQL). Default false — such
-    /// requests are refused with 401 `identity_required` before any body read
-    /// or database access, which also fixes the silent-drop of the 65th key
-    /// of a bulk batch (the normal identity branch is uncapped).
-    pub allow_unidentified_keys: bool,
 }
 
 impl Default for ApiConfig {
@@ -56,7 +50,6 @@ impl Default for ApiConfig {
         Self {
             signature_window_secs: 120,
             replay_protection: false,
-            allow_unidentified_keys: false,
         }
     }
 }

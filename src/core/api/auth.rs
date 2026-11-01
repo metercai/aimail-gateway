@@ -65,13 +65,6 @@ fn window_expired(ts_ms: u64, now_ms: u64, window_ms: u64) -> bool {
     ts_ms.abs_diff(now_ms) > window_ms
 }
 
-/// D1: cap on candidate keys for the **degraded** empty-identity fallback
-/// (`[api] allow_unidentified_keys = true`). Enforced in SQL
-/// (storage `list_api_keys_by_identity`), so the full table never enters
-/// memory. The normal identity branch is uncapped — a caller with a valid
-/// identity must be able to reach every one of its keys.
-pub const EMPTY_IDENTITY_CANDIDATE_CAP: usize = 64;
-
 fn unauthorized(err: &str) -> Response {
     let err_body = serde_json::to_string(&ErrorResponse {
         error: err.to_string(),
@@ -176,22 +169,23 @@ pub async fn auth_layer(
     next: Next,
     caps: BodyCaps,
 ) -> Response {
-    // `X-Api-Identity` is optional: curl drops empty-valued headers on the
-    // wire, so a *missing* header must mean the same as an empty one
-    // (empty-identity fallback — the signature itself selects the key).
+    // `X-Api-Identity` is a routing header, NOT part of the signature base
+    // (see `signature_base`). curl drops empty-valued headers on the wire, so a
+    // *missing* header is read as an empty one — and an empty identity is a
+    // hard 401 below (there is no fallback that lets the signature pick a key).
     let identity = req
         .headers()
         .get("X-Api-Identity")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_default();
-    // D1: an empty identity (missing or empty `X-Api-Identity`) used to fall
-    // back to a full-table scan of every API key. That is a scan proportional
-    // to total keys (not the caller's own), and it made the 65th key of a
-    // bulk-issued batch permanently unauthenticatable. Refuse it before
-    // touching the body or the database — 401 `identity_required` — unless
-    // the operator explicitly enabled the degraded mode.
-    if identity.is_empty() && !env_factory.allows_unidentified_keys() {
+    // D1: an empty identity (missing or empty `X-Api-Identity`) is refused
+    // with 401 `identity_required` — before touching the body or the database.
+    // The legacy fallback (scan every active key, let the signature select
+    // one) was a full-table scan proportional to the total key count, and a
+    // security hole: the key was resolved by brute force, not by identity.
+    // There is no degraded mode; the identity is always required.
+    if identity.is_empty() {
         return unauthorized("identity_required: X-Api-Identity must name a system or address");
     }
 
@@ -1024,7 +1018,7 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-    // ── D1: identity_required + allow_unidentified_keys + LIMIT 64 ──
+    // ── D1: identity_required (always) ──
 
     #[tokio::test]
     async fn d1_empty_identity_refused_without_db_or_body() {
@@ -1064,7 +1058,7 @@ mod tests {
             Response::new(Body::from("ok"))
         }
 
-        // (a) Default (allow_unidentified_keys = false): empty identity is
+        // (a) Default: empty identity is
         //     refused with 401 identity_required — before any DB access.
         let ef = crate::core::factory::EnvFactory::new(
             arc.clone(),
@@ -1129,7 +1123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn d1_degraded_mode_scans_capped_and_valid_identity_reaches_key_100() {
+    async fn d1_empty_identity_matches_no_key_and_valid_identity_reaches_key_100() {
         use crate::core::storage::Database;
 
         let dir = std::env::temp_dir().join(format!("aimailgw-d1b-{}", std::process::id()));
@@ -1138,25 +1132,16 @@ mod tests {
         let db = Database::open(dir.join("aimail.db"), 4, None).unwrap();
         let arc = std::sync::Arc::new(db);
 
-        // (a) Degraded mode: the SQL cap is 64 — seeding 70 active keys must
-        //     return exactly 64 candidates, not 70. (Each key needs its own
-        //     (system_id, domain_addr) — the table's unique constraint.)
-        for i in 0..70u32 {
-            let kh = format!("{:064x}", i);
-            arc.insert_api_key(
-                &format!("bulk{i}"),
-                &format!("bulk{i}@t.com"),
-                &kh,
-                &format!("p{i:04}"),
-                &["agent".to_string()],
-                None,
-                "agent",
-            )
-            .await
-            .unwrap();
-        }
+        // (a) An empty identity matches nothing (fail closed). The auth layer
+        //     refuses it with 401 identity_required before any DB access, and
+        //     the storage layer returns an empty candidate set as a second
+        //     line of defence — never a full-table scan.
         let all = arc.list_api_keys_by_identity("").await.unwrap();
-        assert_eq!(all.len(), 64, "degraded scan must be SQL-capped at 64");
+        assert_eq!(
+            all.len(),
+            0,
+            "empty identity must match no key (no full-table scan)"
+        );
 
         // (b) Normal identity: all 100 keys of one identity must be
         //     reachable (no silent .take(64) drop).
