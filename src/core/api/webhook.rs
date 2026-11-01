@@ -626,7 +626,7 @@ fn payload_terminator(line: &str) -> bool {
     false
 }
 
-/// A line that is nothing but a `<...>` placeholder (e.g. `<出站邮件签名>`):
+/// A line that is nothing but a `<...>` placeholder (e.g. `<outbound signature>`):
 /// draft boilerplate, never real content.
 fn is_placeholder_line(line: &str) -> bool {
     line.len() >= 2 && line.starts_with('<') && line.ends_with('>')
@@ -1810,7 +1810,7 @@ mod tests {
 
     #[test]
     fn match_payload_transfer_body_missing_semantic_is_err() {
-        // body names both addresses but lacks the 'change manager'/'更换安全员' marker
+        // body names both addresses but lacks the 'change manager' marker (or its Chinese synonym)
         let rec = transfer_record(
             &["newmgr@ext.com"],
             &["agent@test.com"],

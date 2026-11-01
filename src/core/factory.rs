@@ -298,7 +298,7 @@ impl EnvFactory {
     /// For email-address domains (containing '@'), also upsert into domain_addr_meta
     /// as the authoritative per-agent webhook store.
     ///
-    /// Re-registration semantics (2026-10-13, owner ruling "复用注册(重发地址)"):
+    /// Re-registration semantics (2026-10-13, owner ruling: reuse an existing registration):
     /// re-registering the same domain **within the same system** is an idempotent
     /// upsert — it refreshes webhook_url / webhook_secret / manager (this is how
     /// the inbound-up feedback loop pushes the confirmed inbound URL back to the
@@ -972,7 +972,7 @@ mod tests {
         );
     }
 
-    // 2026-10-13: re-registering (复用注册 / 重发地址) the same domain within
+    // 2026-10-13: re-registering the same domain within
     // the same system must be an idempotent upsert — this is the mechanism
     // the inbound-up feedback loop uses to push the confirmed inbound URL
     // back to the gateway. A cross-system re-registration stays a conflict.
