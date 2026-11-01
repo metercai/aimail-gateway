@@ -1,0 +1,396 @@
+use serde::{Deserialize, Serialize};
+
+// ── Board ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Board {
+    pub id: String,
+    pub short_id: String,
+    pub board_email: String,
+    pub goal: Option<String>,
+    pub status: BoardStatus,
+    pub output_task_id: Option<String>,
+    pub plan_version: Option<String>,
+    pub plan_text: Option<String>,
+    pub plan_confirmed_at: Option<String>,
+    pub criteria_version: Option<String>,
+    pub criteria_text: Option<String>,
+    pub criteria_confirmed_at: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    /// Owning system id (orchestrator's system at creation). Legacy boards have
+    /// NULL. Used by sweeps that freeze/unfreeze/clear a system's boards when
+    /// its service state changes.
+    pub system_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum BoardStatus {
+    #[serde(rename = "active")]
+    Active,
+    #[serde(rename = "awaiting_owner")]
+    AwaitingOwner,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "archived")]
+    Archived,
+    /// Service suspended (validity expired). Suspended boards reject commands;
+    /// they return to Active when the suspension is lifted. This build never
+    /// creates the state, but must round-trip it.
+    #[serde(rename = "frozen")]
+    Frozen,
+}
+
+impl std::fmt::Display for BoardStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BoardStatus::Active => write!(f, "active"),
+            BoardStatus::AwaitingOwner => write!(f, "awaiting_owner"),
+            BoardStatus::Completed => write!(f, "completed"),
+            BoardStatus::Archived => write!(f, "archived"),
+            BoardStatus::Frozen => write!(f, "frozen"),
+        }
+    }
+}
+
+/// Parse a status string from the database (legacy boards predate `frozen`).
+pub fn parse_board_status(s: &str) -> BoardStatus {
+    match s {
+        "awaiting_owner" => BoardStatus::AwaitingOwner,
+        "completed" => BoardStatus::Completed,
+        "archived" => BoardStatus::Archived,
+        "frozen" => BoardStatus::Frozen,
+        _ => BoardStatus::Active,
+    }
+}
+
+// ── Member ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Member {
+    pub email: String,
+    pub role: String,
+    pub display_name: String,
+    pub board_id: String,
+    pub board_token: Option<String>,
+    /// D8: per-row salt for the stored `sha256(token + salt)` board token.
+    /// `None` on a freshly-generated (raw) token before `add_member` stores it;
+    /// `Some` once the row is hashed. `#[serde(default)]` keeps older serialized
+    /// `Member` JSON (without the field) deserializable.
+    #[serde(default)]
+    pub board_token_salt: Option<String>,
+    pub joined_at: Option<String>,
+    pub domains: Option<Vec<String>>,
+    pub capability_snapshot: Option<String>,
+}
+
+// ── Task ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub short_id: String,
+    pub board_id: String,
+    pub title: String,
+    pub body: String,
+    pub status: TaskStatus,
+    pub assignee: String,
+    pub reviewer: Option<String>,
+    pub parent_ids: Vec<String>,
+    pub tags: Vec<String>,
+    pub summary: String,
+    pub metadata: Option<String>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+    pub cancelled_at: Option<String>,
+    pub deadline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TaskStatus {
+    #[serde(rename = "triage")]
+    Triage,
+    #[serde(rename = "todo")]
+    Todo,
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "reviewing")]
+    Reviewing,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "archived")]
+    Archived,
+}
+
+impl std::fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TaskStatus::Triage => write!(f, "triage"),
+            TaskStatus::Todo => write!(f, "todo"),
+            TaskStatus::Ready => write!(f, "ready"),
+            TaskStatus::Running => write!(f, "running"),
+            TaskStatus::Reviewing => write!(f, "reviewing"),
+            TaskStatus::Done => write!(f, "done"),
+            TaskStatus::Blocked => write!(f, "blocked"),
+            TaskStatus::Cancelled => write!(f, "cancelled"),
+            TaskStatus::Archived => write!(f, "archived"),
+        }
+    }
+}
+
+// ── TaskEvent ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskEvent {
+    pub id: i64,
+    pub task_id: String,
+    pub event_type: String,
+    pub actor: String,
+    pub payload: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+// ── Command ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct A2aCommand {
+    pub verb: String,
+    pub task_id: Option<String>,
+    pub params: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandResponse {
+    pub status: String,
+    pub task: Option<Task>,
+    pub data: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+// ── Create request ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBoardRequest {
+    pub project_id: String,
+    pub short_id: String,
+    pub members: Vec<CreateMember>,
+    pub board_email: String,
+    pub gateway_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateMember {
+    pub email: String,
+    pub role: String,
+    pub display_name: String,
+}
+
+// ── Helper: derive board_id from short_id + domain ────────────────────
+
+pub fn derive_board_id(board_email: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let input = board_email.to_lowercase();
+    let hash = Sha256::digest(input.as_bytes());
+    hex::encode(&hash[..10])
+}
+
+// Parse a board address like `xk9mp2q.a2a@mail.hermes.io` into (short_id, board_id, domain).
+
+/// Sanitize short_id: filter to [a-zA-Z0-9_-], truncate to 16, pad to 5.
+pub fn sanitize_short_id(raw: &str) -> String {
+    let filtered: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(16)
+        .collect();
+    if filtered.len() >= 5 {
+        filtered
+    } else {
+        // Pad with random chars to reach 5
+        let pad_len = 5 - filtered.len();
+        let pad: String = (0..pad_len)
+            .map(|_| {
+                let idx = rand::random::<u8>() % 36;
+                if idx < 10 {
+                    (b'0' + idx) as char
+                } else {
+                    (b'a' + (idx - 10)) as char
+                }
+            })
+            .collect();
+        format!("{}{}", filtered, pad)
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_short_id_normal() {
+        assert_eq!(sanitize_short_id("my-project"), "my-project");
+    }
+
+    #[test]
+    fn test_sanitize_too_long() {
+        let result = sanitize_short_id("this-is-a-very-long-project-name");
+        assert_eq!(result.len(), 16);
+        assert!(result.starts_with("this-is-a-very-l"));
+    }
+
+    #[test]
+    fn test_sanitize_too_short() {
+        let result = sanitize_short_id("ab");
+        assert_eq!(result.len(), 5);
+        assert!(result.starts_with("ab"));
+    }
+
+    #[test]
+    fn test_sanitize_invalid_chars() {
+        let result = sanitize_short_id("web-redesign!!!@#$");
+        assert_eq!(result, "web-redesign");
+    }
+
+    #[test]
+    fn test_sanitize_empty() {
+        let result = sanitize_short_id("");
+        assert_eq!(result.len(), 5);
+    }
+}
+
+/// Parse a board address into (short_id, board_id, domain).
+///
+/// Two layouts:
+///   non-shared:  {short_id}.a2a@{domain}
+///   shared:      {short_id}.{system_name}.a2a@{shared_domain}
+/// The board_id is a hash of the FULL address, so the shared-domain
+/// layout (which embeds the system name) yields a distinct board per
+/// system even for the same short_id — no cross-system collision.
+pub fn parse_board_email(to_addr: &str) -> Option<(String, String, String)> {
+    let (local, domain) = to_addr.split_once('@')?;
+    let body = local.strip_suffix(".a2a")?;
+    let short_id = body.split('.').next()?;
+    let board_id = derive_board_id(to_addr);
+    Some((short_id.to_string(), board_id, domain.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_derive_board_id_deterministic() {
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        assert_eq!(id1, id2, "same input should produce same board_id");
+        assert_eq!(id1.len(), 20, "board_id should be 20 hex chars");
+    }
+
+    #[test]
+    fn test_derive_board_id_different_domain() {
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("pgmig001.a2a@mail.other.io");
+        assert_ne!(
+            id1, id2,
+            "different domains should produce different board_id"
+        );
+    }
+
+    #[test]
+    fn test_derive_board_id_different_short_id() {
+        let id1 = derive_board_id("pgmig001.a2a@mail.hermes.io");
+        let id2 = derive_board_id("costv2.a2a@mail.hermes.io");
+        assert_ne!(
+            id1, id2,
+            "different short_ids should produce different board_id"
+        );
+    }
+
+    #[test]
+    fn test_derive_board_id_length() {
+        let id = derive_board_id("test1234.a2a@domain.com");
+        assert_eq!(id.len(), 20, "board_id should be 10 bytes = 20 hex chars");
+    }
+
+    #[test]
+    fn test_derive_board_id_shared_domain_embeds_system_name() {
+        // Shared-domain layout: {short}.{system_name}.a2a@{shared_domain}
+        let a = derive_board_id("proj.xianlin.a2a@aimail.token.tm");
+        let b = derive_board_id("proj.wguo.a2a@aimail.token.tm");
+        assert_ne!(
+            a, b,
+            "same short_id on different shared systems must not collide"
+        );
+    }
+
+    #[test]
+    fn test_parse_board_email_shared_layout() {
+        let (short, bid, domain) = parse_board_email("proj.xianlin.a2a@aimail.token.tm").unwrap();
+        assert_eq!(short, "proj");
+        assert_eq!(domain, "aimail.token.tm");
+        assert_eq!(bid, derive_board_id("proj.xianlin.a2a@aimail.token.tm"));
+    }
+
+    #[test]
+    fn test_parse_board_email_valid() {
+        let result = parse_board_email("pgmig001.a2a@mail.hermes.io");
+        assert!(result.is_some(), "valid address should parse successfully");
+        let (short_id, board_id, domain) = result.unwrap();
+        assert_eq!(short_id, "pgmig001");
+        assert_eq!(domain, "mail.hermes.io");
+        assert_eq!(board_id.len(), 20);
+    }
+
+    #[test]
+    fn test_parse_board_email_missing_a2a() {
+        let result = parse_board_email("pgmig001@mail.hermes.io");
+        assert!(result.is_none(), "missing .a2a suffix should return None");
+    }
+
+    #[test]
+    fn test_parse_board_email_no_at() {
+        let result = parse_board_email("invalid");
+        assert!(result.is_none(), "missing @ should return None");
+    }
+
+    #[test]
+    fn test_parse_board_email_empty() {
+        let result = parse_board_email("");
+        assert!(result.is_none(), "empty string should return None");
+    }
+
+    #[test]
+    fn test_parse_board_email_short_id_extraction() {
+        let (short_id, _, _) = parse_board_email("xk9mp2q.a2a@gateway.io").unwrap();
+        assert_eq!(short_id, "xk9mp2q");
+    }
+
+    #[test]
+    fn test_board_status_display_active() {
+        assert_eq!(BoardStatus::Active.to_string(), "active");
+    }
+
+    #[test]
+    fn test_board_status_display_archived() {
+        assert_eq!(BoardStatus::Archived.to_string(), "archived");
+    }
+
+    #[test]
+    fn test_task_status_display() {
+        assert_eq!(TaskStatus::Todo.to_string(), "todo");
+        assert_eq!(TaskStatus::Ready.to_string(), "ready");
+        assert_eq!(TaskStatus::Running.to_string(), "running");
+        assert_eq!(TaskStatus::Reviewing.to_string(), "reviewing");
+        assert_eq!(TaskStatus::Done.to_string(), "done");
+        assert_eq!(TaskStatus::Blocked.to_string(), "blocked");
+        assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
+    }
+}

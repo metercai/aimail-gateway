@@ -1,0 +1,103 @@
+# aimail-gateway example configuration (MPL-2.0)
+# Copy to config.toml and edit for your environment:
+#
+#   cp config.toml.example config.toml
+#
+# Env var overrides (AIMAILGW_*): HTTP_ADDR, SMTP_ADDR, STORAGE_PATH,
+# RELAY_SMTP_SERVER, RELAY_USERNAME, RELAY_PASSWORD, LOGGING_LEVEL.
+# Env vars take precedence over this file.
+
+# ── HTTP API server ─────────────────────────────────────────────────────
+
+[http]
+bind = "0.0.0.0:8080"                    # listen address (host:port, default 0.0.0.0:8080)
+# hostname = "mail.yourdomain.com"        # public hostname for API URL display
+
+# ── Inbound SMTP server ─────────────────────────────────────────────────
+
+[smtp]
+bind = "0.0.0.0:25"                      # listen address (host:port, default 0.0.0.0:25)
+hostname = "mail.example.com"            # REQUIRED: EHLO/HELO banner and PTR name for outbound connections
+# max_message_size = 10485760             # max inbound message size in bytes (default 10 MB)
+# max_connections = 100                   # max concurrent SMTP connections (default 100)
+# channel_capacity = 1000                 # internal channel buffer size (default 1000)
+# delivery_timeout_secs = 30              # hard timeout for one outbound delivery (default 30)
+# max_concurrent_deliveries = 4           # concurrent outbound deliveries (default 4)
+
+# ── Webhook / push delivery ─────────────────────────────────────────────
+
+[webhook]
+# timeout_secs = 10                       # HTTP request timeout per webhook call, seconds (default 10)
+# pending_ttl_hours = 72                  # max age of undelivered pull-mode items before cleanup, hours (default 72)
+# allow_private_targets = false           # D3: permit webhook delivery to loopback/private/link-local targets (default false — blind-SSRF defence)
+
+# ── Outbound relay ──────────────────────────────────────────────────────
+
+[relay]
+# smtp_server = "smtp://smtp.example.com:587"  # upstream SMTP relay URL
+# username = "relay@example.com"               # SMTP auth username
+# password = "your-password"                   # SMTP auth password
+# dns_server = "127.0.0.1:53"                  # custom DNS server for SPF/MX/DKIM queries (takes precedence over /etc/resolv.conf)
+# auto_reply_subject_prefix = "[Auto-Reply] "  # prefix prepended to all system-generated email subjects
+# auto_reply_body = "This is an automated message from the aimail system. The delivery could not be completed after all retry attempts. For assistance, please contact your service administrator."
+# delivery_window_secs = 7200                  # NDR bounce correlation window in seconds (default 7200 = 2h)
+# mx_dns_override = { "example.com" = "127.0.0.1:25" }  # per-domain MX overrides for direct delivery mode
+
+# ── Retry / backoff ─────────────────────────────────────────────────────
+
+# ── API request authentication (D9) ─────────────────────────────────────────
+[api]
+# signature_window_secs = 120     # freshness window for X-Api-Timestamp, ±window in seconds (default 120; was a hardcoded 300). Client/server clocks must agree within ±window (NTP both sides).
+# replay_protection = false       # remember verified signatures (identity+timestamp+method+path, TTL=window, cap 10 000); an in-window re-send → 409 "replayed". Default false (window-only, pre-D9 behaviour).
+# allow_unidentified_keys = false  # D1: allow an empty/missing X-Api-Identity to fall back to a 64-key candidate scan. Default false — such requests 401 identity_required before any body read or database access, and a valid identity reaches all of its keys (no silent 64-cap).
+
+[retry]
+# max_attempts = 3                        # max delivery attempts before NDR (default 3)
+# initial_backoff_secs = 5                # first retry backoff in seconds (default 5)
+# multiplier = 2                          # exponential backoff multiplier (default 2)
+# max_backoff_secs = 300                  # backoff ceiling in seconds (default 300)
+# poll_interval_secs = 5                  # scheduler batch processing interval in seconds (default 5)
+# batch_size = 50                         # max deliveries processed per batch (default 50)
+# send_dedupe_window_secs = 600           # identical consecutive sends within this window are deduped (default 600)
+# readying_stuck_secs = 30                # safety net: an email stuck in 'readying' longer than this is recovered by the sweep — resent when its payload is complete, discarded when the attachment set was only half written (default 30)
+
+# ── Storage ─────────────────────────────────────────────────────────────
+
+[storage]
+path = "./data"                           # data directory. DB → {path}/aimail.db, attachments → {path}/attachments/ (default ./data)
+# pool_size = 25                          # r2d2 SQLite connection pool size (default 25)
+# encryption = false                      # SQLCipher page-level encryption (default false).
+#                                         # Needs a binary built with `--features sqlcipher`; the
+#                                         # default build has no SQLCipher and refuses to start with
+#                                         # `true` (it would otherwise write a plaintext database).
+#                                         # The key is derived from the admin key file, so start once
+#                                         # with `false`, then flip to `true`: the existing database
+#                                         # is migrated in place on the next start.
+# admin_key_file = "/etc/aimail/admin.key"   # platform admin key file (default {path}/aimail.db.admin_key); keep it off the DB directory
+# system_key_file = "/etc/aimail/system.key" # agent-side system key file (default {path}/<system id>.system.key); written 0600
+# attachment_max_size = 20971520          # max single attachment size in bytes (default 20 MB)
+# attachment_lifetime_hours = 720         # attachment cleanup age in hours (default 720 = 30 days)
+# attachment_max_attachments = 5          # max attachments per inbound email (default 5)
+# attachment_allowed_types = []           # MIME type allowlist. Empty = allow all.
+
+# ── Logging ─────────────────────────────────────────────────────────────
+
+[logging]
+# level = "info"                          # log level: trace | debug | info | warn | error (default info)
+# file = "/var/log/aimail-gateway.log"     # log file path. Unset → stdout.
+
+# ── Admin ───────────────────────────────────────────────────────────────
+
+[admin]
+# email = "admin@yourdomain.com"          # owner contact email (shown on /health), fallback From address for system auto-replies
+# manager_default = "admin@yourdomain.com" # default manager for agent address registration when neither the request nor the system provides one (empty by default)
+
+# ── Board ───────────────────────────────────────────────────────────────
+
+[board]
+# heartbeat_stale_seconds = 14400         # agent heartbeat TTL before marking stale (default 14400 = 4h)
+# task_timeout_seconds = 259200           # task inactivity timeout before auto-completion (default 259200 = 3d)
+# sweeper_interval_seconds = 900          # board sweeper cron interval (default 900 = 15m)
+# command_reply = "read_only_and_errors"  # reply policy for mail commands: off | read_only_and_errors | all (default read_only_and_errors)
+# allow_plaintext_board_tokens = true     # D8 lazy-migration window for legacy plaintext board tokens (default true); set false to hard-reject unmigrated rows (401)
+# archive_retention_days = 90             # archived board retention in days (default unlimited)

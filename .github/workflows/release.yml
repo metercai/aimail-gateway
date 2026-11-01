@@ -1,0 +1,187 @@
+name: CI & Release
+
+# One workflow, two duties (owner ruling 2026-10-30):
+#   · push→main / pull_request / tag  → quality gate (fmt · clippy · unit tests)
+#   · v* tag                          → release build + GitHub Release
+# The gate also runs before a tagged release, so a tag can never ship code that
+# fails the same checks main had to pass.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege by default: the release job raises `contents: write` for itself.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release half-way; superseded PR/branch runs are cancelled.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  # ── Quality gate (L0: static checks + unit tests, no fixtures, no network) ──
+  gate:
+    name: gate (fmt · clippy · tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Pinned on purpose: clippy/fmt verdicts drift with the compiler, so CI and
+      # the local gate must run the same toolchain.
+      - name: Setup Rust (pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-1.98.1-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-1.98.1-cargo-
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        # --no-deps: vendor/ is third-party and not ours to lint.
+        run: cargo clippy --locked --all-targets --no-deps -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      # D4: error→status mapping has one exit (AppError::status). This gate
+      # fails CI if a message-string inspection reappears in src/core/api/
+      # production code.
+
+  # ── Cross-platform check ───────────────────────────────────────────────
+  # Why a separate job: the Linux gate cannot see code that only breaks on
+  # Windows (cfg-gated variables, platform-only APIs). v1.0.7 shipped red on the
+  # windows leg for exactly that reason, after the Linux gate was green.
+  check-windows:
+    name: check (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust (pinned)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-1.98.1-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-1.98.1-cargo-
+
+      - name: Check (all targets, warnings are errors)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo check --locked --all-targets
+
+  # ── Release build: v* tags only ──
+  build:
+    needs: [gate, check-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+# ── Linux musl (zero deps, any kernel ≥ 2.6) ──
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            platform: linux-amd64
+            ext: ""
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            platform: linux-arm64
+            ext: ""
+          # ── macOS (target macOS 11+) ──
+          - target: aarch64-apple-darwin
+            os: macos-14
+            platform: macos-arm64
+            ext: ""
+          # ── Windows ──
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform: windows-amd64
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install deps (musl)
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        env:
+          # musl: setting RUSTFLAGS drops the target's implicit +crt-static, which would
+          # yield a dynamically linked musl binary (needs the musl loader on the target).
+          # Re-state it explicitly so linux-amd64/arm64 stay self-contained.
+          # NB: keep a single contains() test — chaining `a || b && c || d` short-circuits on
+          # the first truthy operand and yields the boolean `true` for the a-targets.
+          RUSTFLAGS: ${{ contains(matrix.target, 'linux-musl') && '-D warnings -C target-feature=+crt-static' || '-D warnings' }}
+          MACOSX_DEPLOYMENT_TARGET: ${{ contains(matrix.os, 'macos') && '11.0' || '' }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Rename binary
+        shell: bash
+        run: cp "target/${{ matrix.target }}/release/aimail-gateway${{ matrix.ext }}" "aimail-gateway-${{ matrix.platform }}${{ matrix.ext }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: aimail-gateway-${{ matrix.platform }}
+          path: aimail-gateway-${{ matrix.platform }}${{ matrix.ext }}
+
+  release:
+    needs: [gate, check-windows, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: aimail-gateway-*/*
+          body: |
+            ## Platform variants
+
+            | Suffix | Compatible with |
+            |--------|-----------------|
+            | `linux-amd64` | musl, **no runtime deps** |
+            | `linux-arm64` | musl, **no runtime deps** |
+            | `macos-arm64` | macOS 11+ (Apple Silicon) |
+            | `windows-amd64` | Windows 10+ |
+
+            All TLS is pure Rust (rustls/ring) and SQLite is bundled — no OpenSSL and no
+            system libraries are required on any platform.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

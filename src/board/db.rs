@@ -1,0 +1,1497 @@
+//! board.db CRUD operations.
+//!
+//! Each board has its own SQLite database at:
+//!   {storage.path}/a2a_board/{board_id}/board.db
+
+use crate::board::models::*;
+use crate::core::errors::AppResult;
+use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+
+/// Open or create a board database by board_id.
+pub fn open_board_db(storage_path: &str, board_id: &str) -> AppResult<Connection> {
+    // Single-file layout: a2a_board/{board_id}.db — the db filename IS the
+    // board-address hash, binding the board address to its data file 1:1
+    // (no intermediate directory). Legacy directory layout is migrated
+    // in place on first open.
+    let dir = PathBuf::from(storage_path).join("a2a_board");
+    std::fs::create_dir_all(&dir)?;
+    let db_path = dir.join(format!("{board_id}.db"));
+    let legacy = dir.join(board_id).join("board.db");
+    if !db_path.exists() && legacy.exists() {
+        if let Some(parent) = legacy.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::rename(&legacy, &db_path);
+        let _ = std::fs::remove_dir_all(dir.join(board_id));
+    }
+    let conn = Connection::open(&db_path)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+    init_schema(&conn)?;
+    Ok(conn)
+}
+
+pub(crate) fn init_schema(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS boards (
+              id TEXT PRIMARY KEY,
+              short_id TEXT UNIQUE NOT NULL,
+              board_email TEXT NOT NULL,
+              goal TEXT,
+              status TEXT DEFAULT 'active',
+              output_task_id TEXT,
+              plan_version TEXT,
+              plan_text TEXT,
+              plan_confirmed_at TEXT,
+              criteria_version TEXT,
+              criteria_text TEXT,
+              criteria_confirmed_at TEXT,
+              created_at TEXT,
+              completed_at TEXT
+          );",
+    )?;
+    // Migration: add system_id for legacy boards (pre-Frozen-state).
+    // The column is nullable — legacy rows keep NULL.
+    let _ = conn.execute("ALTER TABLE boards ADD COLUMN system_id TEXT", []);
+    // D8: per-row salt for the hashed board token (legacy plaintext rows
+    // keep NULL salt until their first successful use re-writes them).
+    let _ = conn.execute(
+        "ALTER TABLE board_members ADD COLUMN board_token_salt TEXT",
+        [],
+    );
+    // Remaining schema (unchanged from the original single batch).
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS board_members (
+            email TEXT PRIMARY KEY,
+            role TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            board_token TEXT,
+            board_token_salt TEXT,
+            board_id TEXT REFERENCES boards(id),
+            joined_at TEXT,
+            domains TEXT,
+            capability_snapshot TEXT
+        );
+        CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            short_id TEXT NOT NULL,
+            board_id TEXT REFERENCES boards(id),
+            title TEXT,
+            body TEXT,
+            status TEXT DEFAULT 'todo',
+            assignee TEXT REFERENCES board_members(email),
+            reviewer TEXT,
+            parent_ids TEXT DEFAULT '[]',
+            tags TEXT DEFAULT '[]',
+            summary TEXT DEFAULT '',
+            metadata TEXT,
+            created_by TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            completed_at TEXT,
+            cancelled_at TEXT,
+            deadline TEXT
+        );
+        CREATE TABLE IF NOT EXISTS role_permissions (
+            role TEXT NOT NULL,
+            verb TEXT NOT NULL,
+            PRIMARY KEY (role, verb)
+        );
+
+        CREATE TABLE IF NOT EXISTS task_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT REFERENCES tasks(id),
+            event_type TEXT,
+            actor TEXT,
+            payload TEXT,
+            created_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS task_seq (
+            board_id TEXT PRIMARY KEY,
+            next_val INTEGER NOT NULL
+        );",
+    )?;
+    Ok(())
+}
+
+// ── Board CRUD ────────────────────────────────────────────────────────
+
+pub fn create_board(conn: &Connection, board: &Board) -> AppResult<()> {
+    // Collision check: the board id is derived from (short_id, domain) —
+    // creating the same board again must refuse, never silently replace
+    // (INSERT OR REPLACE would overwrite an existing board's data).
+    let exists: i64 = conn.query_row(
+        "SELECT count(*) FROM boards WHERE id = ?1",
+        [&board.id],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Err(crate::core::errors::AppError::Validation(format!(
+            "board '{}' already exists (short id '{}')",
+            board.id, board.short_id
+        )));
+    }
+    conn.execute(
+        "INSERT INTO boards (id, short_id, board_email, goal, status, created_at, system_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            board.id,
+            board.short_id,
+            board.board_email,
+            board.goal,
+            board.status.to_string(),
+            board.created_at,
+            board.system_id,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Archive a board — set status to Archived.
+pub fn archive_board(conn: &Connection, board_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE boards SET status = 'archived', completed_at = ?1 WHERE id = ?2",
+        rusqlite::params![chrono::Utc::now().to_rfc3339(), board_id],
+    )?;
+    Ok(())
+}
+
+/// Set a board's status (lifecycle transitions such as freeze / thaw).
+/// Returns true if a board row was updated.
+///
+/// Public interface: consumed by an out-of-tree product-expiry sweep
+/// (freeze on expiry, thaw on renewal).
+pub fn set_board_status(conn: &Connection, board_id: &str, status: &str) -> AppResult<bool> {
+    let n = conn.execute(
+        "UPDATE boards SET status = ?1 WHERE id = ?2",
+        rusqlite::params![status, board_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Summary of one board row (used by sweeps that reconcile board status with
+/// system expiry state).
+#[derive(Debug, Clone)]
+pub struct BoardRef {
+    pub id: String,
+    pub board_email: String,
+    pub status: BoardStatus,
+    pub system_id: Option<String>,
+}
+
+/// List every board by scanning the a2a_board directory.
+/// Read-only: never creates files. Boards whose db cannot be opened
+/// (corrupt) are skipped with a warning.
+pub fn list_boards(storage_path: &str) -> AppResult<Vec<BoardRef>> {
+    let dir = std::path::Path::new(storage_path).join("a2a_board");
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| crate::core::errors::AppError::Internal(format!("list a2a_board dir: {e}")))?
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Single-file layout: {board_id}.db
+        let Some(board_id) = name.strip_suffix(".db") else {
+            continue;
+        };
+        let db_path = entry.path();
+        let conn = match rusqlite::Connection::open_with_flags(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(board_id = %board_id, error = %e, "skip unreadable board db");
+                continue;
+            }
+        };
+        let row: Option<(String, String, String, Option<String>)> = conn
+            .query_row(
+                "SELECT id, board_email, status, system_id FROM boards LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| crate::core::errors::AppError::Internal(format!("read board row: {e}")))
+            .ok()
+            .flatten();
+        if let Some((id, email, status, system_id)) = row {
+            out.push(BoardRef {
+                id,
+                board_email: email,
+                status: parse_board_status(&status),
+                system_id,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Delete a board's data file (and its WAL/SHM sidecars), releasing a board's
+/// occupied resources.
+///
+/// Public interface: consumed by an out-of-tree product-expiry sweep
+/// and system purge.
+pub fn delete_board_file(storage_path: &str, board_id: &str) -> AppResult<()> {
+    let dir = std::path::Path::new(storage_path).join("a2a_board");
+    let db_path = dir.join(format!("{board_id}.db"));
+    for suffix in ["", "-wal", "-shm"] {
+        let p = if suffix.is_empty() {
+            db_path.clone()
+        } else {
+            dir.join(format!("{board_id}.db{suffix}"))
+        };
+        if p.exists() {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn get_board(conn: &Connection, board_id: &str) -> AppResult<Board> {
+    conn.query_row(
+        "SELECT id, short_id, board_email, goal, status, output_task_id, plan_version,
+                plan_text, plan_confirmed_at, criteria_version, criteria_text, criteria_confirmed_at, created_at, completed_at, system_id
+         FROM boards WHERE id = ?1",
+        params![board_id],
+        |row| {
+            Ok(Board {
+                id: row.get(0)?,
+                short_id: row.get(1)?,
+                board_email: row.get(2)?,
+                goal: row.get(3)?,
+                status: crate::board::models::parse_board_status(&row.get::<_, String>(4)?),
+                output_task_id: row.get(5)?,
+                plan_version: row.get(6)?,
+                plan_text: row.get(7)?,
+                plan_confirmed_at: row.get(8)?,
+                criteria_version: row.get(9)?,
+                criteria_text: row.get(10)?,
+                criteria_confirmed_at: row.get(11)?,
+                created_at: row.get(12)?,
+                completed_at: row.get(13)?,
+                system_id: row.get(14).ok(),
+            })
+        },
+    )
+    .map_err(Into::into)
+}
+
+pub fn update_board(conn: &Connection, board: &Board) -> AppResult<()> {
+    conn.execute(
+        "UPDATE boards SET status=?1, output_task_id=?2, plan_version=?3, plan_text=?4,
+         plan_confirmed_at=?5, criteria_version=?6, criteria_text=?7,
+         criteria_confirmed_at=?8, completed_at=?9, goal=?10, system_id=?11
+         WHERE id=?12",
+        params![
+            board.status.to_string(),
+            board.output_task_id,
+            board.plan_version,
+            board.plan_text,
+            board.plan_confirmed_at,
+            board.criteria_version,
+            board.criteria_text,
+            board.criteria_confirmed_at,
+            board.completed_at,
+            board.goal,
+            board.system_id,
+            board.id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn short_id_exists(conn: &Connection, short_id: &str) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM boards WHERE short_id = ?1",
+        params![short_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+// ── Member CRUD ───────────────────────────────────────────────────────
+
+pub fn add_member(conn: &Connection, member: &Member) -> AppResult<()> {
+    // D8: a raw token (salt absent) is stored as sha256(token + salt) with a
+    // fresh per-row salt; an already-stored value (salt present — the refresh
+    // path passing back the existing credential) is written verbatim. On
+    // conflict the token columns are left untouched so an upsert can never
+    // clobber (or double-hash) a member's existing credential.
+    let (token_to_store, salt_to_store) = match (&member.board_token, &member.board_token_salt) {
+        (Some(raw), None) => {
+            let salt = generate_board_token_salt();
+            (Some(board_token_hash(raw, &salt)), Some(salt))
+        }
+        (Some(stored), salt) => (Some(stored.clone()), salt.clone()),
+        (None, _) => (None, None),
+    };
+    conn.execute(
+        "INSERT INTO board_members (email, role, display_name, board_id, board_token, board_token_salt, joined_at, domains)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(email) DO UPDATE SET
+            role = excluded.role,
+            display_name = excluded.display_name,
+            board_id = excluded.board_id,
+            joined_at = excluded.joined_at,
+            domains = excluded.domains",
+        params![
+            member.email,
+            member.role,
+            member.display_name,
+            member.board_id,
+            token_to_store,
+            salt_to_store,
+            member.joined_at,
+            member.domains.as_ref().map(|d| serde_json::to_string(d).unwrap_or_default()),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Generate a board token: bdt_ + 32 hex chars.
+pub fn generate_board_token() -> String {
+    use rand::Rng;
+    let bytes: [u8; 16] = rand::thread_rng().gen();
+    format!("bdt_{}", hex::encode(bytes))
+}
+
+/// D8: fresh 16-byte per-row salt (hex), mixing into the stored token hash so
+/// identical tokens across rows never collide.
+pub fn generate_board_token_salt() -> String {
+    use rand::Rng;
+    let bytes: [u8; 16] = rand::thread_rng().gen();
+    hex::encode(bytes)
+}
+
+/// D8: `sha256(raw || "|" || salt)` — the only form a board token is stored in.
+pub fn board_token_hash(raw: &str, salt: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(raw.as_bytes());
+    h.update(b"|");
+    h.update(salt.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Insert multiple role-permission relationships (from init email).
+pub fn insert_role_permissions(
+    conn: &Connection,
+    _board_id: &str,
+    permissions: &[(String, Vec<String>)],
+) -> AppResult<()> {
+    for (role, verbs) in permissions {
+        for verb in verbs {
+            conn.execute(
+                "INSERT OR REPLACE INTO role_permissions (role, verb) VALUES (?1, ?2)",
+                rusqlite::params![role, verb],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Known board roles (S5 whitelist). Custom role strings are rejected at
+/// member registration and role_permissions override — an arbitrary role
+/// used to get open-mode permissions (R2) and enabled privilege escalation.
+pub const KNOWN_ROLES: &[&str] = &["orchestrator", "verifier", "worker", "owner"];
+
+/// Known command verbs (S5 whitelist for role_permissions overrides).
+/// Union of every role's seeded verb set — typos/unknown verbs are rejected
+/// instead of silently creating inert permission rows.
+pub const KNOWN_VERBS: &[&str] = &[
+    "tasks",
+    "create",
+    "assign",
+    "review",
+    "block",
+    "unblock",
+    "cancel",
+    "reassign",
+    "edit",
+    "deadline",
+    "output",
+    "notify",
+    "members",
+    "roles",
+    "config",
+    "arbitrate",
+    "comment",
+    "list",
+    "show",
+    "status",
+    "heartbeat",
+    "verify",
+    "approve",
+    "reject",
+    "complete",
+    "continue",
+    "commit",
+    "reopen",
+];
+
+/// Single source of truth for default role→verb permissions (L3 fix:
+/// the seed previously existed twice with different verb sets — init
+/// path (commands.rs) and new path (interceptor.rs) diverged, so the
+/// same role had different capabilities depending on how the board was
+/// created). This is the union: every role gets its full verb set on
+/// every creation path.
+pub fn seed_default_role_permissions(conn: &Connection) -> AppResult<()> {
+    let defaults: &[(&str, &[&str])] = &[
+        (
+            "orchestrator",
+            &[
+                "tasks",
+                "create",
+                "assign",
+                "review",
+                "block",
+                "unblock",
+                "cancel",
+                "reassign",
+                "edit",
+                "deadline",
+                "output",
+                "notify",
+                "members",
+                "roles",
+                "config",
+                "arbitrate",
+                "continue",
+                "comment",
+                "list",
+                "show",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "verifier",
+            &[
+                "verify",
+                "approve",
+                "reject",
+                "output",
+                "continue",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+                "heartbeat",
+            ],
+        ),
+        (
+            "worker",
+            &[
+                "complete",
+                "commit",
+                "block",
+                "heartbeat",
+                "continue",
+                "comment",
+                "list",
+                "show",
+                "roles",
+                "members",
+                "status",
+            ],
+        ),
+        (
+            "owner",
+            &[
+                "create",
+                "tasks",
+                "unblock",
+                "reassign",
+                "reopen",
+                "continue",
+                "comment",
+                "list",
+                "show",
+                "status",
+                "members",
+                "roles",
+                "heartbeat",
+            ],
+        ),
+    ];
+    for (role, verbs) in defaults {
+        for verb in *verbs {
+            conn.execute(
+                "INSERT OR IGNORE INTO role_permissions (role, verb) VALUES (?1, ?2)",
+                rusqlite::params![role, verb],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Check if a role has permission for a verb (R2: an unseeded role used to
+/// be open — allow-all — which combined with S5's arbitrary roles meant a
+/// custom role got every verb. Now: known roles are seeded idempotently on
+/// first check; unknown roles are denied outright).
+pub fn check_role_permission(conn: &Connection, role: &str, verb: &str) -> AppResult<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM role_permissions WHERE role = ?1",
+        rusqlite::params![role],
+        |r| r.get(0),
+    )?;
+    if count == 0 {
+        if KNOWN_ROLES.contains(&role) {
+            // Legacy board (created before every creation path seeded):
+            // seed defaults once — INSERT OR IGNORE is idempotent.
+            seed_default_role_permissions(conn)?;
+        } else {
+            // Unknown role: no permissions at all.
+            return Ok(false);
+        }
+    }
+    let allowed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM role_permissions WHERE role = ?1 AND verb = ?2",
+        rusqlite::params![role, verb],
+        |r| r.get(0),
+    )?;
+    Ok(allowed > 0)
+}
+
+pub fn get_member(conn: &Connection, board_id: &str, email: &str) -> AppResult<Option<Member>> {
+    let mut stmt = conn.prepare(
+        "SELECT email, role, display_name, board_token, board_token_salt, board_id, joined_at, domains, capability_snapshot
+     FROM board_members WHERE board_id = ?1 AND email = ?2",
+    )?;
+    let mut rows = stmt.query(params![board_id, email])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(Member {
+            email: row.get(0)?,
+            role: row.get(1)?,
+            display_name: row.get(2)?,
+            board_token: row.get(3)?,
+            board_token_salt: row.get(4)?,
+            board_id: row.get(5)?,
+            joined_at: row.get(6)?,
+            domains: row
+                .get::<_, Option<String>>(7)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            capability_snapshot: row.get(8)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn list_members(conn: &Connection, board_id: &str) -> AppResult<Vec<Member>> {
+    let mut stmt = conn.prepare(
+        "SELECT email, role, display_name, board_token, board_token_salt, board_id, joined_at, domains, capability_snapshot
+         FROM board_members WHERE board_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![board_id], |row| {
+        Ok(Member {
+            email: row.get(0)?,
+            role: row.get(1)?,
+            display_name: row.get(2)?,
+            board_token: row.get(3)?,
+            board_token_salt: row.get(4)?,
+            board_id: row.get(5)?,
+            joined_at: row.get(6)?,
+            domains: row
+                .get::<_, Option<String>>(7)?
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            capability_snapshot: row.get(8)?,
+        })
+    })?;
+    let mut members = Vec::new();
+    for r in rows {
+        members.push(r?);
+    }
+    Ok(members)
+}
+
+// Record heartbeat by updating task updated_at.
+
+/// Verify a board token. Returns member email on success.
+pub fn verify_member_token(
+    conn: &Connection,
+    board_id: &str,
+    token: &str,
+    member_email: &str,
+) -> AppResult<Option<String>> {
+    verify_member_token_cfg(conn, board_id, token, member_email, true)
+}
+
+/// D8: token verification with an explicit lazy-migration window.
+///
+/// Fetches the row by `(board_id, member_email)` — a token alone proves
+/// nothing (dual-credential auth) — then compares:
+///   * row has a salt (migrated): compare `sha256(presented + salt)`;
+///   * row is still plaintext (legacy): compare the raw value, and on a hit
+///     immediately re-write the row as `sha256(token + salt)` (lazy migration).
+///
+/// When `allow_plaintext` is `false` a not-yet-migrated plaintext row is
+/// rejected outright (401 at the caller) so the 30-day window can be closed.
+pub fn verify_member_token_cfg(
+    conn: &Connection,
+    board_id: &str,
+    token: &str,
+    member_email: &str,
+    allow_plaintext: bool,
+) -> AppResult<Option<String>> {
+    if member_email.is_empty() || token.is_empty() {
+        return Ok(None);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT email, board_token, board_token_salt FROM board_members WHERE board_id = ?1 AND email = ?2",
+    )?;
+    let row: Option<(String, Option<String>, Option<String>)> = stmt
+        .query_row(params![board_id, member_email], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()?;
+
+    let Some((email, stored, salt)) = row else {
+        return Ok(None);
+    };
+
+    let Some(stored) = stored else {
+        return Ok(None); // row has no credential
+    };
+
+    match salt {
+        Some(salt) => {
+            // Migrated: constant-time compare the derived hash.
+            let expected = board_token_hash(token, &salt);
+            if ct_eq(expected.as_bytes(), stored.as_bytes()) {
+                Ok(Some(email))
+            } else {
+                Ok(None)
+            }
+        }
+        None => {
+            // Legacy plaintext row.
+            if !allow_plaintext {
+                return Ok(None); // window closed — force re-invite
+            }
+            if ct_eq(token.as_bytes(), stored.as_bytes()) {
+                // Lazy migration: re-write as sha256(token + salt).
+                let salt = generate_board_token_salt();
+                let hashed = board_token_hash(token, &salt);
+                conn.execute(
+                    "UPDATE board_members SET board_token = ?1, board_token_salt = ?2 WHERE board_id = ?3 AND email = ?4",
+                    params![hashed, salt, board_id, member_email],
+                )?;
+                Ok(Some(email))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// D8: constant-time byte comparison (no `subtle` dep; the values are 32-byte
+/// hashes, so a fixed-width `reduce` fold bounds the timing side channel).
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+// ── Task CRUD ─────────────────────────────────────────────────────────
+
+pub fn create_task(conn: &Connection, task: &Task) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO tasks (id, short_id, board_id, title, body, status, assignee,
+         reviewer, parent_ids, tags, summary, metadata, created_by, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            task.id,
+            task.short_id,
+            task.board_id,
+            task.title,
+            task.body,
+            task.status.to_string(),
+            task.assignee,
+            task.reviewer,
+            serde_json::to_string(&task.parent_ids).unwrap_or_default(),
+            serde_json::to_string(&task.tags).unwrap_or_default(),
+            task.summary,
+            task.metadata,
+            task.created_by,
+            task.created_at,
+            task.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Fetch a task by full id (e.g. `t_T1_a3f8c21b`) or, failing that, by
+/// short_id (e.g. `T1`). Each board has its own SQLite database, so a
+/// short_id is unique within this board's task table — the fallback is
+/// unambiguous. This lets both the email command flow (`[A2A] complete T1`)
+/// and the HTTP tools address tasks the way the board docs and the product's
+/// own notification prompts do.
+pub fn get_task(conn: &Connection, task_ref: &str) -> AppResult<Task> {
+    const SELECT: &str = "SELECT id, short_id, board_id, title, body, status, assignee, reviewer,
+                parent_ids, tags, summary, metadata, created_by, created_at, updated_at,
+                completed_at, cancelled_at, deadline
+         FROM tasks WHERE ";
+    let by = |col: &str| {
+        conn.query_row(
+            &format!("{}{} = ?1", SELECT, col),
+            params![task_ref],
+            task_from_row,
+        )
+    };
+    match by("id") {
+        Ok(t) => Ok(t),
+        Err(rusqlite::Error::QueryReturnedNoRows) => by("short_id").map_err(Into::into),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Resolve a task reference (full id `t_T1_a3f8c21b` or short_id `T1`) to
+/// the task's full id. Used at the command/tool entry points so that
+/// downstream writes (status updates, events) operate on the real id.
+/// Errors if neither form matches.
+pub fn resolve_task_id(conn: &Connection, task_ref: &str) -> AppResult<String> {
+    get_task(conn, task_ref).map(|t| t.id)
+}
+
+fn task_from_row(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+    Ok(Task {
+        id: row.get(0)?,
+        short_id: row.get(1)?,
+        board_id: row.get(2)?,
+        title: row.get(3)?,
+        body: row.get(4)?,
+        status: parse_task_status(&row.get::<_, String>(5)?),
+        assignee: row.get(6)?,
+        reviewer: row.get(7)?,
+        parent_ids: row
+            .get::<_, String>(8)
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default(),
+        tags: row
+            .get::<_, String>(9)
+            .map(|s| serde_json::from_str(&s).unwrap_or_default())
+            .unwrap_or_default(),
+        summary: row.get(10)?,
+        metadata: row.get(11)?,
+        created_by: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        completed_at: row.get(15)?,
+        cancelled_at: row.get(16)?,
+        deadline: row.get(17)?,
+    })
+}
+
+pub fn list_tasks(
+    conn: &Connection,
+    board_id: &str,
+    status_filter: Option<&str>,
+    assignee_filter: Option<&str>,
+) -> AppResult<Vec<Task>> {
+    let mut sql = "SELECT id, short_id, board_id, title, body, status, assignee, reviewer,
+                   parent_ids, tags, summary, metadata, created_by, created_at, updated_at,
+                   completed_at, cancelled_at, deadline
+                   FROM tasks WHERE board_id = ?1"
+        .to_string();
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+        vec![Box::new(board_id.to_string())];
+    let mut param_idx = 2;
+
+    if let Some(s) = status_filter {
+        sql.push_str(&format!(" AND status = ?{}", param_idx));
+        param_values.push(Box::new(s.to_string()));
+        param_idx += 1;
+    }
+    if let Some(a) = assignee_filter {
+        sql.push_str(&format!(" AND assignee = ?{}", param_idx));
+        param_values.push(Box::new(a.to_string()));
+    }
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        Ok(Task {
+            id: row.get(0)?,
+            short_id: row.get(1)?,
+            board_id: row.get(2)?,
+            title: row.get(3)?,
+            body: row.get(4)?,
+            status: parse_task_status(&row.get::<_, String>(5)?),
+            assignee: row.get(6)?,
+            reviewer: row.get(7)?,
+            parent_ids: row
+                .get::<_, String>(8)
+                .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                .unwrap_or_default(),
+            tags: row
+                .get::<_, String>(9)
+                .map(|s| serde_json::from_str(&s).unwrap_or_default())
+                .unwrap_or_default(),
+            summary: row.get(10)?,
+            metadata: row.get(11)?,
+            created_by: row.get(12)?,
+            created_at: row.get(13)?,
+            updated_at: row.get(14)?,
+            completed_at: row.get(15)?,
+            cancelled_at: row.get(16)?,
+            deadline: row.get(17)?,
+        })
+    })?;
+    let mut tasks = Vec::new();
+    for r in rows {
+        tasks.push(r?);
+    }
+    Ok(tasks)
+}
+
+pub fn update_task(conn: &Connection, task: &Task) -> AppResult<()> {
+    conn.execute(
+        "UPDATE tasks SET status=?1, title=?2, body=?3, assignee=?4, reviewer=?5,
+         parent_ids=?6, tags=?7, summary=?8, metadata=?9, updated_at=?10,
+         completed_at=?11, cancelled_at=?12, deadline=?13
+         WHERE id=?14",
+        params![
+            task.status.to_string(),
+            task.title,
+            task.body,
+            task.assignee,
+            task.reviewer,
+            serde_json::to_string(&task.parent_ids).unwrap_or_default(),
+            serde_json::to_string(&task.tags).unwrap_or_default(),
+            task.summary,
+            task.metadata,
+            task.updated_at,
+            task.completed_at,
+            task.cancelled_at,
+            task.deadline,
+            task.id,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn touch_task(conn: &Connection, task_id: &str) -> AppResult<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE tasks SET updated_at=?1 WHERE id=?2",
+        params![now, task_id],
+    )?;
+    Ok(())
+}
+
+// ── Event ─────────────────────────────────────────────────────────────
+
+pub fn insert_event(conn: &Connection, event: &TaskEvent) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO task_events (task_id, event_type, actor, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.task_id,
+            event.event_type,
+            event.actor,
+            event
+                .payload
+                .as_ref()
+                .map(|p| serde_json::to_string(p).unwrap_or_default()),
+            event.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+// ── Pipeline integrity ────────────────────────────────────────────────
+
+/// Verify that all intermediate tasks in the plan have been completed
+/// and that the output task is done.
+pub fn verify_pipeline_integrity(conn: &Connection, board_id: &str) -> AppResult<Vec<String>> {
+    let mut issues = Vec::new();
+
+    // Check for any tasks that are not in done/cancelled status
+    let mut stmt = conn.prepare(
+        "SELECT short_id, status FROM tasks
+         WHERE board_id = ?1 AND status NOT IN ('done', 'cancelled', 'triage', 'archived')",
+    )?;
+    let rows = stmt.query_map(params![board_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for r in rows {
+        let (short_id, status) = r?;
+        issues.push(format!("{} status={}", short_id, status));
+    }
+
+    Ok(issues)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+
+fn parse_task_status(s: &str) -> TaskStatus {
+    match s {
+        "ready" => TaskStatus::Ready,
+        "running" => TaskStatus::Running,
+        "reviewing" => TaskStatus::Reviewing,
+        "done" => TaskStatus::Done,
+        "blocked" => TaskStatus::Blocked,
+        "cancelled" => TaskStatus::Cancelled,
+        _ => TaskStatus::Todo,
+    }
+}
+
+/// Generate a sequential short_id (T1, T2, T3...).
+/// Atomic per-board counter (task_seq): concurrent creates and deleted
+/// tasks can never collide or reuse ids (L5 — COUNT(*)+1 raced and
+/// reused ids after deletions).
+pub fn next_short_id(conn: &Connection, board_id: &str) -> AppResult<String> {
+    let next: i64 = conn.query_row(
+        "INSERT INTO task_seq (board_id, next_val) VALUES (?1, 1)
+         ON CONFLICT(board_id) DO UPDATE SET next_val = next_val + 1
+         RETURNING next_val",
+        params![board_id],
+        |row| row.get(0),
+    )?;
+    Ok(format!("T{}", next))
+}
+
+/// Generate a unique task ID: t_{board_id}_{short_id}
+pub fn make_task_id(board_id: &str, short_id: &str) -> String {
+    format!("t_{}_{}", short_id, &board_id[..8])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_db() -> (Connection, String) {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        init_schema(&conn).unwrap();
+        let board_id = "a3f8c21b9d4e73b2f0c1";
+        let board = Board {
+            id: board_id.to_string(),
+            short_id: "pgmig001".to_string(),
+            board_email: "pgmig001.a2a@test.io".to_string(),
+            goal: None,
+            status: BoardStatus::Active,
+            output_task_id: None,
+            plan_version: None,
+            plan_text: None,
+            plan_confirmed_at: None,
+            criteria_version: None,
+            criteria_text: None,
+            criteria_confirmed_at: None,
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            completed_at: None,
+            system_id: None,
+        };
+        create_board(&conn, &board).unwrap();
+
+        // Create default members so FK constraints on tasks pass
+        for (email, role) in &[
+            ("orch@t.io", "orchestrator"),
+            ("veri@t.io", "verifier"),
+            ("worker@t.io", "worker"),
+            ("owner@t.io", "owner"),
+            ("alice@t.io", "worker"),
+            ("bob@t.io", "worker"),
+        ] {
+            let m = make_member(board_id, email, role);
+            add_member(&conn, &m).unwrap();
+        }
+
+        (conn, board_id.to_string())
+    }
+
+    fn make_member(board_id: &str, email: &str, role: &str) -> Member {
+        Member {
+            email: email.to_string(),
+            role: role.to_string(),
+            display_name: email.to_string(),
+            board_id: board_id.to_string(),
+            board_token: Some("test-token".into()),
+            board_token_salt: None,
+            joined_at: None,
+            domains: None,
+            capability_snapshot: None,
+        }
+    }
+
+    fn make_task(board_id: &str, short_id: &str, assignee: &str) -> Task {
+        Task {
+            id: make_task_id(board_id, short_id),
+            short_id: short_id.to_string(),
+            board_id: board_id.to_string(),
+            title: format!("Task {}", short_id),
+            body: "test body".to_string(),
+            status: TaskStatus::Ready,
+            assignee: assignee.to_string(),
+            reviewer: None,
+            parent_ids: vec![],
+            tags: vec![],
+            summary: "".to_string(),
+            metadata: None,
+            created_by: assignee.to_string(),
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            updated_at: "2026-07-01T00:00:00Z".to_string(),
+            completed_at: None,
+            cancelled_at: None,
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn test_make_task_id() {
+        let tid = make_task_id("a3f8c21b9d4e73b2f0c1", "T1");
+        assert_eq!(tid, "t_T1_a3f8c21b");
+    }
+
+    #[test]
+    fn test_create_and_get_board() {
+        let (conn, board_id) = setup_db();
+        let board = get_board(&conn, &board_id).unwrap();
+        assert_eq!(board.short_id, "pgmig001");
+        assert_eq!(board.status, BoardStatus::Active);
+    }
+
+    #[test]
+    fn test_create_board_rejects_duplicate() {
+        // A2: same derived board_id must not silently overwrite the board.
+        let (conn, board_id) = setup_db();
+        let dup = Board {
+            id: board_id.clone(),
+            short_id: "pgmig001".to_string(),
+            board_email: "pgmig001.a2a@test.io".to_string(),
+            goal: Some("duplicate".to_string()),
+            status: BoardStatus::Active,
+            output_task_id: None,
+            plan_version: None,
+            plan_text: None,
+            plan_confirmed_at: None,
+            criteria_version: None,
+            criteria_text: None,
+            criteria_confirmed_at: None,
+            created_at: "2026-07-02T00:00:00Z".to_string(),
+            completed_at: None,
+            system_id: None,
+        };
+        assert!(
+            create_board(&conn, &dup).is_err(),
+            "duplicate create_board must be rejected"
+        );
+        // Original board untouched
+        let board = get_board(&conn, &board_id).unwrap();
+        assert_eq!(board.short_id, "pgmig001");
+        assert_eq!(
+            board.created_at, "2026-07-01T00:00:00Z",
+            "original board must survive"
+        );
+    }
+
+    #[test]
+    fn test_add_and_get_member() {
+        let (conn, board_id) = setup_db();
+        let member = make_member(&board_id, "alice@test.io", "orchestrator");
+        add_member(&conn, &member).unwrap();
+        let found = get_member(&conn, &board_id, "alice@test.io").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().role, "orchestrator");
+    }
+
+    #[test]
+    fn test_get_member_not_found() {
+        let (conn, board_id) = setup_db();
+        let found = get_member(&conn, &board_id, "nobody@test.io").unwrap();
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn test_list_members() {
+        let (conn, board_id) = setup_db();
+        add_member(&conn, &make_member(&board_id, "alice@t.io", "orchestrator")).unwrap();
+        add_member(&conn, &make_member(&board_id, "bob@t.io", "worker")).unwrap();
+        let members = list_members(&conn, &board_id).unwrap();
+        assert_eq!(
+            members.len(),
+            6,
+            "setup_db creates 6 members; add_member with OR REPLACE doesn't add new ones"
+        );
+    }
+
+    #[test]
+    fn test_create_and_get_task() {
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+        let found = get_task(&conn, &task.id).unwrap();
+        assert_eq!(found.short_id, "T1");
+        assert_eq!(found.status, TaskStatus::Ready);
+    }
+
+    #[test]
+    fn test_get_task_resolves_short_id() {
+        // A-flow and the HTTP tools address tasks by short_id
+        // ("[A2A] complete T1"); get_task must fall back to it.
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+
+        let by_short = get_task(&conn, "T1").unwrap();
+        assert_eq!(by_short.id, task.id);
+
+        // full id still resolves first (no ambiguity: a short_id that
+        // collides with no full id falls through, one that matches a
+        // full id is that task)
+        let by_full = get_task(&conn, &task.id).unwrap();
+        assert_eq!(by_full.id, task.id);
+
+        assert!(get_task(&conn, "T99").is_err());
+    }
+
+    #[test]
+    fn test_get_task_full_id_wins_over_short_fallback() {
+        // A full id that does not exist must NOT be mistaken for a
+        // short_id lookup of another task: the id query misses, and the
+        // short_id fallback only matches if the id string happens to be
+        // some task's short_id. Guard the intended precedence explicitly.
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+
+        // "T1" is a valid short_id → resolves to the task
+        assert_eq!(get_task(&conn, "T1").unwrap().id, task.id);
+        // the same task's full id resolves to itself
+        assert_eq!(get_task(&conn, &task.id).unwrap().id, task.id);
+        // an id that matches neither misses
+        assert!(get_task(&conn, &format!("t_X_{}", &board_id[..8])).is_err());
+    }
+
+    #[test]
+    fn test_update_task_status() {
+        let (conn, board_id) = setup_db();
+        let mut task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+        task.status = TaskStatus::Running;
+        task.updated_at = "2026-07-01T01:00:00Z".to_string();
+        update_task(&conn, &task).unwrap();
+        let found = get_task(&conn, &task.id).unwrap();
+        assert_eq!(found.status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn test_touch_task_updates_time() {
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+        touch_task(&conn, &task.id).unwrap();
+        let found = get_task(&conn, &task.id).unwrap();
+        assert_ne!(found.updated_at, task.updated_at);
+    }
+
+    #[test]
+    fn test_list_tasks_by_status() {
+        let (conn, board_id) = setup_db();
+        let mut t1 = make_task(&board_id, "T1", "alice@t.io");
+        t1.status = TaskStatus::Done;
+        create_task(&conn, &t1).unwrap();
+        let mut t2 = make_task(&board_id, "T2", "bob@t.io");
+        t2.status = TaskStatus::Running;
+        create_task(&conn, &t2).unwrap();
+        let done_tasks = list_tasks(&conn, &board_id, Some("done"), None).unwrap();
+        assert_eq!(done_tasks.len(), 1);
+        assert_eq!(done_tasks[0].short_id, "T1");
+    }
+
+    #[test]
+    fn test_list_tasks_by_assignee() {
+        let (conn, board_id) = setup_db();
+        let t1 = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &t1).unwrap();
+        let t2 = make_task(&board_id, "T2", "bob@t.io");
+        create_task(&conn, &t2).unwrap();
+        let alice_tasks = list_tasks(&conn, &board_id, None, Some("alice@t.io")).unwrap();
+        assert_eq!(alice_tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_insert_event() {
+        let (conn, board_id) = setup_db();
+        let task = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &task).unwrap();
+        let event = TaskEvent {
+            id: 0,
+            task_id: task.id.clone(),
+            event_type: "completed".to_string(),
+            actor: "alice@t.io".to_string(),
+            payload: None,
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+        };
+        insert_event(&conn, &event).unwrap();
+    }
+
+    #[test]
+    fn test_short_id_exists() {
+        let (conn, _) = setup_db();
+        assert!(short_id_exists(&conn, "pgmig001").unwrap());
+        assert!(!short_id_exists(&conn, "nonexist").unwrap());
+    }
+
+    #[test]
+    fn test_verify_pipeline_integrity_clean() {
+        let (conn, board_id) = setup_db();
+        let mut t1 = make_task(&board_id, "T1", "alice@t.io");
+        t1.status = TaskStatus::Done;
+        t1.completed_at = Some("2026-07-01T00:00:00Z".to_string());
+        create_task(&conn, &t1).unwrap();
+        let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
+        assert!(
+            issues.is_empty(),
+            "pipeline should be clean when all tasks done"
+        );
+    }
+
+    #[test]
+    fn test_verify_pipeline_integrity_pending() {
+        let (conn, board_id) = setup_db();
+        let t1 = make_task(&board_id, "T1", "alice@t.io"); // status=Ready
+        create_task(&conn, &t1).unwrap();
+        let issues = verify_pipeline_integrity(&conn, &board_id).unwrap();
+        assert!(
+            !issues.is_empty(),
+            "pipeline should report issues when tasks are pending"
+        );
+    }
+
+    #[test]
+    fn test_next_short_id() {
+        let (conn, board_id) = setup_db();
+        let id1 = next_short_id(&conn, &board_id).unwrap();
+        assert_eq!(id1, "T1");
+        let t1 = make_task(&board_id, "T1", "alice@t.io");
+        create_task(&conn, &t1).unwrap();
+        let id2 = next_short_id(&conn, &board_id).unwrap();
+        assert_eq!(id2, "T2");
+    }
+
+    // ── R2: role_permissions open-mode closure ─────────────────────
+    #[test]
+    fn test_check_role_permission_unknown_role_denied() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // Unknown role on an unseeded table used to be open (allow-all).
+        assert!(!check_role_permission(&conn, "admin", "list").unwrap());
+        assert!(!check_role_permission(&conn, "root", "arbitrate").unwrap());
+    }
+
+    #[test]
+    fn test_check_role_permission_known_role_seeds_and_allows() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // Known role on an empty (legacy) table: seeded idempotently, then
+        // its default verbs apply; non-default verbs still denied.
+        assert!(check_role_permission(&conn, "worker", "list").unwrap());
+        assert!(check_role_permission(&conn, "worker", "heartbeat").unwrap());
+        assert!(!check_role_permission(&conn, "worker", "arbitrate").unwrap());
+        assert!(check_role_permission(&conn, "orchestrator", "tasks").unwrap());
+        assert!(!check_role_permission(&conn, "orchestrator", "complete").unwrap());
+    }
+
+    // ── D8: hashed board token storage + lazy migration ──
+
+    #[test]
+    fn d8_new_member_token_is_stored_hashed_and_verifies() {
+        let (conn, board_id) = setup_db();
+        let member = make_member(&board_id, "d8new@t.io", "worker");
+        let raw = member.board_token.clone().unwrap();
+        add_member(&conn, &member).unwrap();
+
+        // The row must hold sha256(raw + salt) + salt — never the raw token.
+        let found = get_member(&conn, &board_id, "d8new@t.io").unwrap().unwrap();
+        let stored = found.board_token.unwrap();
+        let salt = found
+            .board_token_salt
+            .expect("new member rows carry a salt");
+        assert_ne!(stored, raw, "raw token must not be stored");
+        assert_eq!(stored, board_token_hash(&raw, &salt));
+
+        // The raw token still authenticates (that is what the invite sent).
+        assert!(verify_member_token(&conn, &board_id, &raw, "d8new@t.io")
+            .unwrap()
+            .is_some());
+        // A wrong token is rejected.
+        assert!(
+            verify_member_token(&conn, &board_id, "bdt_wrong", "d8new@t.io")
+                .unwrap()
+                .is_none()
+        );
+        // The right token for a different member is rejected (dual credential).
+        assert!(verify_member_token(&conn, &board_id, &raw, "ghost@t.io")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn d8_legacy_plaintext_row_is_lazily_migrated_on_first_use() {
+        let (conn, board_id) = setup_db();
+        // Simulate a pre-D8 row: raw token, no salt column value.
+        conn.execute(
+            "INSERT INTO board_members (email, role, display_name, board_id, board_token, board_token_salt)
+             VALUES ('legacy@t.io', 'worker', 'Legacy', ?1, 'plaintext-legacy', NULL)",
+            params![board_id],
+        )
+        .unwrap();
+
+        // First use: plaintext compares, then the row is re-written hashed.
+        assert!(
+            verify_member_token(&conn, &board_id, "plaintext-legacy", "legacy@t.io")
+                .unwrap()
+                .is_some()
+        );
+        let found = get_member(&conn, &board_id, "legacy@t.io")
+            .unwrap()
+            .unwrap();
+        assert_ne!(
+            found.board_token.as_deref(),
+            Some("plaintext-legacy"),
+            "must be migrated"
+        );
+        let salt = found.board_token_salt.expect("migrated row gets a salt");
+        assert_eq!(
+            found.board_token,
+            Some(board_token_hash("plaintext-legacy", &salt))
+        );
+
+        // Second use goes through the hash path and still authenticates.
+        assert!(
+            verify_member_token(&conn, &board_id, "plaintext-legacy", "legacy@t.io")
+                .unwrap()
+                .is_some()
+        );
+        // Wrong token after migration is rejected.
+        assert!(
+            verify_member_token(&conn, &board_id, "other", "legacy@t.io")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn d8_plaintext_window_closed_rejects_unmigrated_rows() {
+        let (conn, board_id) = setup_db();
+        conn.execute(
+            "INSERT INTO board_members (email, role, display_name, board_id, board_token, board_token_salt)
+             VALUES ('legacy2@t.io', 'worker', 'L2', ?1, 'plaintext-legacy2', NULL)",
+            params![board_id],
+        )
+        .unwrap();
+
+        // Window open: works (and migrates).
+        assert!(verify_member_token_cfg(
+            &conn,
+            &board_id,
+            "plaintext-legacy2",
+            "legacy2@t.io",
+            true
+        )
+        .unwrap()
+        .is_some());
+
+        // A second unmigrated row with the window closed: rejected outright.
+        conn.execute(
+            "INSERT INTO board_members (email, role, display_name, board_id, board_token, board_token_salt)
+             VALUES ('legacy3@t.io', 'worker', 'L3', ?1, 'plaintext-legacy3', NULL)",
+            params![board_id],
+        )
+        .unwrap();
+        assert!(verify_member_token_cfg(
+            &conn,
+            &board_id,
+            "plaintext-legacy3",
+            "legacy3@t.io",
+            false
+        )
+        .unwrap()
+        .is_none());
+        // Migrated rows keep working with the window closed.
+        assert!(verify_member_token_cfg(
+            &conn,
+            &board_id,
+            "plaintext-legacy2",
+            "legacy2@t.io",
+            false
+        )
+        .unwrap()
+        .is_some());
+    }
+
+    #[test]
+    fn d8_refresh_upsert_preserves_stored_credential_verbatim() {
+        let (conn, board_id) = setup_db();
+        let raw = "bdt_refreshed".to_string();
+        add_member(
+            &conn,
+            &Member {
+                email: "r@t.io".into(),
+                role: "worker".into(),
+                display_name: "r".into(),
+                board_id: board_id.clone(),
+                board_token: Some(raw.clone()),
+                board_token_salt: None,
+                joined_at: None,
+                domains: None,
+                capability_snapshot: None,
+            },
+        )
+        .unwrap();
+        let first = get_member(&conn, &board_id, "r@t.io").unwrap().unwrap();
+        let (stored, salt) = (
+            first.board_token.clone().unwrap(),
+            first.board_token_salt.clone(),
+        );
+        assert_ne!(stored, raw);
+
+        // The refresh path passes the stored (hash, salt) pair back — the
+        // upsert must not double-hash or clobber the credential.
+        add_member(
+            &conn,
+            &Member {
+                email: "r@t.io".into(),
+                role: "orchestrator".into(), // role still updates
+                display_name: "r2".into(),
+                board_id: board_id.clone(),
+                board_token: Some(stored.clone()),
+                board_token_salt: salt.clone(),
+                joined_at: None,
+                domains: None,
+                capability_snapshot: None,
+            },
+        )
+        .unwrap();
+        let after = get_member(&conn, &board_id, "r@t.io").unwrap().unwrap();
+        assert_eq!(
+            after.board_token.as_deref(),
+            Some(stored.as_str()),
+            "credential unchanged"
+        );
+        assert_eq!(after.board_token_salt.as_deref(), salt.as_deref());
+        assert_eq!(after.role, "orchestrator", "non-token fields still update");
+        // The original raw token still authenticates after the upsert.
+        assert!(verify_member_token(&conn, &board_id, &raw, "r@t.io")
+            .unwrap()
+            .is_some());
+    }
+}

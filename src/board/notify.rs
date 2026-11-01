@@ -1,0 +1,970 @@
+//! C-flow notifications — Board → member notification emails.
+//!
+//! Each notification creates an outbound EmailRecord; scheduler handles delivery.
+//! Delivery path scheduler-determined (webhook for same-gateway, SMTP relay for external).
+
+use crate::board::models::*;
+use crate::core::email::factory::EmailFactory;
+use std::cell::RefCell;
+use std::sync::Arc;
+use tokio::task::JoinHandle;
+
+/// Detect if text contains CJK characters.
+fn has_cjk(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c, '\u{4e00}'..='\u{9fff}' | '\u{3000}'..='\u{303f}' | '\u{ff00}'..='\u{ffef}'))
+}
+
+/// Return `cn` if the task's subject or body contains Chinese, otherwise `en`.
+fn t<'a>(task: &Task, cn: &'a str, en: &'a str) -> &'a str {
+    if has_cjk(&task.title) || has_cjk(&task.body) {
+        cn
+    } else {
+        en
+    }
+}
+
+pub struct Notifier {
+    pub email_factory: Option<Arc<EmailFactory>>,
+    pub system_id: String,
+    pub board_short_id: String,
+    pub board_email: String,
+    pub board_id: String,
+    pub gateway_domain: String,
+    pub gateway_url: String,
+    pub board_db_path: String,
+    pub attachments_json: Option<String>,
+    pub trigger_tx: Option<tokio::sync::mpsc::Sender<String>>,
+    pub tasks: RefCell<Vec<JoinHandle<()>>>,
+    /// command result reply policy (config: board.command_reply)
+    pub reply_policy: ReplyPolicy,
+}
+
+/// Command result reply policy (0+B). Config key `board.command_reply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyPolicy {
+    /// no ack at all
+    Off,
+    /// success of read-only verbs + failure of every verb (default tier)
+    ReadOnlyAndErrors,
+    /// ack for every verb (mutation success included)
+    All,
+}
+
+impl ReplyPolicy {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" => Self::Off,
+            "all" => Self::All,
+            _ => Self::ReadOnlyAndErrors,
+        }
+    }
+
+    /// whether this result gets an ack (independent of "is board member"; the caller enforces the membership gate)
+    pub fn allows(self, verb: &str, ok: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::All => true,
+            Self::ReadOnlyAndErrors => !ok || is_read_only_verb(verb),
+        }
+    }
+}
+
+/// Read-only verbs: mutation success already has a business notification; a duplicate ack would be noise
+pub fn is_read_only_verb(verb: &str) -> bool {
+    matches!(
+        verb,
+        "show" | "list" | "status" | "members" | "roles" | "gateway-info"
+    )
+}
+
+/// cap on the json section inside an ack
+pub const COMMAND_REPLY_JSON_CAP: usize = 16 * 1024;
+
+fn truncate_on_char_boundary(s: &str, cap: usize) -> &str {
+    if s.len() <= cap {
+        return s;
+    }
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if i >= cap {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &s[..end]
+}
+
+/// Build the ack (subject, body). The subject must **never start with `[A2A] `** -
+/// the interceptor identifies commands via `subject.strip_prefix("[A2A] ")`; otherwise the ack would be treated as a new command (loopback).
+pub fn format_command_result(
+    verb: &str,
+    ok: bool,
+    summary: &str,
+    data: Option<&serde_json::Value>,
+    api_hint: &str,
+) -> (String, String) {
+    let status = if ok { "ok" } else { "error" };
+    let subject = format!("[A2A-RESULT] {verb} {status}");
+    let mut body = format!("[A2A-RESULT] verb={verb} status={status}\n{summary}\n");
+    if let Some(d) = data {
+        let pretty = serde_json::to_string_pretty(d).unwrap_or_else(|_| "{}".to_string());
+        if pretty.len() > COMMAND_REPLY_JSON_CAP {
+            body.push_str(&format!(
+                "\n```json\n{}\n… 已截断(共 {} 字节)\n```\n全量: GET {}\n",
+                truncate_on_char_boundary(&pretty, COMMAND_REPLY_JSON_CAP),
+                pretty.len(),
+                api_hint
+            ));
+        } else {
+            body.push_str(&format!("\n```json\n{pretty}\n```\n"));
+        }
+    }
+    (subject, body)
+}
+
+impl Notifier {
+    /// Collect all spawned notification tasks for awaiting.
+    pub fn take_tasks(&self) -> Vec<JoinHandle<()>> {
+        self.tasks.borrow_mut().drain(..).collect()
+    }
+
+    /// Command result reply (0+B): reply to **board members only** (non-member failures only get a log line, preventing backscatter and self-amplification),
+    /// and decide per reply_policy whether to ack this verb/result.
+    pub fn notify_command_result(
+        &self,
+        to: &str,
+        verb: &str,
+        ok: bool,
+        summary: &str,
+        data: Option<&serde_json::Value>,
+        is_member: bool,
+    ) {
+        if !is_member || !self.reply_policy.allows(verb, ok) {
+            return;
+        }
+        let hint = format!("{}/api/v1/board/{}/tasks", self.gateway_url, self.board_id);
+        let (subject, body) = format_command_result(verb, ok, summary, data, &hint);
+        self.create_email(to, &subject, &body, None);
+    }
+    fn format_body(
+        &self,
+        cn: bool,
+        label: &str,
+        task: &Task,
+        context: &str,
+        action: &str,
+    ) -> String {
+        let (task_l, board_l, ctx_l, act_l) = if cn {
+            ("任务", "看板", "上下文", "操作")
+        } else {
+            ("Task", "Board", "Context", "Action")
+        };
+        format!(
+            "── A2A Board ──\n\n{label}\n  {task_l}: {sid} — {title}\n  {board_l}: {bsid}\n\n── {ctx_l} ──\n{context}\n\n── {act_l} ──\n{action}",
+            label = label,
+            task_l = task_l,
+            sid = task.short_id,
+            title = task.title,
+            board_l = board_l,
+            bsid = self.board_short_id,
+            ctx_l = ctx_l,
+            context = context,
+            act_l = act_l,
+            action = action,
+        )
+    }
+
+    fn create_email(&self, to: &str, subject: &str, body: &str, headers: Option<String>) {
+        let factory = match &self.email_factory {
+            Some(f) => f.clone(),
+            None => {
+                tracing::info!(
+                    "[a2a_board] notification (no factory): to={} subject={}",
+                    to,
+                    subject
+                );
+                return;
+            }
+        };
+        let sender = self.board_email.clone();
+        let email_id = format!("a2a_{}_{}", &self.board_id[..8], uuid::Uuid::new_v4());
+        let sid = self.system_id.clone();
+        let to = to.to_string();
+        let subject = subject.to_string();
+        let body = body.to_string();
+        let is_internal = to.contains(&format!("@{}", self.gateway_domain));
+        let attachments = self.attachments_json.clone();
+        let trigger_tx = self.trigger_tx.clone();
+        // X-Board-Members is OUTBOUND-ONLY (cross-gateway member sync).
+        // Inbound (same-gateway webhook) deliveries must NOT carry it —
+        // members are already in the local board DB; the header is only
+        // consumed from raw SMTP text (receiver.rs) for external gateways.
+        let inbound_headers = headers.as_ref().map(|h| {
+            serde_json::from_str::<serde_json::Value>(h)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .map(|mut m| {
+                    m.remove("X-Board-Members");
+                    serde_json::json!(m).to_string()
+                })
+                .unwrap_or_else(|| h.clone())
+        });
+        let handle = tokio::spawn(async move {
+            let result = if is_internal {
+                // Push-mode internal recipients need the webhook endpoint
+                // attached, otherwise process_email_webhook sees an empty
+                // endpoints_map and completes + deletes the mail silently.
+                // Pull-mode recipients resolve to no endpoint ("{}") and stay
+                // covered by the recipients pre-scan.
+                let eps = factory
+                    .env_factory
+                    .build_endpoints_for_recipients(std::slice::from_ref(&to))
+                    .await;
+                let eps = (eps != "{}").then_some(eps);
+                factory
+                    .create_inbound(
+                        &email_id,
+                        &sid,
+                        &sender,
+                        &to,
+                        &subject,
+                        &body,
+                        eps.as_deref(),
+                        None,
+                        inbound_headers.as_deref(),
+                        3,
+                    )
+                    .await
+            } else {
+                factory
+                    .create_outbound(
+                        &email_id,
+                        &sid,
+                        &sender,
+                        &to,
+                        &subject,
+                        &body,
+                        None,
+                        attachments.as_deref(),
+                        headers.as_deref(),
+                        3,
+                    )
+                    .await
+            };
+            if let Err(e) = result {
+                tracing::error!(
+                    "[a2a_board] notify failed: to={} subject={} error={:?}",
+                    to,
+                    subject,
+                    e
+                );
+            } else if let Some(tx) = trigger_tx {
+                // Born `readying`; the trigger is the only first-delivery
+                // claimant (tick only reads `ready`).
+                if let Err(e) = tx.try_send(email_id) {
+                    tracing::warn!(
+                        "[a2a_board] notify trigger dropped (channel full): to={} error={} — readying sweep will pick it up",
+                        to,
+                        e
+                    );
+                }
+            }
+        });
+        self.tasks.borrow_mut().push(handle);
+    }
+
+    fn create_email_to_all(&self, members: &[Member], subject: &str, body: &str) {
+        // Every board notification carries the current member set in
+        // X-Board-Members. Recipient gateways replace their local board
+        // group whitelist with it, so member additions AND removals
+        // propagate automatically across gateways (removed members drop
+        // out of the whitelist).
+        //
+        // X-Board-Members is an OUTBOUND-ONLY header (cross-gateway member
+        // sync); inbound (webhook) deliveries skip it — same-gateway members
+        // are already in the local board DB. Headers must be a JSON object
+        // (EmailRecord::headers_parsed parses JSON; raw "Name: value" text
+        // silently parses to an empty map and the header is lost).
+        let member_csv: String = members
+            .iter()
+            .map(|m| m.email.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        let header = serde_json::json!({
+            "X-Board-Members": format!("{};{}", self.board_email, member_csv),
+        })
+        .to_string();
+        for m in members {
+            self.create_email(&m.email, subject, body, Some(header.clone()));
+        }
+    }
+
+    // ── C1: task assignment ──
+    pub fn notify_assigned(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] assigned {}: {}", task.short_id, task.title);
+        let context = format!(
+            "{}\n{}: {}\n{}: {}\n{}: {}",
+            t(task, "描述", "Description"),
+            t(task, "分配人", "Assignee"),
+            task.assignee,
+            t(task, "审阅者", "Reviewer"),
+            task.reviewer
+                .as_deref()
+                .unwrap_or(t(task, "(无)", "(none)")),
+            t(task, "创建人", "Created by"),
+            task.created_by,
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "新任务分配", "New Task Assigned"),
+            task,
+            &context,
+            &format!(
+                "{} [A2A] heartbeat {}",
+                t(task, "开始执行后发", "Send after starting:"),
+                task.short_id,
+            ),
+        );
+        self.create_email(&task.assignee, &subject, &body, None);
+    }
+
+    // ── C2: pending review ──
+    pub fn notify_review_needed(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] review-needed {}: {}", task.short_id, task.title);
+        let context = format!(
+            "{}: {}\n{}: {}",
+            t(task, "完成人", "Completed by"),
+            task.assignee,
+            t(task, "产出物", "Output"),
+            task.summary
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "待审阅", "Pending Review"),
+            task,
+            &context,
+            &format!(
+                "[A2A] approve {}  — {}\n  [A2A] reject {}   — {}",
+                task.short_id,
+                t(task, "通过", "Approve"),
+                task.short_id,
+                t(task, "退回", "Reject"),
+            ),
+        );
+        if let Some(reviewer) = &task.reviewer {
+            self.create_email(reviewer, &subject, &body, None);
+        }
+    }
+
+    // ── C3: review approved ──
+    pub fn notify_approved(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] approved {}: {}", task.short_id, task.title);
+        let context = format!(
+            "{}: {}",
+            t(task, "审阅人", "Reviewer"),
+            task.reviewer
+                .as_deref()
+                .unwrap_or(t(task, "(无)", "(none)"))
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "审阅通过", "Approved"),
+            task,
+            &context,
+            t(task, "已完成，无后续操作", "Completed, no further action"),
+        );
+        self.create_email(&task.assignee, &subject, &body, None);
+    }
+
+    // ── C4: review rejected ──
+    pub fn notify_rejected(&self, task: &Task, reason: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] rejected {}: {}", task.short_id, task.title);
+        let context = format!(
+            "{}: {}\n{}: {}",
+            t(task, "审阅人", "Reviewer"),
+            task.reviewer.as_deref().unwrap_or("unknown"),
+            t(task, "原因", "Reason"),
+            reason,
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "审阅退回", "Rejected"),
+            task,
+            &context,
+            &format!(
+                "{} [A2A] complete {}",
+                t(task, "修改后重新", "Revise and re-submit"),
+                task.short_id
+            ),
+        );
+        self.create_email(&task.assignee, &subject, &body, None);
+    }
+
+    // ── C5: blocked ──
+    pub fn notify_blocked(&self, task: &Task, blocker: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] blocked {}: {}", task.short_id, task.title);
+        let body = self.format_body(
+            cn,
+            t(task, "任务阻塞", "Task Blocked"),
+            task,
+            &format!("{}: {}", t(task, "阻挡人", "Blocker"), blocker),
+            t(
+                task,
+                "Orchestrator 协调处理",
+                "Orchestrator will coordinate",
+            ),
+        );
+        if let Ok(members) = crate::board::db::list_members(
+            &crate::board::db::open_board_db(&self.board_db_path, &task.board_id).unwrap(),
+            &task.board_id,
+        ) {
+            for m in &members {
+                if m.role == "orchestrator" || m.email == blocker {
+                    self.create_email(&m.email, &subject, &body, None);
+                }
+            }
+        }
+    }
+
+    // ── C6: unblocked ──
+    pub fn notify_unblocked(&self, task: &Task, unblocker: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] unblocked {}: {}", task.short_id, task.title);
+        let body = self.format_body(
+            cn,
+            t(task, "阻塞解除", "Unblocked"),
+            task,
+            &format!("{}: {}", t(task, "解除人", "Unblocked by"), unblocker),
+            t(task, "继续执行", "Resume execution"),
+        );
+        self.create_email(&task.assignee, &subject, &body, None);
+    }
+
+    // ── C7: cancelled ──
+    pub fn notify_cancelled(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] cancelled {}: {}", task.short_id, task.title);
+        let body = self.format_body(
+            cn,
+            t(task, "任务取消", "Task Cancelled"),
+            task,
+            t(task, "已终止", "Terminated"),
+            t(task, "停止工作等待新分配", "Stop work, await re-assignment"),
+        );
+        self.create_email(&task.assignee, &subject, &body, None);
+    }
+
+    // ── C8: project output ──
+    pub fn notify_output(&self, task: &Task) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] output: {} {}", self.board_short_id, task.title);
+        let context = format!(
+            "{}: {}\nsummary: {}",
+            t(task, "最终输出", "Final Output"),
+            task.title,
+            task.summary
+        );
+        let body = self.format_body(
+            cn,
+            t(task, "项目输出", "Project Output"),
+            task,
+            &context,
+            &format!(
+                "[Confirm] output {} — {}",
+                self.board_short_id,
+                t(task, "验收通过", "Accepted")
+            ),
+        );
+        if let Ok(members) = crate::board::db::list_members(
+            &crate::board::db::open_board_db(&self.board_db_path, &self.board_id).unwrap(),
+            &self.board_id,
+        ) {
+            for m in &members {
+                if m.role == "owner" {
+                    self.create_email(&m.email, &subject, &body, None);
+                }
+            }
+        }
+    }
+
+    // ── C9: comment ──
+    pub fn notify_comment(&self, task: &Task, commenter: &str, text: &str) {
+        let cn = has_cjk(&task.title) || has_cjk(&task.body);
+        let subject = format!("[A2A] comment {}: {}", task.short_id, task.title);
+        let body = self.format_body(
+            cn,
+            t(task, "新评论", "New Comment"),
+            task,
+            &format!("{}: {}\n{}", t(task, "来自", "From"), commenter, text),
+            t(
+                task,
+                "直接回复邮件参与讨论",
+                "Reply directly to join the discussion",
+            ),
+        );
+        let recipient = if commenter == task.assignee {
+            task.reviewer.as_deref().unwrap_or("")
+        } else {
+            &task.assignee
+        };
+        if !recipient.is_empty() {
+            self.create_email(recipient, &subject, &body, None);
+        }
+    }
+
+    // ── C10: broadcast ──
+    pub fn notify_all(&self, board_id: &str, message: &str) {
+        let subject = format!("[A2A] notice: {} {}", self.board_short_id, message);
+        if let Ok(members) = crate::board::db::list_members(
+            &crate::board::db::open_board_db(&self.board_db_path, board_id).unwrap(),
+            board_id,
+        ) {
+            self.create_email_to_all(&members, &subject, message);
+        }
+    }
+
+    /// Send individual invite to a board member with token and gateway URL.
+    pub fn notify_invite(
+        &self,
+        member_email: &str,
+        board_token: &str,
+        board_id: &str,
+        board_email: &str,
+        short_id: &str,
+        members_csv: &str,
+    ) {
+        let body = format!(
+            "── A2A Board ──\n\n{}\n  {}: {}\n  Board Email: {}\n\n── {} ──\nAPI: {}\nBoard ID: {}\nToken: {}",
+            "Board Invitation",
+            "Board",
+            short_id,
+            board_email,
+            "Information",
+            self.gateway_url,
+            board_id,
+            board_token,
+        );
+        let subject = format!("[A2A] invite: {}", short_id);
+        // Group-whitelist header: board address + member list (new members).
+        // JSON object — EmailRecord::headers_parsed parses JSON; raw
+        // "Name: value" text silently parses to an empty map (header lost).
+        let header = serde_json::json!({
+            "X-Board-Members": format!("{};{}", board_email, members_csv),
+        })
+        .to_string();
+        self.create_email(member_email, &subject, &body, Some(header));
+    }
+
+    // ── arbitration request ──
+    pub fn notify_arbitrate(
+        &self,
+        task: Option<&Task>,
+        requester: &str,
+        admin_email: &str,
+        dispute: &str,
+    ) {
+        let cn = task.is_some_and(|t| has_cjk(&t.title) || has_cjk(&t.body));
+        let task_label = if cn { "任务" } else { "Task" };
+        let task_info = task
+            .map(|t| format!("{}: {} ({})", task_label, t.short_id, t.title))
+            .unwrap_or_default();
+        let subject = format!("[A2A] arbitrate: {}", self.board_short_id);
+        let (arb_req, from, dispute_l, submitted) = if cn {
+            ("仲裁请求", "来自", "争议", "仲裁请求已提交给 Admin。")
+        } else {
+            (
+                "Arbitration Request",
+                "From",
+                "Dispute",
+                "Arbitration request submitted to Admin.",
+            )
+        };
+        let body = format!(
+            "{}\n{}: {}\n{}\n{}: {}",
+            arb_req, from, requester, task_info, dispute_l, dispute
+        );
+        if !admin_email.is_empty() {
+            self.create_email(admin_email, &subject, &body, None);
+        }
+        self.create_email(requester, &subject, submitted, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_board() -> Board {
+        Board {
+            id: "a3f8c21b9d4e73b2f0c1".to_string(),
+            short_id: "pgmig001".to_string(),
+            board_email: "pgmig001.a2a@test.io".to_string(),
+            goal: None,
+            status: BoardStatus::Active,
+            output_task_id: None,
+            plan_version: None,
+            plan_text: None,
+            plan_confirmed_at: None,
+            criteria_version: None,
+            criteria_text: None,
+            criteria_confirmed_at: None,
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            completed_at: None,
+            system_id: None,
+        }
+    }
+
+    fn make_task() -> Task {
+        Task {
+            id: "t_T1_a3f8c21b".to_string(),
+            short_id: "T1".to_string(),
+            board_id: "a3f8c21b9d4e73b2f0c1".to_string(),
+            title: "成本分析".to_string(),
+            body: "对比 AWS/GCP 3年 TCO".to_string(),
+            status: TaskStatus::Running,
+            assignee: "worker@t.io".to_string(),
+            reviewer: Some("veri@t.io".to_string()),
+            parent_ids: vec![],
+            tags: vec![],
+            summary: "AWS cheaper by 15%".to_string(),
+            metadata: None,
+            created_by: "orch@t.io".to_string(),
+            created_at: "2026-07-01T00:00:00Z".to_string(),
+            updated_at: "2026-07-01T00:00:00Z".to_string(),
+            completed_at: None,
+            cancelled_at: None,
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn test_notify_assigned_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        // Just verify it doesn't panic (no email sent since factory is None)
+        notifier.notify_assigned(&task);
+    }
+
+    #[test]
+    fn test_notify_review_needed_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_review_needed(&task);
+    }
+
+    #[test]
+    fn test_notify_approved_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_approved(&task);
+    }
+
+    #[test]
+    fn test_notify_rejected_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_rejected(&task, "need more data");
+    }
+
+    #[test]
+    fn test_notify_blocked_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_blocked(&task, "worker@t.io");
+    }
+
+    #[test]
+    fn test_notify_unblocked_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_unblocked(&task, "orch@t.io");
+    }
+
+    #[test]
+    fn test_notify_cancelled_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_cancelled(&task);
+    }
+
+    #[test]
+    fn test_notify_comment_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_comment(&task, "veri@t.io", "looks good");
+    }
+
+    #[test]
+    fn test_notify_comment_to_reviewer_when_assignee_comments() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        // assignee comments -> notification goes to reviewer
+        notifier.notify_comment(&task, "worker@t.io", "please review");
+    }
+
+    #[test]
+    fn test_notify_all_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        notifier.notify_all("a3f8c21b9d4e73b2f0c1", "test message");
+    }
+
+    #[test]
+    fn test_notify_arbitrate_subject() {
+        let board = make_board();
+        let notifier = Notifier {
+            board_db_path: std::env::temp_dir()
+                .join("aimail-notify-test")
+                .to_string_lossy()
+                .into_owned(),
+            email_factory: None,
+            system_id: "test".to_string(),
+            board_short_id: board.short_id.clone(),
+            board_email: board.board_email.clone(),
+            board_id: board.id.clone(),
+            gateway_domain: "test.io".to_string(),
+            gateway_url: "".to_string(),
+            attachments_json: None,
+            trigger_tx: None,
+            tasks: RefCell::new(Vec::new()),
+            reply_policy: ReplyPolicy::Off, // test fixture: no ack by default
+        };
+        let task = make_task();
+        notifier.notify_arbitrate(Some(&task), "veri@t.io", "admin@t.io", "dispute text");
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    #[test]
+    fn test_reply_policy_parse_and_allows() {
+        assert_eq!(ReplyPolicy::parse("off"), ReplyPolicy::Off);
+        assert_eq!(ReplyPolicy::parse("ALL"), ReplyPolicy::All);
+        assert_eq!(
+            ReplyPolicy::parse("weird-value"),
+            ReplyPolicy::ReadOnlyAndErrors
+        );
+        let p = ReplyPolicy::ReadOnlyAndErrors;
+        assert!(p.allows("show", true));
+        assert!(
+            !p.allows("complete", true),
+            "mutation success is not acked by default (a business notification already exists)"
+        );
+        assert!(p.allows("complete", false));
+        assert!(p.allows("anything", false));
+        assert!(!ReplyPolicy::Off.allows("show", false));
+        assert!(ReplyPolicy::All.allows("complete", true));
+    }
+
+    #[test]
+    fn test_reply_subject_never_looks_like_a_command() {
+        let (s, _b) = format_command_result("show", true, "status=ok", None, "http://x/tasks");
+        assert_eq!(s, "[A2A-RESULT] show ok");
+        assert!(
+            !s.starts_with("[A2A] "),
+            "the subject must not start with [A2A], otherwise the interceptor treats it as a command (loopback)"
+        );
+    }
+
+    #[test]
+    fn test_reply_body_carries_json_and_caps_it() {
+        let data = serde_json::json!({"task": {"short_id": "T1"},
+                                      "parent_summaries": [{"summary": "60%"}]});
+        let (_s, b) =
+            format_command_result("show", true, "status=ok", Some(&data), "http://x/tasks");
+        assert!(b.contains("parent_summaries") && b.contains("60%"));
+        let big = serde_json::json!({"items": "x".repeat(COMMAND_REPLY_JSON_CAP + 500)});
+        let (_s2, b2) =
+            format_command_result("list", true, "status=ok", Some(&big), "http://x/tasks");
+        assert!(b2.contains("已截断") && b2.contains("http://x/tasks"));
+        assert!(
+            b2.len() < COMMAND_REPLY_JSON_CAP + 4096,
+            "after truncation it must not greatly exceed the cap: {}",
+            b2.len()
+        );
+    }
+
+    #[test]
+    fn test_reply_truncation_is_char_boundary_safe() {
+        let big = serde_json::json!({"items": "汉".repeat(COMMAND_REPLY_JSON_CAP)});
+        let (_s, b) = format_command_result("list", true, "ok", Some(&big), "hint");
+        assert!(b.contains("已截断"));
+    }
+}

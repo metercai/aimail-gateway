@@ -1,0 +1,632 @@
+//! Activation code handlers (core).
+
+use axum::{
+    extract::{ConnectInfo, Extension, State},
+    http::StatusCode,
+    response::Json,
+};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// Activation codes expire after this many days (single consumer, not configurable).
+const ACTIVATION_CODE_TTL_DAYS: i64 = 7;
+
+use crate::core::api::auth::require_scope_any;
+use crate::core::api::types::{ErrorResponse, HttpState};
+use crate::core::storage::ApiKeyRecord;
+
+// ── Address activation helpers ──
+
+/// Generate address activation codes. Writes into activation_codes table.
+pub async fn generate_activation_codes(
+    db: &crate::core::storage::Database,
+    system_id: &str,
+    domain: &str,
+    email_address: Option<&str>,
+    count: u32,
+) -> crate::core::errors::AppResult<Vec<String>> {
+    let email = email_address.unwrap_or("");
+    let expires = {
+        let future = chrono::Utc::now() + chrono::Duration::days(ACTIVATION_CODE_TTL_DAYS);
+        Some(future.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    };
+    let mut codes = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let code = {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let parts: Vec<String> = (0..6)
+                .map(|_| {
+                    let val: u32 = rng.gen_range(0..0x10000);
+                    format!("{:04x}", val as u16)
+                })
+                .collect();
+            format!("addr-{}", parts.join("-"))
+        };
+        let hash = crate::core::api::auth::sha256_hex(&code);
+        db.insert_activation_code(
+            &hash,
+            &code,
+            "address",
+            system_id,
+            domain,
+            email,
+            expires.as_deref(),
+        )
+        .await?;
+        codes.push(code);
+    }
+    Ok(codes)
+}
+
+/// Redeem an address activation code → creates an agent-scope API key.
+///
+/// The endpoint is unauthenticated (the code is the only credential), so
+/// caller-supplied scopes are ignored and the bound address is enforced.
+pub async fn activate_address_code(
+    db: &crate::core::storage::Database,
+    code: &str,
+    email_address: &str,
+    factory: &crate::core::factory::EnvFactory,
+) -> crate::core::errors::AppResult<(String, i64)> {
+    let hash = crate::core::api::auth::sha256_hex(code);
+    let (system_id, bound_email) = db.lookup_activation_code(&hash).await?.ok_or_else(|| {
+        crate::core::errors::AppError::ActivationCodeGone(
+            "invalid or expired activation code".into(),
+        )
+    })?;
+    // Codes generated for a specific address (register_address) are bound to it.
+    // Batch codes (platform/system) carry an empty binding and accept any address.
+    if !bound_email.is_empty() && !email_address.eq_ignore_ascii_case(&bound_email) {
+        return Err(crate::core::errors::AppError::Forbidden(
+            "activation code is bound to a different address".into(),
+        ));
+    }
+    // Atomically claim the code (UPDATE ... WHERE claimed = 0) so concurrent
+    // redemptions of the same code cannot both create keys.
+    let claimed = db
+        .claim_activation_code(&hash, email_address)
+        .await
+        .map_err(|e| crate::core::errors::AppError::Internal(format!("claim code: {e}")))?;
+    if !claimed {
+        return Err(crate::core::errors::AppError::ActivationCodeGone(
+            "activation code already redeemed".into(),
+        ));
+    }
+
+    let (raw_key, key_hash, key_prefix) = {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let raw_bytes: [u8; 32] = rng.gen();
+        let raw_key = hex::encode(raw_bytes);
+        let hash = crate::core::api::auth::sha256_hex(&raw_key);
+        let prefix = raw_key[..8].to_string();
+        (raw_key, hash, prefix)
+    };
+
+    // Address activation codes always produce an agent-scope key.
+    let actual_scopes: Vec<String> = vec!["agent".to_string()];
+
+    let record = factory
+        .create_api_key(
+            &system_id,
+            email_address,
+            &key_hash,
+            &key_prefix,
+            &actual_scopes,
+            None,
+            "agent",
+        )
+        .await
+        .map_err(|e| crate::core::errors::AppError::Internal(format!("create key: {e}")))?;
+
+    db.delete_activation_code(&hash).await?;
+    Ok((raw_key, record.id))
+}
+
+// ── Rate limiter for public activation endpoint ──────────────────
+
+static ACTIVATION_ATTEMPTS: std::sync::LazyLock<Mutex<HashMap<IpAddr, (u32, Instant)>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const ACTIVATION_MAX_FAILURES: u32 = 10;
+const ACTIVATION_BLOCK_SECS: u64 = 300;
+
+fn check_activation_limit(ip: IpAddr) -> bool {
+    let mut map = ACTIVATION_ATTEMPTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Prune entries whose block window has fully elapsed. Without this, an IP
+    // that accumulates failures and later cools off would keep its stale
+    // (count, since) entry forever (unbounded map growth).
+    map.retain(|_, (_, since)| since.elapsed() < Duration::from_secs(ACTIVATION_BLOCK_SECS));
+    if let Some((count, since)) = map.get(&ip) {
+        if *count >= ACTIVATION_MAX_FAILURES
+            && since.elapsed() < Duration::from_secs(ACTIVATION_BLOCK_SECS)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn record_activation_failure(ip: IpAddr) {
+    let mut map = ACTIVATION_ATTEMPTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let entry = map.entry(ip).or_insert((0, Instant::now()));
+    entry.0 += 1;
+}
+
+fn clear_activation_limit(ip: IpAddr) {
+    ACTIVATION_ATTEMPTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&ip);
+}
+
+// ── Handlers ──────────────────────────────────────────────────────
+
+/// D12: parse the `count` field of a batch-code request. `None` field ->
+/// default 1; out of `[1, MAX_CODE_BATCH]` (or not fitting u32 on narrow
+/// targets) -> `None` so the caller rejects with 400 instead of silently
+/// narrowing.
+const MAX_CODE_BATCH: u64 = 10_000;
+
+fn parse_code_count(v: Option<&serde_json::Value>) -> Option<u32> {
+    let c = v.and_then(|x| x.as_u64())?;
+    // MAX_CODE_BATCH (10_000) is far below u32::MAX, so fitting the range
+    // also guarantees the narrowing to u32 is lossless on any target.
+    (1..=MAX_CODE_BATCH).contains(&c).then_some(c as u32)
+}
+
+pub async fn batch_generate_codes(
+    State(state): State<HttpState>,
+    Extension(api_key): Extension<ApiKeyRecord>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    require_scope_any(&api_key, &["platform", "system"])?;
+    let code_type = body
+        .get("code_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("address");
+    if code_type != "address" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Only code_type=address is supported".to_string(),
+                detail: None,
+            }),
+        ));
+    }
+    let system_id = body.get("system_id").and_then(|v| v.as_str()).unwrap_or("");
+    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("");
+    let email = body.get("email_address").and_then(|v| v.as_str());
+    // D12: `count` arrives as u64 (JSON number) and is narrowed to u32 —
+    // validated in parse_code_count (no silent truncation, bounded batch).
+    // Field absent keeps the original default of 1.
+    let count = match body.get("count") {
+        None => 1,
+        Some(v) => match parse_code_count(Some(v)) {
+            Some(c) => c,
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "count must be in [1, 10000]".to_string(),
+                        detail: None,
+                    }),
+                ))
+            }
+        },
+    };
+
+    if let Some(email) = email {
+        let record = state
+            .factories
+            .email
+            .env_factory
+            .lookup_domain_addr(email)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                )
+            })?;
+        match record {
+            None => return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
+                error: "Cannot generate activation code: email address not registered. Register first via POST /api/v1/admin/systems/{sid}/domains".to_string(),
+                detail: None,
+            }))),
+            Some(ref r) if !r.is_active => return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
+                error: "Cannot generate activation code: domain registration is inactive".to_string(),
+                detail: None,
+            }))),
+            Some(ref r) if r.webhook_url.as_deref().unwrap_or("").is_empty() => return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
+                error: "Cannot generate activation code: address has no webhook routing configured".to_string(),
+                detail: None,
+            }))),
+            _ => {}
+        }
+        let meta = state
+            .factories
+            .email
+            .env_factory
+            .resolve_domain_addr_meta(email)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                )
+            })?;
+        if meta.as_ref().is_none_or(|m| m.manager_address.is_empty()) {
+            return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
+                error: "Cannot generate activation code: manager_address not configured for this address".to_string(),
+                detail: None,
+            })));
+        }
+    }
+
+    let raw_codes = generate_activation_codes(
+        &state.factories.email.env_factory.db,
+        system_id,
+        domain,
+        email,
+        count.clamp(1, 100),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to generate codes".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "raw_codes": raw_codes })))
+}
+
+pub async fn activate_address_handler(
+    State(state): State<HttpState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let ip = addr.ip();
+
+    // Rate limit check
+    if !check_activation_limit(ip) {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "Too many activation attempts. Please try again later.".to_string(),
+                detail: None,
+            }),
+        ));
+    }
+
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let email = body
+        .get("email_address")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let email_domain = email.rsplit('@').next().unwrap_or("");
+    if !email_domain.is_empty() {
+        // Domain-anchor lookup mirrors register_address: non-shared keys
+        // resolve on the bare domain; shared-domain systems resolve on
+        // their system anchor (system_name@email_domain) — same table,
+        // same lookup, only the key differs.
+        let code_hash = crate::core::api::auth::sha256_hex(code);
+        let sys_id = state
+            .factories
+            .email
+            .env_factory
+            .db
+            .lookup_activation_code(&code_hash)
+            .await
+            .ok()
+            .flatten()
+            .map(|(sid, _)| sid)
+            .unwrap_or_default();
+        let lookup_key = if sys_id.starts_with("shared-") {
+            let sys_name = email
+                .split('@')
+                .next()
+                .unwrap_or("")
+                .rsplit('.')
+                .next()
+                .unwrap_or("");
+            format!("{}@{}", sys_name, email_domain)
+        } else {
+            email_domain.to_string()
+        };
+        let has_domain = state
+            .factories
+            .email
+            .env_factory
+            .lookup_domain_addr(&lookup_key)
+            .await
+            .map(|r| r.is_some())
+            .unwrap_or(false);
+        if !has_domain {
+            record_activation_failure(ip);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Domain not registered".to_string(),
+                    detail: Some(format!(
+                        "Domain '{}' has not been added. Register it first via POST /api/v1/admin/systems/{{sid}}/domains",
+                        email_domain
+                    )),
+                }),
+            ));
+        }
+    }
+
+    let (raw_key, api_key_id) = activate_address_code(
+        &state.factories.email.env_factory.db,
+        code,
+        email,
+        &state.factories.email.env_factory,
+    )
+    .await
+    .map_err(|e| {
+        record_activation_failure(ip);
+        let code = e.status(); // D4: variant → status (single exit)
+        (
+            code,
+            Json(ErrorResponse {
+                error: "Activation failed".to_string(),
+                detail: Some(e.to_string()),
+            }),
+        )
+    })?;
+
+    clear_activation_limit(ip);
+
+    let body = Json(serde_json::json!({
+        "status": "activated", "raw_key": raw_key, "api_key_id": api_key_id, "email_address": email,
+    }));
+    Ok((StatusCode::OK, body))
+}
+
+// ── Tests ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::strategy::BaseSystemStore;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_env_factory() -> (
+        crate::core::storage::Database,
+        crate::core::factory::EnvFactory,
+    ) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-act-test-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap();
+        let factory = crate::core::factory::EnvFactory::new(
+            std::sync::Arc::new(db.clone()),
+            std::sync::Arc::new(BaseSystemStore),
+        );
+        (db, factory)
+    }
+
+    async fn insert_code(db: &crate::core::storage::Database, code: &str, email: &str) {
+        let hash = crate::core::api::auth::sha256_hex(code);
+        db.insert_activation_code(&hash, code, "address", "sys-test", "test.com", email, None)
+            .await
+            .unwrap();
+    }
+
+    // P1-1: activation codes must never yield non-agent scopes.
+    #[tokio::test]
+    async fn activate_code_produces_agent_scope_key() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0001", "alice@test.com").await;
+
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0001", "alice@test.com", &factory)
+            .await
+            .expect("activation must succeed");
+
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .expect("key must exist");
+        assert_eq!(rec.scopes, vec!["agent".to_string()]);
+        assert_eq!(rec.category, "agent");
+        assert_eq!(rec.email_address, "alice@test.com");
+    }
+
+    // P1-1: a code bound to one address cannot be activated for another.
+    #[tokio::test]
+    async fn activate_code_rejects_unbound_address() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0002", "alice@test.com").await;
+
+        let err = activate_address_code(&db, "addr-test-0002", "bob@test.com", &factory)
+            .await
+            .expect_err("bound code must reject a different address");
+        assert!(err.to_string().contains("bound to a different address"));
+
+        // Case-insensitive match on the bound address still works.
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0002", "Alice@Test.COM", &factory)
+            .await
+            .expect("case-insensitive bound match must succeed");
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.email_address, "Alice@Test.COM");
+    }
+
+    // P1-1: batch codes (empty binding) remain usable with any address.
+    #[tokio::test]
+    async fn activate_code_empty_binding_accepts_any_address() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-0003", "").await;
+
+        let (raw_key, _) = activate_address_code(&db, "addr-test-0003", "carol@test.com", &factory)
+            .await
+            .expect("unbound batch code must accept any address");
+        let rec = factory
+            .db
+            .verify_api_key(&crate::core::api::auth::sha256_hex(&raw_key))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.scopes, vec!["agent".to_string()]);
+    }
+
+    // P1-1: concurrent redemptions of one code must yield exactly one key —
+    // the claim is an atomic UPDATE ... WHERE claimed = 0, so the loser
+    // gets affected=0 (or a None lookup if it reads after the claim) and is
+    // rejected instead of minting a second key. The exact loser message
+    // depends on interleaving, so we assert the invariant, not the wording.
+    #[tokio::test]
+    async fn concurrent_activation_of_same_code_yields_single_key() {
+        let (db, factory) = temp_env_factory();
+        insert_code(&db, "addr-test-race", "race@test.com").await;
+
+        let (r1, r2) = tokio::join!(
+            activate_address_code(&db, "addr-test-race", "race@test.com", &factory),
+            activate_address_code(&db, "addr-test-race", "race@test.com", &factory),
+        );
+        let ok_count = [r1.as_ref(), r2.as_ref()]
+            .iter()
+            .filter(|r| r.is_ok())
+            .count();
+        assert_eq!(ok_count, 1, "exactly one concurrent redemption may succeed");
+        let loser = [r1, r2]
+            .into_iter()
+            .find_map(|r| r.err())
+            .expect("one side must fail");
+        let msg = loser.to_string();
+        assert!(
+            msg.contains("already redeemed") || msg.contains("invalid or expired"),
+            "loser must be rejected, got: {msg}"
+        );
+        // Exactly one key minted for the address.
+        let key = db
+            .get_api_key_by_email("race@test.com")
+            .await
+            .expect("key lookup")
+            .expect("one key must exist");
+        assert_eq!(key.scopes, vec!["agent".to_string()]);
+    }
+
+    // ── D7: a panic while holding the lock must not brick the limiter ─────
+    #[test]
+    fn d7_poisoned_activation_lock_still_serves_requests() {
+        use std::panic;
+        let ip = "203.0.113.7".parse::<IpAddr>().unwrap();
+        // Poison the lock: lock it and panic while holding it.
+        let _ = panic::catch_unwind(|| {
+            let _g = ACTIVATION_ATTEMPTS.lock().unwrap();
+            panic!("inject");
+        });
+        assert!(ACTIVATION_ATTEMPTS.is_poisoned(), "setup: lock is poisoned");
+
+        // The next normal check must still work (into_inner, not a panic
+        // into 500s), and the limiter must behave as before.
+        assert!(
+            check_activation_limit(ip),
+            "poisoned lock must not block normal traffic"
+        );
+        for _ in 0..ACTIVATION_MAX_FAILURES {
+            record_activation_failure(ip);
+        }
+        assert!(
+            !check_activation_limit(ip),
+            "failure cap still enforced after poison"
+        );
+        clear_activation_limit(ip);
+        assert!(check_activation_limit(ip), "clear works after poison");
+    }
+}
+
+#[cfg(test)]
+mod activation_status_tests {
+    use crate::core::errors::{app_error_status, AppError};
+    use axum::http::StatusCode;
+
+    #[test]
+    fn d4_double_spend_maps_to_gone() {
+        // A second redeem of a consumed code must be 410, not 500 (v1.0.7
+        // contract). D4: the *state* (error variant) decides the status —
+        // no wording inspection.
+        assert_eq!(
+            app_error_status(&AppError::ActivationCodeGone(
+                "activation code already redeemed".into()
+            )),
+            StatusCode::GONE
+        );
+        assert_eq!(
+            app_error_status(&AppError::ActivationCodeGone(
+                "activation code expired".into()
+            )),
+            StatusCode::GONE
+        );
+    }
+
+    #[test]
+    fn d4_activation_status_contract() {
+        // Only the gone state is 410 — an unknown/internal failure must not
+        // silently become 410 (the old string matcher's failure mode).
+        assert_eq!(
+            app_error_status(&AppError::Internal("claim code: boom".into())),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            app_error_status(&AppError::Forbidden(
+                "activation code is bound to a different address".into()
+            )),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn d12_code_count_parsing_rejects_out_of_range() {
+        use super::parse_code_count;
+        use serde_json::json;
+        assert_eq!(
+            parse_code_count(None),
+            None,
+            "absent field -> caller default"
+        );
+        assert_eq!(parse_code_count(Some(&json!(1))), Some(1));
+        assert_eq!(parse_code_count(Some(&json!(10_000))), Some(10_000));
+        assert_eq!(
+            parse_code_count(Some(&json!(10_001))),
+            None,
+            "above batch cap"
+        );
+        assert_eq!(parse_code_count(Some(&json!(0))), None, "zero rejected");
+        assert_eq!(
+            parse_code_count(Some(&json!(u32::MAX as u64 + 1))),
+            None,
+            "does not fit u32 (defensive on narrow targets)"
+        );
+        // u32::MAX itself exceeds the batch cap, so it is rejected by the cap
+        // (the u32-fit check is a belt-and-braces guard for narrow targets).
+        assert_eq!(parse_code_count(Some(&json!(u32::MAX as u64))), None);
+    }
+}

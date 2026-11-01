@@ -1,0 +1,1571 @@
+//! Outbound email send API endpoint.
+
+use axum::{
+    extract::{Extension, State},
+    http::StatusCode,
+    response::Json,
+};
+use tracing::{info, warn};
+use uuid::Uuid;
+
+use crate::core::api::auth::{domain_from_email, require_scope};
+use crate::core::api::types::*;
+use crate::core::email::storage::Recipients;
+use crate::core::email::utils::strip_persona;
+use crate::core::storage::ApiKeyRecord;
+
+/// POST /api/v1/send — Create an outbound email record via API.
+/// Scope + bare-domain check only; callers that need system/admission/rate
+/// prechecks do them before calling the shared core.
+pub async fn send_email(
+    state: State<HttpState>,
+    api_key: Extension<ApiKeyRecord>,
+    Json(req): Json<SendEmailRequest>,
+) -> Result<(StatusCode, Json<SendEmailResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // ── 1. Scope check ──
+    require_scope(&api_key, "agent")?;
+
+    // ── 1a. Bare-domain API keys cannot send emails ──
+    // A key with a bare domain (no @) is a domain-level admin key,
+    // not an address-bound key. Sending requires a valid email address.
+    if !api_key.email_address.contains('@') {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Sender mismatch".to_string(),
+                detail: Some(format!(
+                    "Domain-level key '{}' cannot send — use an address-level key with a valid email",
+                    api_key.email_address
+                )),
+            }),
+        ));
+    }
+
+    send_email_core(state, api_key, req).await
+}
+
+/// Shared send core (no strategy gates). Callers that need
+/// system/admission/rate prechecks do them first, then call this.
+pub async fn send_email_core(
+    state: State<HttpState>,
+    api_key: Extension<ApiKeyRecord>,
+    req: SendEmailRequest,
+) -> Result<(StatusCode, Json<SendEmailResponse>), (StatusCode, Json<ErrorResponse>)> {
+    // Note: scope + bare-domain checks are done by the caller before reaching
+    // this core.
+
+    // ── 2. Validate sender matches API key (persona-aware) ──
+
+    let sender_raw = req.sender.as_deref().unwrap_or(&api_key.email_address);
+    // Persona stripping is mode-dependent. Non-shared: "support.alice@agent.com"
+    // → base "alice@agent.com" (persona prefix). Shared-domain addresses use
+    // profile.system_name@domain — the single dot is the profile/system
+    // separator, not a persona prefix — so 0/1-dot addresses are kept whole
+    // and only 2-dot forms (persona.profile.system_name@domain) are stripped.
+    let is_shared_sender = api_key.system_id.starts_with("shared-");
+    let (sender_base, sender_persona) = if is_shared_sender {
+        let slocal = sender_raw.split('@').next().unwrap_or("");
+        if slocal.matches('.').count() >= 2 {
+            strip_persona(sender_raw)
+        } else {
+            (sender_raw.to_lowercase(), String::new())
+        }
+    } else {
+        strip_persona(sender_raw)
+    };
+    if sender_base != api_key.email_address {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Sender mismatch".to_string(),
+                detail: Some(format!(
+                    "The sender '{}' must match the API key email '{}'",
+                    sender_raw, api_key.email_address
+                )),
+            }),
+        ));
+    }
+    // Use base address for all subsequent internal matching (whitelist, domain, etc.)
+    let sender = sender_base.as_str();
+
+    // ── 2b. Append agent signature if configured ──
+    let mut markdown_body = req.markdown.clone();
+    if let Ok(Some(meta)) = state
+        .factories
+        .email
+        .env_factory
+        .resolve_domain_addr_meta(sender)
+        .await
+    {
+        if !meta.agent_signature.is_empty() {
+            let signature_block = format!("\n\n-- \n{}", meta.agent_signature);
+            markdown_body = format!("{}{}", markdown_body, signature_block);
+        }
+    }
+
+    // ── 2c. Gateway-level duplicate-send suppression (check) ──
+    // Identical (sender, to, cc, subject, body) within the configured
+    // window → 409, regardless of client. This is the backstop for
+    // out-of-band resends (scripts, direct API, tool workarounds).
+    // Key = raw request inputs (pre-whitelist) so check and the mark
+    // below (after all inserts) always agree. A resend with identical
+    // content re-derives the same key and is suppressed; a resend with
+    // ANY change (recipient, subject, body) gets a new key and goes
+    // through. The body includes the agent signature (appended at 2b),
+    // so signature changes also break the match.
+    if state.config.retry.send_dedupe_window_secs > 0 {
+        let dedup_to: Vec<String> = req
+            .to
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let dedup_cc: Vec<String> = req
+            .cc
+            .iter()
+            .flatten()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        let dedup_subject = req.subject.as_deref().unwrap_or("");
+        if state.send_deduper.is_duplicate(
+            sender,
+            &dedup_to,
+            &dedup_cc,
+            dedup_subject,
+            &markdown_body,
+        ) {
+            warn!(
+                operation = "send_dedupe_suppressed",
+                sender = %sender,
+                subject = %dedup_subject,
+                "Identical outbound send suppressed (dedup window)"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "duplicate_send".to_string(),
+                    detail: Some(format!(
+                        "An identical email (same sender/to/cc/subject/body) was already sent within {}s. \
+                         This is terminal — do not retry by any other means (no scripts, no direct API calls). \
+                         If the original delivery matters, verify it arrived before acting.",
+                        state.config.retry.send_dedupe_window_secs
+                    )),
+                }),
+            ));
+        }
+    }
+
+    // ── 3. Parse recipients, preserving to/cc distinction ──
+    // Support "Name <email>" and bare "email" formats.
+    // Helper: parse "Name <email>" → (name, email); bare "email" → ("", email)
+    let parse_one = |s: &str| -> (String, String) {
+        let s = s.trim();
+        if s.is_empty() {
+            return (String::new(), String::new());
+        }
+        if let Some(pos) = s.find('<') {
+            let name = s[..pos].trim().to_string();
+            let email = if let Some(end) = s.find('>') {
+                s[pos + 1..end].trim().to_string()
+            } else {
+                s[pos + 1..].trim().to_string()
+            };
+            (name, email.to_lowercase())
+        } else {
+            (String::new(), s.to_lowercase())
+        }
+    };
+    let fmt_display = |name: &str, email: &str| -> String {
+        if name.is_empty() {
+            email.to_string()
+        } else {
+            format!("{} <{}>", name, email)
+        }
+    };
+
+    // Parse to addresses — strip persona prefix at entry point.
+    // Persona-prefixed addresses (support.bob@agent.com) are reduced to base
+    // (bob@agent.com) for all internal matching. Full addresses are
+    // reconstructed from persona_map for display and SMTP envelope delivery;
+    // the raw full address in the To header is what the receiving preprocessor
+    // uses to derive the persona.
+    let mut persona_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let to_raw: Vec<(String, String)> = req
+        .to
+        .split(',')
+        .map(&parse_one)
+        .filter(|(_, e)| !e.is_empty())
+        .map(|(name, email)| {
+            // Board addresses (`{short}[.{sys}].a2a@{domain}`) must survive
+            // persona stripping intact — their local part legitimately
+            // contains dots, and stripping would destroy the address.
+            let (base, persona) = if crate::board::addr::is_board_address(&email) {
+                (email, String::new())
+            } else if is_shared_sender {
+                let elocal = email.split('@').next().unwrap_or("");
+                if elocal.matches('.').count() >= 2 {
+                    strip_persona(&email)
+                } else {
+                    (email, String::new())
+                }
+            } else {
+                strip_persona(&email)
+            };
+            if !persona.is_empty() {
+                persona_map.entry(base.clone()).or_insert(persona);
+            }
+            (name, base)
+        })
+        .collect();
+    let to_set: std::collections::HashSet<String> = to_raw.iter().map(|(_, e)| e.clone()).collect();
+
+    // Parse cc addresses (with persona stripping)
+    let mut cc_raw: Vec<(String, String)> = Vec::new();
+    if let Some(cc_list) = &req.cc {
+        for addr in cc_list {
+            let (name, raw_email) = parse_one(addr);
+            if !raw_email.is_empty() {
+                // Board addresses keep their dot-separated local part (see
+                // TO parsing above) — stripping would break the address.
+                let (base, persona) = if crate::board::addr::is_board_address(&raw_email) {
+                    (raw_email, String::new())
+                } else if is_shared_sender {
+                    let elocal = raw_email.split('@').next().unwrap_or("");
+                    if elocal.matches('.').count() >= 2 {
+                        strip_persona(&raw_email)
+                    } else {
+                        (raw_email, String::new())
+                    }
+                } else {
+                    strip_persona(&raw_email)
+                };
+                if !persona.is_empty() {
+                    persona_map.entry(base.clone()).or_insert(persona);
+                }
+                if !to_set.contains(&base) {
+                    cc_raw.push((name, base));
+                }
+            }
+        }
+    }
+    let cc_set: std::collections::HashSet<String> = cc_raw.iter().map(|(_, e)| e.clone()).collect();
+
+    // For bare emails (no display name), try whitelist description; fall back to email local-part.
+    // Collect unique bare emails to resolve names in batch.
+    let mut bare_emails: Vec<String> = Vec::new();
+    for (n, e) in to_raw.iter().chain(cc_raw.iter()) {
+        if n.is_empty() && !bare_emails.contains(e) {
+            bare_emails.push(e.clone());
+        }
+    }
+    let mut name_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Batch name resolution: group bare emails by domain, query whitelist per domain
+    if !bare_emails.is_empty() {
+        let mut domain_entries: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
+        for email in &bare_emails {
+            let domain = domain_from_email(email);
+            domain_entries.entry(domain.to_string()).or_default();
+        }
+        // Collect keys before mutating the map
+        let domains: Vec<String> = domain_entries.keys().cloned().collect();
+        for domain in &domains {
+            let entries = state
+                .factories
+                .email
+                .env_factory
+                .list_whitelist_entries(domain)
+                .await
+                .unwrap_or_default();
+            domain_entries.insert(domain.clone(), entries);
+        }
+        for email in &bare_emails {
+            let domain = domain_from_email(email);
+            let name = domain_entries
+                .get(domain)
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|e| e.value == *email)
+                        .and_then(|e| e.description.as_ref())
+                        .and_then(|desc| serde_json::from_str::<serde_json::Value>(desc).ok())
+                        .and_then(|v| {
+                            v.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| email.split('@').next().unwrap_or(email).to_string());
+            name_map.insert(email.clone(), name);
+        }
+    }
+
+    // Helper: reconstruct full persona address from base.
+    // External addresses that happen to match "x.y@domain" also pass
+    // through here — persona_map always maps back to the original.
+    let full_addr = |e: &str| -> String {
+        persona_map
+            .get(e)
+            .map_or_else(|| e.to_string(), |p| format!("{}.{}", p, e))
+    };
+
+    let to_named: Vec<(String, String)> = to_raw
+        .into_iter()
+        .map(|(n, e)| {
+            let addr = full_addr(&e);
+            (
+                if n.is_empty() {
+                    name_map
+                        .get(&e)
+                        .cloned()
+                        .unwrap_or_else(|| e.split('@').next().unwrap_or(&e).to_string())
+                } else {
+                    n
+                },
+                addr,
+            )
+        })
+        .collect();
+    let cc_named: Vec<(String, String)> = cc_raw
+        .into_iter()
+        .map(|(n, e)| {
+            let addr = full_addr(&e);
+            (
+                if n.is_empty() {
+                    name_map
+                        .get(&e)
+                        .cloned()
+                        .unwrap_or_else(|| e.split('@').next().unwrap_or(&e).to_string())
+                } else {
+                    n
+                },
+                addr,
+            )
+        })
+        .collect();
+
+    // Build display-name headers for SMTP sender and internal-webhook preprocessor
+    let mut display_headers = std::collections::HashMap::new();
+    if !to_named.is_empty() {
+        let to_str: Vec<String> = to_named.iter().map(|(n, e)| fmt_display(n, e)).collect();
+        display_headers.insert("to".to_string(), to_str.join(", "));
+    }
+    if !cc_named.is_empty() {
+        let cc_str: Vec<String> = cc_named.iter().map(|(n, e)| fmt_display(n, e)).collect();
+        display_headers.insert("cc".to_string(), cc_str.join(", "));
+    }
+    // Sender display: use raw (persona-preserving) address, fall back to base
+    let sender_display = if !sender_persona.is_empty() {
+        sender_raw
+    } else {
+        sender
+    };
+    let sender_name = name_map
+        .get(sender)
+        .cloned()
+        .unwrap_or_else(|| sender.split('@').next().unwrap_or(sender).to_string());
+    display_headers.insert(
+        "from".to_string(),
+        fmt_display(&sender_name, sender_display),
+    );
+
+    // Merge display-name headers into existing request headers (if any)
+    let mut merged_headers = req.headers.clone().unwrap_or_default();
+    for (k, v) in display_headers {
+        merged_headers.insert(k, v);
+    }
+
+    // Thread headers arrive RFC-cased from the SDKs (`Message-ID`,
+    // `In-Reply-To`, `References`) while the outbound MIME builders read the
+    // lowercase record keys (`message_id`, `in_reply_to`, `references`).
+    // Fold the three onto the record keys here — this is the single API
+    // entry both editions share. Folding per SDK instead would leave the
+    // same hole for any other client: an uppercase key used to satisfy the
+    // "already present" check below and then be ignored by the builders, so
+    // a reply left the gateway with no threading headers at all.
+    normalize_thread_headers(&mut merged_headers);
+
+    // ── a2a_board: session flow detection (outbound) ──
+    // Check CC for board addresses; inject board identity headers if found.
+    // Parse the raw (lowercased) address — board addresses are never
+    // persona-stripped, and stripping first would break the `.a2a` suffix.
+    if let Some(ref cc_list) = req.cc {
+        for cc_addr in cc_list {
+            let cc_base = cc_addr.trim().to_lowercase();
+            if let Some((_sid, board_id, _domain)) =
+                crate::board::models::parse_board_email(&cc_base)
+            {
+                use crate::board::db;
+                if let Ok(conn) =
+                    db::open_board_db(state.config.storage.path.to_str().unwrap_or(""), &board_id)
+                {
+                    // Sender = API key's email address
+                    let sender = sender_base.as_str();
+                    // TO = first primary recipient (for board_role)
+                    let to_addr = to_set.iter().next().map(|s| s.as_str()).unwrap_or("");
+                    let from_member = db::get_member(&conn, &board_id, sender).ok().flatten();
+                    let to_member = db::get_member(&conn, &board_id, to_addr).ok().flatten();
+                    if let (Some(from_m), Some(to_m)) = (from_member, to_member) {
+                        merged_headers.insert("X-Board-ID".to_string(), board_id.clone());
+                        merged_headers.insert("X-Board-Role".to_string(), to_m.role);
+                        merged_headers.insert("X-From-Role".to_string(), from_m.role);
+                    }
+                }
+                break; // Only process the first matching board
+            }
+        }
+    }
+
+    // ── [P0] Auto-generate Message-ID if missing ──────────────────
+    // Every outbound email needs a Message-ID header for snapshot
+    // tracking and thread correlation. If the caller didn't provide one,
+    // generate it from the gateway's hostname.
+    if !merged_headers.contains_key("message_id") {
+        // Domain resolution chain (specific → general): see resolve_fallback_domain()
+        let domain = resolve_fallback_domain(
+            sender,
+            state.config.smtp.hostname.as_deref(),
+            state.config.http.hostname.as_deref(),
+        );
+        let msg_id = format!("<{}@{}>", Uuid::new_v4(), domain);
+        // Lowercase key: matches inbound normalization and the read sites
+        // (sender.rs / mx_deliverer / to_webhook_payload all read "message_id").
+        merged_headers.insert("message_id".to_string(), msg_id);
+    }
+
+    // Board addresses in the CC slot (session flow) are context markers —
+    // the board identity travels via X-Board-* headers (injected below),
+    // and the recognition scope is broader than the local registry (a
+    // board address propagated in a team-formation notification's headers
+    // need not exist on this gateway). They are therefore excluded from
+    // the delivery list: no substantive registry check, no bucketing, no
+    // MX delivery. Only TO-slot board addresses are command-flow
+    // recipients and go through the shared registry resolution below.
+    let recipients: Vec<String> = to_set
+        .iter()
+        .cloned()
+        .chain(cc_set.iter().cloned())
+        .filter(|e| to_set.contains(e) || !crate::board::addr::is_board_address(e))
+        .collect();
+
+    if recipients.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "No valid recipients provided".to_string(),
+                detail: Some(
+                    "The 'to' field must contain at least one valid email address".to_string(),
+                ),
+            }),
+        ));
+    }
+
+    // ── 3a. Shared-domain system anchor guard ──
+    // A 0-dot address that resolves to a shared-domain system anchor
+    // (system_name@domain) is a system-level mailbox, not a deliverable
+    // agent — reject it explicitly instead of silently dropping it.
+    if is_shared_sender {
+        for recipient in &recipients {
+            let rlocal = recipient.split('@').next().unwrap_or("");
+            if rlocal.contains('.') {
+                continue;
+            }
+            if let Ok(Some(rec)) = state
+                .factories
+                .email
+                .env_factory
+                .lookup_domain_addr(recipient)
+                .await
+            {
+                if rec.system_id.starts_with("shared-") {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "invalid_recipient".to_string(),
+                            detail: Some(format!(
+                                "'{}' is a system-level address and cannot be a recipient",
+                                recipient
+                            )),
+                        }),
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── 3b. P0: Empty whitelist → 403 ──
+    let whitelist_count = match state
+        .factories
+        .email
+        .env_factory
+        .count_whitelist_entries(sender, &["to", "all"])
+        .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            ));
+        }
+    };
+    if whitelist_count == 0 {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Sending disabled".to_string(),
+                detail: Some(
+                    "No outbound whitelist entries configured for this system/domain".to_string(),
+                ),
+            }),
+        ));
+    }
+
+    // ── 4. Outbound whitelist: filter recipients against sender's "to"/"all" rules ──
+    let subject = req.subject.as_deref().unwrap_or("");
+    let mut filtered: Vec<String> = Vec::new();
+    let mut valid_recipients: Vec<String> = Vec::new();
+
+    // Fixed system auto-reply sender (noreply@{domain}). When it appears as a
+    // RECIPIENT (e.g. an agent reply-all to a welcome mail), it is a system
+    // sink — not a deliverable mailbox — so it is never whitelist-checked and
+    // never triggers an unregistered-address notification (a reply-storm
+    // vector). It is kept only in the to/cc display list (section 7).
+    let system_sender = state.config.system_sender();
+
+    for recipient in &recipients {
+        let is_system_sink = recipient.to_lowercase() == system_sender;
+        let allowed = if is_system_sink {
+            true
+        } else {
+            match state
+                .factories
+                .email
+                .env_factory
+                .check_whitelisted(sender, recipient, "to")
+                .await
+            {
+                Ok(true) => true,
+                Ok(false) => {
+                    // Board recipients: universal stranger commands ([WHOAMI])
+                    // bypass the whitelist — shared predicate with the SMTP
+                    // deferred-whitelist stranger allowance.
+                    crate::board::addr::is_board_address(recipient)
+                        && crate::board::addr::is_stranger_command(subject)
+                }
+                Err(_) => false,
+            }
+        };
+        if allowed {
+            state.metrics.inc_whitelist_matches();
+            valid_recipients.push(recipient.clone());
+        } else {
+            filtered.push(recipient.clone());
+        }
+    }
+
+    // ── 5. Split valid recipients into internal (same system) and external ──
+    let mut internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
+    // (email, domain, webhook_url, webhook_secret)
+    let mut external: Vec<String> = Vec::new();
+    let mut unregistered: Vec<String> = Vec::new(); // Type 2 hit but Type 1 miss
+                                                    // System sink: the fixed auto-reply sender (noreply@{domain}) appearing
+                                                    // as a recipient. Never delivered (no MX, no webhook, no notification) —
+                                                    // recorded in the to/cc display list only (section 7).
+    let mut system_sink: Vec<String> = Vec::new();
+    // Owning system of a board recipient, if any (inbound records for
+    // command-flow delivery are attributed to the board's system, mirroring
+    // the SMTP RCPT behavior).
+    let mut board_system: Option<String> = None;
+
+    for recipient in &valid_recipients {
+        let env = &state.factories.email.env_factory;
+        // ── System sink (noreply@{domain} as recipient) — not deliverable ──
+        // Reply-all to a welcome mail lands here: absorbed silently, so the
+        // unregistered-address auto-reply (the storm seed) is never sent.
+        if recipient.to_lowercase() == system_sender {
+            system_sink.push(recipient.clone());
+            continue;
+        }
+        // ── A2A board address (command flow) — always internal ──
+        // Board addresses are never external (MX) recipients: the registry
+        // already proved the board exists on this gateway, and delivery is
+        // an inbound record to the board's owning-domain webhook where the
+        // interceptor chain (entry-agnostic) executes [A2A] commands.
+        if crate::board::addr::is_board_address(recipient) {
+            match crate::board::addr::resolve_board_recipient(
+                env,
+                &state.config.storage.path,
+                recipient,
+            )
+            .await
+            {
+                Ok(b) => {
+                    // Endpoint via the board's owning domain (domain-level
+                    // webhook fallback), same resolution SMTP uses.
+                    let (webhook_url, webhook_secret) =
+                        match env.lookup_domain_addr(&b.domain).await {
+                            Ok(Some(r)) if r.is_active => {
+                                (r.webhook_url.clone(), r.webhook_secret.clone())
+                            }
+                            _ => (None, None),
+                        };
+                    if board_system.is_none() {
+                        board_system = Some(b.system_id.clone());
+                    }
+                    internal.push((recipient.clone(), b.domain, webhook_url, webhook_secret));
+                }
+                Err(e) => {
+                    tracing::info!(
+                        operation = "sendapi_board_filtered",
+                        recipient = %recipient,
+                        reason = %e,
+                        "Board recipient filtered at send API (no such board on this gateway)"
+                    );
+                    filtered.push(recipient.clone());
+                }
+            }
+            continue;
+        }
+        // Type 1: exact match on full address. Shared-domain addresses are
+        // delivered internally regardless of which system owns the record —
+        // a same-domain cross-system recipient routes via its own webhook.
+        match env.lookup_domain_addr(recipient).await {
+            Ok(Some(ref inner))
+                if inner.is_active
+                    && (inner.system_id == api_key.system_id
+                        || inner.system_id.starts_with("shared-")) =>
+            {
+                internal.push((
+                    recipient.clone(),
+                    inner.domain.clone(),
+                    inner.webhook_url.clone(),
+                    inner.webhook_secret.clone(),
+                ));
+            }
+            _ => {
+                // Type 2: fallback to domain-level match
+                let domain = recipient.rsplit('@').next().unwrap_or(recipient);
+                match env.lookup_domain_addr(domain).await {
+                    Ok(Some(ref inner))
+                        if inner.is_active && inner.system_id == api_key.system_id =>
+                    {
+                        // Domain exists but address not registered — auto-reply
+                        unregistered.push(recipient.clone());
+                    }
+                    _ => {
+                        external.push(recipient.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 6. Inbound whitelist: for internal recipients, verify sender against their "from"/"all" rules ──
+    let mut final_internal: Vec<(String, String, Option<String>, Option<String>)> = Vec::new();
+    // A recipient that has `sender` in its "from" whitelist makes this a
+    // KNOWN-sender message — the universal-command detection below uses it to
+    // decide the identity-card tier.
+    let mut sender_known_to_internal = false;
+    for (recipient, domain, webhook_url, webhook_secret) in internal {
+        let allowed = match state
+            .factories
+            .email
+            .env_factory
+            .check_whitelisted(&recipient, sender, "from")
+            .await
+        {
+            Ok(true) => {
+                sender_known_to_internal = true;
+                true
+            }
+            Ok(false) => {
+                // Board recipient + stranger command: same allowance as the
+                // SMTP deferred-whitelist check (shared predicate).
+                crate::board::addr::is_board_address(&recipient)
+                    && crate::board::addr::is_stranger_command(subject)
+            }
+            Err(_) => false,
+        };
+        if allowed {
+            state.metrics.inc_whitelist_matches();
+            final_internal.push((recipient, domain, webhook_url, webhook_secret));
+        } else {
+            filtered.push(recipient);
+        }
+    }
+
+    // ── 6b. Universal-command markers for the INBOUND record ──
+    // StrangerInterceptor reads the RECORD's headers, so the identity-card
+    // markers must be on the inbound record — and they must be decided here,
+    // before the records are serialized (the previous placement, after
+    // `headers_json` was built, meant they never reached any record). Tiering:
+    // a sender the recipient KNOWS (step 6 whitelist) is not a stranger — the
+    // mail goes to the agent, whose host renders the LLM identity card; only
+    // an unknown sender gets the gateway's static-persona auto-reply. Same
+    // rule as the SMTP entry (receiver.rs), shared command list so the two
+    // entry points cannot drift. The outbound record keeps its own headers
+    // (it goes over the wire), hence a copy.
+    let mut inbound_headers = merged_headers.clone();
+    if let Some(cmd_name) = crate::board::addr::STRANGER_COMMANDS
+        .iter()
+        .find(|cmd| subject.to_uppercase().starts_with(**cmd))
+        .map(|cmd| {
+            cmd.trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_lowercase()
+        })
+    {
+        if !sender_known_to_internal && !inbound_headers.contains_key("x-mail-stranger") {
+            inbound_headers.insert("x-mail-stranger".into(), "true".into());
+        }
+        inbound_headers.insert("x-mail-command".into(), cmd_name);
+    }
+
+    // ── 7. Generate DB records ──
+    let mut created_ids: Vec<String> = Vec::new();
+    let attachments_json: Option<String> = req
+        .attachments
+        .as_ref()
+        .map(|a| serde_json::to_string(a).unwrap_or_default());
+    let headers_json: Option<String> =
+        Some(serde_json::to_string(&merged_headers).unwrap_or_default());
+    let inbound_headers_json: Option<String> =
+        Some(serde_json::to_string(&inbound_headers).unwrap_or_default());
+
+    // ── Full post-filter recipient list (external ∪ internal) ──────────
+    // Identical across both direction records: this is what the final
+    // recipient sees in the To/Cc headers. Reconstructed from the two
+    // post-filter buckets (NOT from to_set, which still holds filtered /
+    // unrequested addresses), each address kept in its original to/cc slot
+    // and re-expanded to persona form for display.
+    let mut full_bases: Vec<String> = Vec::new();
+    let mut full_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for e in external
+        .iter()
+        .chain(final_internal.iter().map(|t| &t.0))
+        .chain(system_sink.iter())
+    {
+        if full_seen.insert(e.clone()) {
+            full_bases.push(e.clone());
+        }
+    }
+    let full_to: Vec<String> = full_bases
+        .iter()
+        .filter(|e| to_set.contains(*e))
+        .map(|e| full_addr(e))
+        .collect();
+    let full_cc: Vec<String> = full_bases
+        .iter()
+        .filter(|e| cc_set.contains(*e))
+        .map(|e| full_addr(e))
+        .collect();
+
+    // ── [P0] Ping-pong interception ────────────────────────────
+    // When send_mail sends a pong, redirect as inbound instead of
+    // creating an outbound record for external SMTP delivery.
+    if subject.starts_with("__aimail_pong__:") && !external.is_empty() {
+        let new_id = Uuid::new_v4().to_string();
+        let new_sender = external[0].clone();
+        let new_recipient = sender.to_string();
+        let new_recipients_json =
+            serde_json::json!({"to": [new_recipient], "cc": [], "rcpt": [new_recipient]})
+                .to_string();
+
+        info!(
+            operation = "pong_intercepted",
+            email_id = %new_id,
+            from = %new_sender,
+            to = %new_recipient,
+            subject = %subject,
+            "Pong intercepted at HTTP API — redirecting as inbound"
+        );
+
+        // Build webhook endpoints for the pong recipient (agent's domain)
+        let pong_endpoints = state
+            .factories
+            .email
+            .build_endpoints_for_recipients(std::slice::from_ref(&new_recipient))
+            .await;
+        let pong_endpoints_opt = if pong_endpoints == "{}" || pong_endpoints.is_empty() {
+            None
+        } else {
+            Some(pong_endpoints)
+        };
+
+        state
+            .factories
+            .email
+            .create_inbound(
+                &new_id,
+                &api_key.system_id,
+                &new_sender,
+                &new_recipients_json,
+                subject,
+                &markdown_body,
+                pong_endpoints_opt.as_deref(),
+                None, // attachments
+                headers_json.as_deref(),
+                state.config.retry.max_attempts as i32,
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Pong redirect failed".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                )
+            })?;
+
+        if let Err(e) = state.trigger_tx.try_send(new_id.clone()) {
+            state.metrics.inc_trigger_dropped();
+            warn!(
+                operation = "dispatch_trigger_failed",
+                error = %e,
+                email_id = %new_id,
+                "Failed to trigger pong-redirected dispatch; will be picked up by periodic sweep"
+            );
+        }
+        return Ok((
+            StatusCode::OK,
+            Json(SendEmailResponse {
+                email_id: new_id,
+                status: "pong_redirected".to_string(),
+            }),
+        ));
+    }
+
+    // 7a. Outbound: one record for all external recipients
+    if !external.is_empty() {
+        let email_id = Uuid::new_v4().to_string();
+        // to/cc = full post-filter list (external ∪ internal), so the final
+        // recipient sees every address; rcpt = external only (what this
+        // record actually MX-delivers to).
+        let external_rcpt: Vec<String> = external.iter().map(|e| full_addr(e)).collect();
+        let recipients_json = Recipients {
+            to: full_to.clone(),
+            cc: full_cc.clone(),
+            rcpt: external_rcpt,
+        }
+        .to_json();
+
+        // Build per-recipient SMTP endpoints for delivery tracking
+        let mut eps = serde_json::Map::new();
+        for addr in &external {
+            let key = addr.to_lowercase();
+            eps.insert(
+                key,
+                serde_json::json!({"status": "pending", "protocol": "mx"}),
+            );
+        }
+        let endpoints_str = serde_json::to_string(&eps).unwrap_or_default();
+
+        match state
+            .factories
+            .email
+            .create_outbound(
+                &email_id,
+                &api_key.system_id,
+                sender,
+                &recipients_json,
+                subject,
+                &markdown_body,
+                Some(&endpoints_str),
+                attachments_json.as_deref(),
+                headers_json.as_deref(), // headers
+                state.config.retry.max_attempts as i32,
+            )
+            .await
+        {
+            Ok(record) => {
+                state.metrics.inc_emails_queued_api();
+                info!(
+                    operation = "email_queued",
+                    email_id = %record.id,
+                    external_count = external.len(),
+                    "Outbound email queued for external recipients"
+                );
+                created_ids.push(record.id.clone());
+
+                // Register this email on every attachment BEFORE triggering
+                // the scheduler, so cleanup sees the mail_id reference.
+                if let Some(ref attachments) = req.attachments {
+                    for att in attachments {
+                        if let Err(e) = state
+                            .factories
+                            .attachment
+                            .add_mail_id(&att.attachment_id, &record.id)
+                            .await
+                        {
+                            warn!(operation="attachment_registration_failed", error=%e, attachment_id=%att.attachment_id,
+                                email_id=%record.id,
+                                "Failed to register mail_id on attachment");
+                        }
+                    }
+                }
+
+                // Trigger immediate outbound dispatch via async channel
+                if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
+                    warn!(
+                        operation = "dispatch_trigger_failed",
+                        error = %e,
+                        email_id = %record.id,
+                        "Failed to trigger outbound dispatch; will be picked up by periodic sweep"
+                    );
+                }
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to queue outbound email".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ));
+            }
+        }
+    }
+
+    // 7b. Inbound: one shared record for all internal recipients
+    if !final_internal.is_empty() {
+        let email_id = Uuid::new_v4().to_string();
+
+        // Collect all internal recipient emails, preserving to/cc membership
+        let internal_emails: Vec<String> = final_internal
+            .iter()
+            .map(|(email, _, _, _)| email.clone())
+            .collect();
+        // to/cc = full post-filter list (external ∪ internal); rcpt =
+        // internal delivery targets. Board addresses are command-flow
+        // triggers (handled by the A2A interceptor), not final agent
+        // deliveries, so they stay in to/cc but are excluded from rcpt.
+        let internal_rcpt: Vec<String> = internal_emails
+            .iter()
+            .filter(|a| !crate::board::addr::is_board_address(a))
+            .cloned()
+            .collect();
+        let recipients_json = Recipients {
+            to: full_to.clone(),
+            cc: full_cc.clone(),
+            rcpt: internal_rcpt,
+        }
+        .to_json();
+
+        // Build webhook endpoints: per-recipient → domain fallback
+        let endpoints_str = state
+            .factories
+            .email
+            .build_endpoints_for_recipients(&internal_emails)
+            .await;
+        let endpoints = if endpoints_str == "{}" || endpoints_str.is_empty() {
+            None
+        } else {
+            Some(endpoints_str)
+        };
+
+        match state
+            .factories
+            .email
+            .create_inbound(
+                &email_id,
+                // Board recipients attribute the record to the board's owning
+                // system (mirrors SMTP RCPT, which sets self.system_id from
+                // the board resolution); otherwise the sender's system.
+                board_system.as_deref().unwrap_or(&api_key.system_id),
+                sender,
+                &recipients_json,
+                subject,
+                &markdown_body,
+                endpoints.as_deref(),
+                attachments_json.as_deref(),
+                inbound_headers_json.as_deref(),
+                state.config.retry.max_attempts as i32,
+            )
+            .await
+        {
+            Ok(record) => {
+                // Insert attachment_permissions per internal recipient (granularity unchanged)
+                for (recipient, _, _, _) in &final_internal {
+                    if let Some(attachments) = &req.attachments {
+                        for att in attachments {
+                            if let Err(e) = state
+                                .factories
+                                .attachment
+                                .create_permission(&att.attachment_id, recipient)
+                                .await
+                            {
+                                warn!(operation="permission_creation_failed", error=%e, attachment_id=%att.attachment_id,
+                                    recipient=%recipient,
+                                    "Failed to create download permission");
+                            }
+                        }
+                    }
+                }
+
+                info!(
+                    operation = "email_queued",
+                    email_id = %record.id,
+                    internal_count = final_internal.len(),
+                    "Inbound email record created for internal delivery"
+                );
+                created_ids.push(record.id.clone());
+
+                // Register this email on every attachment
+                if let Some(ref attachments) = req.attachments {
+                    for att in attachments {
+                        if let Err(e) = state
+                            .factories
+                            .attachment
+                            .add_mail_id(&att.attachment_id, &record.id)
+                            .await
+                        {
+                            warn!(operation="attachment_registration_failed", error=%e, attachment_id=%att.attachment_id,
+                                email_id=%record.id,
+                                "Failed to register mail_id on attachment");
+                        }
+                    }
+                }
+
+                // Trigger first delivery. Born `readying` — the trigger is the
+                // only first-delivery claimant (the tick never reads
+                // `readying`). Firing after the permission + mail_id loops
+                // guarantees the payload is complete when claimed.
+                if let Err(e) = state.trigger_tx.try_send(record.id.clone()) {
+                    state.metrics.inc_trigger_dropped();
+                    warn!(
+                        operation = "dispatch_trigger_failed",
+                        error = %e,
+                        email_id = %record.id,
+                        "Failed to trigger internal dispatch; will be picked up by the readying sweep"
+                    );
+                }
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to queue internal email".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                ));
+            }
+        }
+    }
+
+    // ── 8. Auto-reply if any recipients were filtered ──
+    send_filtered_notification(
+        &state.factories.email,
+        &state.config,
+        &api_key.system_id,
+        sender,
+        &filtered,
+        &state.trigger_tx,
+    )
+    .await;
+
+    // ── 8b. Auto-reply for unregistered addresses (domain exists but address not registered) ──
+    send_unregistered_notification(
+        &state.factories.email,
+        &state.config,
+        &api_key.system_id,
+        sender,
+        &unregistered,
+        &state.trigger_tx,
+    )
+    .await;
+
+    let status = if created_ids.is_empty() {
+        // All recipients were filtered — no emails created
+        info!(
+            operation = "email_rejected",
+            sender = %sender,
+            filtered_count = filtered.len(),
+            "All recipients were filtered; no email records created"
+        );
+        "filtered"
+    } else {
+        // ── 8c. Dedup mark (only after ALL inserts succeeded) ──
+        // A failed insert path returns Err before reaching here, so a
+        // partially-delivered send (e.g. external ok, internal failed)
+        // does not poison the key — the client may legitimately resend.
+        if state.config.retry.send_dedupe_window_secs > 0 {
+            let dedup_to: Vec<String> = req
+                .to
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let dedup_cc: Vec<String> = req
+                .cc
+                .iter()
+                .flatten()
+                .map(|s| s.trim().to_lowercase())
+                .collect();
+            let dedup_subject = req.subject.as_deref().unwrap_or("");
+            state
+                .send_deduper
+                .mark(sender, &dedup_to, &dedup_cc, dedup_subject, &markdown_body);
+        }
+        "queued"
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SendEmailResponse {
+            email_id: created_ids.first().cloned().unwrap_or_default(),
+            status: status.to_string(),
+        }),
+    ))
+}
+
+/// Resolve the domain used when auto-generating a missing Message-ID.
+///
+/// Domain resolution chain (most specific → most general):
+///   ① sender domain — the API key email's domain (exact-matched before this
+///      call; authoritative, and keeps the Message-ID domain consistent with
+///      the sender). In a shared-gateway deployment ② is the relay domain, so
+///      this lets the Message-ID match the sender's domain (only affects
+///      fallback callers that don't set their own Message-ID).
+///   ② smtp.hostname — required (validation fails if missing)
+///   ③ http.hostname — optional
+///   ④ "aimail.local" — dead fallback, unreachable in practice since ② is required
+fn resolve_fallback_domain(
+    sender: &str,
+    smtp_hostname: Option<&str>,
+    http_hostname: Option<&str>,
+) -> String {
+    if let Some(at) = sender.rfind('@') {
+        let d = &sender[at + 1..];
+        if !d.is_empty() {
+            return d.to_string();
+        }
+    }
+    smtp_hostname
+        .or(http_hostname)
+        .unwrap_or("aimail.local")
+        .to_string()
+}
+
+/// Log filtered recipients and insert notification for the sender.
+/// Uses auto_reply_* config fields for consistent system messaging.
+async fn send_filtered_notification(
+    email_factory: &crate::core::email::factory::EmailFactory,
+    config: &crate::core::config::Config,
+    system_id: &str,
+    sender: &str,
+    filtered: &[String],
+    trigger_tx: &tokio::sync::mpsc::Sender<String>,
+) {
+    if filtered.is_empty() {
+        return;
+    }
+
+    info!(
+        operation = "recipients_filtered",
+        sender = %sender,
+        filtered_count = filtered.len(),
+        filtered_recipients = ?filtered,
+        "Some recipients were filtered by whitelist"
+    );
+
+    // System FROM address (fixed: noreply@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
+
+    // Build markdown body
+    let auto_reply_body = config
+        .relay
+        .auto_reply_body
+        .as_deref()
+        .unwrap_or("This is an automated message from the aimail system.");
+    let body = format!(
+        "{}\n\n---\n\n\
+         **Filtered Recipients** (not in whitelist or blocked by policy):\n\n\
+         {}\n\n\
+         These recipients will NOT receive your message. \
+         Please verify the addresses or contact your administrator to update whitelist settings.",
+        auto_reply_body,
+        filtered
+            .iter()
+            .map(|a| format!("  • {}", a))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let subject = format!(
+        "{}[AimailGW] Filtered recipients: {} recipient(s) not delivered",
+        config.relay.auto_reply_subject_prefix,
+        filtered.len()
+    );
+
+    // Enqueue via the shared helper: it resolves the webhook endpoint for
+    // internal recipients and routes them through the webhook processor,
+    // so the notification is not swallowed by SMTP loopback prevention.
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        config,
+        email_factory,
+        None,
+        Some(trigger_tx),
+        system_id,
+        auto_reply_from.as_str(),
+        sender,
+        &subject,
+        &body,
+    )
+    .await
+    {
+        warn!(operation = "notification_insert_failed", error = %e, "Failed to insert filtered-recipient email into database");
+    }
+}
+
+/// Log unregistered recipients and insert notification for the sender.
+/// Uses auto_reply_* config fields for consistent system messaging.
+async fn send_unregistered_notification(
+    email_factory: &crate::core::email::factory::EmailFactory,
+    config: &crate::core::config::Config,
+    system_id: &str,
+    sender: &str,
+    unregistered: &[String],
+    trigger_tx: &tokio::sync::mpsc::Sender<String>,
+) {
+    if unregistered.is_empty() {
+        return;
+    }
+
+    info!(
+        operation = "unregistered_addresses",
+        sender = %sender,
+        count = unregistered.len(),
+        recipients = ?unregistered,
+        "Recipients matched domain but address not registered — auto-reply sent"
+    );
+
+    // System FROM address (fixed: noreply@{smtp.hostname})
+    let auto_reply_from = config.system_sender();
+
+    let body = format!(
+        "{}\n\n---\n\n\
+         **Unregistered Addresses** (domain exists but address not created):\n\n\
+         {}\n\n\
+         These addresses belong to your domain but have not been registered. \
+         Please create them via the Agent integration or contact your administrator to register these addresses.",
+        config.relay.auto_reply_body.as_deref().unwrap_or(
+            "This is an automated message from the aimail system."
+        ),
+        unregistered.iter().map(|a| format!("  • {}", a)).collect::<Vec<_>>().join("\n")
+    );
+
+    let subject = format!(
+        "{}[AimailGW] Unregistered addresses: {} address(es) not deliverable",
+        config.relay.auto_reply_subject_prefix,
+        unregistered.len()
+    );
+
+    // Enqueue via the shared helper: it resolves the webhook endpoint for
+    // internal recipients and routes them through the webhook processor,
+    // so the notification is not swallowed by SMTP loopback prevention.
+    if let Err(e) = crate::core::api::outbound::enqueue_outbound_simple(
+        config,
+        email_factory,
+        None,
+        Some(trigger_tx),
+        system_id,
+        auto_reply_from.as_str(),
+        sender,
+        &subject,
+        &body,
+    )
+    .await
+    {
+        warn!(operation = "unregistered_insert_failed", error = %e, "Failed to insert unregistered-address notification");
+    }
+}
+
+/// Fold the three thread headers onto their canonical record keys.
+///
+/// Matching is case-insensitive and treats `-` and `_` as the same separator,
+/// so `Message-ID`, `message-id` and `message_id` all land on `message_id`
+/// (likewise `In-Reply-To` / `in_reply_to` and `References` / `references`).
+/// The canonical key wins when both spellings are present. Every other header
+/// keeps its exact casing: `X-Board-*` and the outbound passthrough whitelist
+/// are matched by name.
+fn normalize_thread_headers(headers: &mut std::collections::HashMap<String, String>) {
+    const CANONICAL: [&str; 3] = ["message_id", "in_reply_to", "references"];
+    for canonical in CANONICAL {
+        let mut value: Option<String> = None;
+        let aliases: Vec<String> = headers
+            .keys()
+            .filter(|k| {
+                k.as_str() != canonical && k.to_ascii_lowercase().replace('-', "_") == canonical
+            })
+            .cloned()
+            .collect();
+        for alias in aliases {
+            if let Some(v) = headers.remove(&alias) {
+                if value.is_none() {
+                    value = Some(v);
+                }
+            }
+        }
+        if let Some(v) = value {
+            headers.entry(canonical.to_string()).or_insert(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        normalize_thread_headers, resolve_fallback_domain, send_filtered_notification,
+        send_unregistered_notification,
+    };
+
+    #[test]
+    fn thread_headers_fold_onto_record_keys() {
+        // RFC casing (what both SDKs send today)
+        let mut h = std::collections::HashMap::from([
+            ("Message-ID".to_string(), "<a@x>".to_string()),
+            ("In-Reply-To".to_string(), "<root@x>".to_string()),
+            ("References".to_string(), "<root@x> <mid@x>".to_string()),
+            ("X-Board-ID".to_string(), "board-1".to_string()),
+        ]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.get("message_id").map(String::as_str), Some("<a@x>"));
+        assert_eq!(h.get("in_reply_to").map(String::as_str), Some("<root@x>"));
+        assert_eq!(
+            h.get("references").map(String::as_str),
+            Some("<root@x> <mid@x>")
+        );
+        // aliases are gone (no duplicate headers reach the MIME builder)
+        for alias in ["Message-ID", "In-Reply-To", "References"] {
+            assert!(!h.contains_key(alias), "alias {alias} must be folded");
+        }
+        // untouched headers keep their casing
+        assert_eq!(h.get("X-Board-ID").map(String::as_str), Some("board-1"));
+    }
+
+    #[test]
+    fn canonical_thread_key_wins_over_alias() {
+        let mut h = std::collections::HashMap::from([
+            ("message_id".to_string(), "<keep@x>".to_string()),
+            ("Message-ID".to_string(), "<drop@x>".to_string()),
+            ("message-id".to_string(), "<drop2@x>".to_string()),
+        ]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.get("message_id").map(String::as_str), Some("<keep@x>"));
+        assert_eq!(h.len(), 1, "only the canonical key survives: {h:?}");
+    }
+
+    #[test]
+    fn missing_thread_headers_add_nothing() {
+        let mut h =
+            std::collections::HashMap::from([("X-AIMail-Agent".to_string(), "alice".to_string())]);
+        normalize_thread_headers(&mut h);
+        assert_eq!(h.len(), 1);
+        assert!(!h.contains_key("message_id"));
+    }
+
+    #[test]
+    fn fallback_domain_prefers_sender_domain() {
+        // ① sender domain preferred over smtp/http hostname
+        assert_eq!(
+            resolve_fallback_domain(
+                "alice@agent.com",
+                Some("relay.example"),
+                Some("http.example")
+            ),
+            "agent.com"
+        );
+        // shared-domain persona (2-dot local) also yields its domain
+        assert_eq!(
+            resolve_fallback_domain(
+                "persona.profile.system@shared.example",
+                Some("relay.example"),
+                None
+            ),
+            "shared.example"
+        );
+    }
+
+    #[test]
+    fn fallback_domain_without_sender_uses_hostname_chain() {
+        // no sender domain → ② smtp.hostname
+        assert_eq!(
+            resolve_fallback_domain("", Some("relay.example"), Some("http.example")),
+            "relay.example"
+        );
+        // ② missing → ③ http.hostname
+        assert_eq!(
+            resolve_fallback_domain("", None, Some("http.example")),
+            "http.example"
+        );
+        // ③ missing → ④ aimail.local
+        assert_eq!(resolve_fallback_domain("", None, None), "aimail.local");
+        // sender has @ but empty domain → falls back to hostname chain
+        assert_eq!(
+            resolve_fallback_domain("alice@", Some("relay.example"), None),
+            "relay.example"
+        );
+    }
+
+    // ─── P1-2 path a: notifications must route internal recipients through webhook ───
+
+    fn notify_env() -> (
+        crate::core::config::Config,
+        crate::core::email::factory::EmailFactory,
+    ) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-notify-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = std::sync::Arc::new(
+            crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap(),
+        );
+        let ef = crate::core::email::factory::EmailFactory::new(
+            db,
+            std::path::PathBuf::from("/tmp/aimailgw-notify-att"),
+            std::sync::Arc::new(crate::base::strategy::BaseSystemStore),
+        );
+        let cfg = crate::core::config::Config::default();
+        (cfg, ef)
+    }
+
+    // P1-2 path a: filtered-recipient notification to an INTERNAL sender must
+    // carry the webhook endpoint + delivery_type:webhook header, otherwise the
+    // SMTP sender's loopback prevention silently drops it.
+    #[tokio::test]
+    async fn filtered_notification_internal_sender_carries_webhook_endpoint() {
+        let (cfg, ef) = notify_env();
+        ef.env_factory
+            .create_domain(
+                "d1",
+                "sys1",
+                "alice@test.com",
+                Some("http://hook.internal/hook"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_filtered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "alice@test.com",
+            &["bob@ext.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Filtered recipients"))
+            .expect("filtered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("internal notification must carry endpoints");
+        assert!(
+            eps.contains("http://hook.internal/hook"),
+            "endpoints must hold the webhook url: {eps}"
+        );
+        let headers: serde_json::Value =
+            serde_json::from_str(rec.headers.as_deref().expect("headers")).unwrap();
+        assert_eq!(
+            headers.get("delivery_type").and_then(|v| v.as_str()),
+            Some("webhook"),
+            "internal recipient must be routed through the webhook processor"
+        );
+    }
+
+    // P1-2 path a: a notification to an EXTERNAL sender keeps the MX envelope.
+    #[tokio::test]
+    async fn filtered_notification_external_sender_falls_back_to_mx() {
+        let (cfg, ef) = notify_env();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_filtered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "bob@ext.com",
+            &["ghost@example.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Filtered recipients"))
+            .expect("filtered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("external notification must carry the mx envelope");
+        assert!(
+            eps.contains("\"mx\""),
+            "external recipient must fall back to mx: {eps}"
+        );
+    }
+
+    // P1-2 path a: unregistered-address notification follows the same routing.
+    #[tokio::test]
+    async fn unregistered_notification_internal_sender_carries_webhook_endpoint() {
+        let (cfg, ef) = notify_env();
+        ef.env_factory
+            .create_domain(
+                "d1",
+                "sys1",
+                "alice@test.com",
+                Some("http://hook.internal/hook"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        send_unregistered_notification(
+            &ef,
+            &cfg,
+            "sys1",
+            "alice@test.com",
+            &["nobody@test.com".to_string()],
+            &tx,
+        )
+        .await;
+
+        let rec = ef
+            .list(1)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.subject.contains("Unregistered addresses"))
+            .expect("unregistered notification must be enqueued");
+        let eps = rec
+            .endpoints
+            .as_deref()
+            .expect("internal notification must carry endpoints");
+        assert!(
+            eps.contains("http://hook.internal/hook"),
+            "endpoints must hold the webhook url: {eps}"
+        );
+    }
+}

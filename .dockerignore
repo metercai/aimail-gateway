@@ -1,0 +1,5 @@
+target/
+.git/
+*.pid
+*.admin_key
+.env
