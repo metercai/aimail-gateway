@@ -1034,7 +1034,6 @@ fn handle_refresh(
             notifier.notify_invite(
                 email,
                 token,
-                board_id,
                 &notifier.board_email,
                 short_id,
                 &full_csv,

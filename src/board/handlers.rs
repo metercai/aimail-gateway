@@ -21,6 +21,21 @@ fn extract_token(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
+/// Normalize the board path segment to the canonical 20-hex board id.
+///
+/// Accepts either the internal 20-hex id (what the SDKs fill in) or the
+/// board's email address — the agent-facing handle used in command-result
+/// ack hints. The address form is derived locally with the same function
+/// board creation uses (sha256(lower(address))[:10 bytes]), so the hint
+/// URL is directly curl-able and no second identifier is stored.
+fn resolve_board_path_segment(segment: &str) -> String {
+    if segment.contains('@') {
+        crate::board::models::derive_board_id(segment)
+    } else {
+        segment.to_string()
+    }
+}
+
 /// Verify the token matches a board member. Returns the member email on success.
 fn verify_board_token(
     headers: &HeaderMap,
@@ -71,6 +86,7 @@ pub async fn handle_list_tasks(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     if authorize(&headers, &s, &board_id, email, "list", allow_plaintext).is_none() {
@@ -103,6 +119,7 @@ pub async fn handle_list_members(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     if authorize(&headers, &s, &board_id, email, "members", allow_plaintext).is_none() {
@@ -136,6 +153,7 @@ pub async fn handle_list_roles(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     if authorize(&headers, &s, &board_id, email, "roles", allow_plaintext).is_none() {
@@ -166,6 +184,7 @@ pub async fn handle_get_task(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     if authorize(&headers, &s, &board_id, email, "show", allow_plaintext).is_none() {
@@ -202,6 +221,7 @@ pub async fn handle_post_heartbeat(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     // Bearer token identifies the member → member email is the heartbeat actor.
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     let actor = match authorize(
@@ -244,6 +264,7 @@ pub async fn handle_board_status(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let s = state.config.storage.path.to_string_lossy().to_string();
+    let board_id = resolve_board_path_segment(&board_id);
     let email = query.get("email").map(|v| v.as_str()).unwrap_or("");
     let allow_plaintext = state.config.board.allow_plaintext_board_tokens;
     if authorize(&headers, &s, &board_id, email, "status", allow_plaintext).is_none() {

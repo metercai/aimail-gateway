@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "aimail-gateway"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "aes-gcm",
  "async-trait",

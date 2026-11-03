@@ -143,7 +143,10 @@ impl Notifier {
         if !is_member || !self.reply_policy.allows(verb, ok) {
             return;
         }
-        let hint = format!("{}/api/v1/board/{}/tasks", self.gateway_url, self.board_id);
+        let hint = format!(
+            "{}/api/v1/board/{}/tasks",
+            self.gateway_url, self.board_email
+        );
         let (subject, body) = format_command_result(verb, ok, summary, data, &hint);
         self.create_email(to, &subject, &body, None);
     }
@@ -534,20 +537,23 @@ impl Notifier {
         &self,
         member_email: &str,
         board_token: &str,
-        board_id: &str,
         board_email: &str,
         short_id: &str,
         members_csv: &str,
     ) {
+        // The board address (Board Email:) is the agent-facing board handle — the
+        // SDK derives the internal board_id from it (sha256[:20], same as
+        // derive_board_id). The 20-hex id is deliberately NOT stated: an extra
+        // identifier is knowledge that can drift (the agent should remember the
+        // address, not the hash).
         let body = format!(
-            "── A2A Board ──\n\n{}\n  {}: {}\n  Board Email: {}\n\n── {} ──\nAPI: {}\nBoard ID: {}\nToken: {}",
+            "── A2A Board ──\n\n{}\n  {}: {}\n  Board Email: {}\n\n── {} ──\nAPI: {}\nToken: {}",
             "Board Invitation",
             "Board",
             short_id,
             board_email,
             "Information",
             self.gateway_url,
-            board_id,
             board_token,
         );
         let subject = format!("[A2A] invite: {}", short_id);

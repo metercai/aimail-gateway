@@ -425,11 +425,10 @@ impl InboundInterceptor for A2aInterceptor {
                         ("Project", "Team Members")
                     };
                     let notify_body = format!(
-                    "{proj_l}: {} ({})\nBoard Email: {}\nBoard ID: {}\nGateway: {}\n\n{members_l}:\n{}",
+                    "{proj_l}: {} ({})\nBoard Email: {}\nGateway: {}\n\n{members_l}:\n{}",
                     short_id,
                     description,
                     board_email,
-                    board_id,
                     self.gateway_url,
                     members_list.join("\n"),
                 );
@@ -513,7 +512,6 @@ impl InboundInterceptor for A2aInterceptor {
                     invite_notifier.notify_invite(
                         email,
                         token,
-                        &board_id,
                         &board_email,
                         &short_id,
                         &new_members_csv,
