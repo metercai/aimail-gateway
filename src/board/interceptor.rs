@@ -425,13 +425,13 @@ impl InboundInterceptor for A2aInterceptor {
                         ("Project", "Team Members")
                     };
                     let notify_body = format!(
-                    "{proj_l}: {} ({})\nBoard Email: {}\nGateway: {}\n\n{members_l}:\n{}",
-                    short_id,
-                    description,
-                    board_email,
-                    self.gateway_url,
-                    members_list.join("\n"),
-                );
+                        "{proj_l}: {} ({})\nBoard Email: {}\nGateway: {}\n\n{members_l}:\n{}",
+                        short_id,
+                        description,
+                        board_email,
+                        self.gateway_url,
+                        members_list.join("\n"),
+                    );
                     let notify_subject = format!(
                         "[A2A] notice: Board {} created — {}",
                         short_id,

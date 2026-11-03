@@ -1031,13 +1031,7 @@ fn handle_refresh(
             .collect::<Vec<_>>()
             .join(",");
         for (email, token) in &new_members {
-            notifier.notify_invite(
-                email,
-                token,
-                &notifier.board_email,
-                short_id,
-                &full_csv,
-            );
+            notifier.notify_invite(email, token, &notifier.board_email, short_id, &full_csv);
         }
         notifier.notify_all(
             board_id,
