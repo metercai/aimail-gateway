@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::core::errors::{AppError, AppResult};
 use crate::core::storage::{
-    ApiKeyRecord, Database, DomainAddrMetaRecord, SystemDomainRecord, SystemRecord, WhitelistRecord,
+    ApiKeyParams, ApiKeyRecord, Database, DomainAddrMetaRecord, SystemDomainRecord, SystemRecord,
+    WhitelistRecord,
 };
 use crate::core::strategy::SystemStore;
 
@@ -623,51 +624,12 @@ impl EnvFactory {
     /// Create a new API key record.
     #[allow(clippy::too_many_arguments)]
     /// Activation-safe key write (insert or rotate in place).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_api_key(
-        &self,
-        system_id: &str,
-        email_address: &str,
-        key_hash: &str,
-        key_prefix: &str,
-        scopes: &[String],
-        expires_at: Option<&str>,
-        category: &str,
-    ) -> AppResult<i64> {
-        self.db
-            .upsert_api_key(
-                system_id,
-                email_address,
-                key_hash,
-                key_prefix,
-                scopes,
-                expires_at,
-                category,
-            )
-            .await
+    pub async fn upsert_api_key(&self, params: ApiKeyParams<'_>) -> AppResult<i64> {
+        self.db.upsert_api_key(params).await
     }
 
-    pub async fn create_api_key(
-        &self,
-        system_id: &str,
-        email_address: &str,
-        key_hash: &str,
-        key_prefix: &str,
-        scopes: &[String],
-        expires_at: Option<&str>,
-        category: &str,
-    ) -> AppResult<ApiKeyRecord> {
-        self.db
-            .insert_api_key(
-                system_id,
-                email_address,
-                key_hash,
-                key_prefix,
-                scopes,
-                expires_at,
-                category,
-            )
-            .await
+    pub async fn create_api_key(&self, params: ApiKeyParams<'_>) -> AppResult<ApiKeyRecord> {
+        self.db.insert_api_key(params).await
     }
 
     /// Verify an API key hash exists and is active.

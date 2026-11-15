@@ -784,7 +784,7 @@ mod tests {
 
         // A key the client signs with.
         let key_hash = "a".repeat(64);
-        arc.insert_api_key(
+        arc.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "sys1",
             "agent@test.com",
             &key_hash,
@@ -792,7 +792,7 @@ mod tests {
             &["agent".to_string()],
             None,
             "agent",
-        )
+        ))
         .await
         .unwrap();
 
@@ -929,7 +929,7 @@ mod tests {
         let db = std::sync::Arc::new(Database::open(dir.join("aimail.db"), 4, None).unwrap());
 
         let key_hash = "b".repeat(64);
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "sys1",
             "agent@test.com",
             &key_hash,
@@ -937,7 +937,7 @@ mod tests {
             &["agent".to_string()],
             None,
             "agent",
-        )
+        ))
         .await
         .unwrap();
 
@@ -1034,7 +1034,7 @@ mod tests {
 
         // Seed one key so the "would-have-matched" path is real.
         let key_hash = "b".repeat(64);
-        arc.insert_api_key(
+        arc.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "sys1",
             "agent@test.com",
             &key_hash,
@@ -1042,7 +1042,7 @@ mod tests {
             &["agent".to_string()],
             None,
             "agent",
-        )
+        ))
         .await
         .unwrap();
 
@@ -1147,7 +1147,7 @@ mod tests {
         //     reachable (no silent .take(64) drop).
         for i in 0..100u32 {
             let kh = format!("{:064x}", 1000 + i);
-            arc.insert_api_key(
+            arc.insert_api_key(crate::core::storage::ApiKeyParams::new(
                 &format!("sys100{i}"),
                 "batch@t.com",
                 &kh,
@@ -1155,7 +1155,7 @@ mod tests {
                 &["agent".to_string()],
                 None,
                 "agent",
-            )
+            ))
             .await
             .unwrap();
         }

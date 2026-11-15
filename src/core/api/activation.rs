@@ -19,7 +19,7 @@ const ADDRESS_CODE_TTL_HOURS: i64 = 24;
 
 use crate::core::api::auth::require_scope_any;
 use crate::core::api::types::{ErrorResponse, HttpState};
-use crate::core::storage::ApiKeyRecord;
+use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 
 // ── Address activation helpers ──
 
@@ -104,7 +104,7 @@ pub async fn activate_address_code(
     let actual_scopes: Vec<String> = vec!["agent".to_string()];
 
     let key_id = factory
-        .upsert_api_key(
+        .upsert_api_key(ApiKeyParams::new(
             &system_id,
             email_address,
             &key_hash,
@@ -112,7 +112,7 @@ pub async fn activate_address_code(
             &actual_scopes,
             None,
             "agent",
-        )
+        ))
         .await
         .map_err(|e| crate::core::errors::AppError::Internal(format!("create key: {e}")))?;
 
@@ -569,7 +569,7 @@ pub async fn activate_system_handler(
         .factories
         .email
         .env_factory
-        .upsert_api_key(
+        .upsert_api_key(ApiKeyParams::new(
             &sid,
             "",
             &key_hash,
@@ -577,7 +577,7 @@ pub async fn activate_system_handler(
             &["system".to_string()],
             None,
             "system",
-        )
+        ))
         .await
         .map_err(|e| {
             activation_error(
@@ -1554,9 +1554,9 @@ mod activation_status_tests {
     #[test]
     fn activation_code_format_is_unified() {
         use super::random_code;
+        let re = regex::Regex::new(r"^(sys|addr)-([0-9a-f]{4}-){5}[0-9a-f]{4}$").unwrap();
         for prefix in ["sys", "addr"] {
             let code = random_code(prefix);
-            let re = regex::Regex::new(r"^(sys|addr)-([0-9a-f]{4}-){5}[0-9a-f]{4}$").unwrap();
             assert!(re.is_match(&code), "bad code: {code}");
         }
     }

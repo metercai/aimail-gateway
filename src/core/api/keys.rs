@@ -14,7 +14,7 @@ use crate::core::api::auth::{
 };
 use crate::core::api::types::*;
 use crate::core::scope::Scope;
-use crate::core::storage::ApiKeyRecord;
+use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 
 /// POST /api/v1/api-keys — Create a new API key.
 pub async fn create_api_key(
@@ -327,7 +327,7 @@ pub async fn create_api_key(
         .factories
         .email
         .env_factory
-        .create_api_key(
+        .create_api_key(ApiKeyParams::new(
             &req.system_id,
             &req.email_address,
             &key_hash,
@@ -335,7 +335,7 @@ pub async fn create_api_key(
             &scopes,
             expires_at,
             &req.category,
-        )
+        ))
         .await
     {
         Ok(r) => r,

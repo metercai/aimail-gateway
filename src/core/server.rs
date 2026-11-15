@@ -11,6 +11,7 @@ use tracing::{error, info, trace, warn};
 use crate::core::api::types::HttpState;
 use crate::core::config::Config;
 use crate::core::errors::{AppError, AppResult};
+use crate::core::storage::ApiKeyParams;
 use hex;
 use rand::Rng;
 
@@ -332,7 +333,7 @@ pub async fn setup_admin_key(
         keys.admin_key = raw_key.clone();
 
         factory
-            .create_api_key(
+            .create_api_key(ApiKeyParams::new(
                 &bootstrap_id,
                 "",
                 &key_hash,
@@ -340,7 +341,7 @@ pub async fn setup_admin_key(
                 &["platform".to_string(), "system".to_string()],
                 None,
                 "platform",
-            )
+            ))
             .await
             .map_err(|e| AppError::Internal(format!("admin api-key: {e}")))?;
 
@@ -364,7 +365,7 @@ pub async fn setup_admin_key(
         if existing_system.is_empty() {
             let (raw_system_key, system_prefix) = mint_api_key();
             factory
-                .create_api_key(
+                .create_api_key(ApiKeyParams::new(
                     &bootstrap_id,
                     SYSTEM_KEY_DOMAIN_ADDR,
                     &crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(
@@ -374,7 +375,7 @@ pub async fn setup_admin_key(
                     &["system".to_string()],
                     None,
                     "system",
-                )
+                ))
                 .await
                 .map_err(|e| AppError::Internal(format!("system api-key: {e}")))?;
             tracing::info!(

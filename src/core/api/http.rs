@@ -3888,7 +3888,7 @@ mod tests {
     async fn seed_key(db: &Database, sid: &str, email: &str, scopes: &[&str], raw_key: &str) {
         let scopes: Vec<String> = scopes.iter().map(|s| s.to_string()).collect();
         let category = if email.is_empty() { "system" } else { "agent" };
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             sid,
             email,
             &store_hash(&crate::core::api::auth::sha256_hex(raw_key)),
@@ -3896,7 +3896,7 @@ mod tests {
             &scopes,
             None,
             category,
-        )
+        ))
         .await
         .unwrap();
     }

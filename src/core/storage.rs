@@ -1503,6 +1503,40 @@ pub struct ApiKeyRecord {
     pub claimed_at: Option<String>,
 }
 
+/// Parameters for creating/rotating an API key. A struct keeps the two
+/// storage/factory signatures under clippy's argument limit without allow.
+pub struct ApiKeyParams<'a> {
+    pub system_id: &'a str,
+    pub email_address: &'a str,
+    pub key_hash: &'a str,
+    pub key_prefix: &'a str,
+    pub scopes: &'a [String],
+    pub expires_at: Option<&'a str>,
+    pub category: &'a str,
+}
+
+impl<'a> ApiKeyParams<'a> {
+    pub fn new(
+        system_id: &'a str,
+        email_address: &'a str,
+        key_hash: &'a str,
+        key_prefix: &'a str,
+        scopes: &'a [String],
+        expires_at: Option<&'a str>,
+        category: &'a str,
+    ) -> Self {
+        Self {
+            system_id,
+            email_address,
+            key_hash,
+            key_prefix,
+            scopes,
+            expires_at,
+            category,
+        }
+    }
+}
+
 pub fn api_key_row(r: &rusqlite::Row) -> rusqlite::Result<ApiKeyRecord> {
     Ok(ApiKeyRecord {
         id: r.get(0)?,
@@ -1594,17 +1628,16 @@ impl Database {
     /// Activation-safe key write: first activation inserts, a repeat
     /// activation rotates the existing (system_id, domain_addr) row in place.
     /// The old raw key is invalid immediately (key_hash replaced).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_api_key(
-        &self,
-        system_id: &str,
-        email_address: &str,
-        key_hash: &str,
-        key_prefix: &str,
-        scopes: &[String],
-        expires_at: Option<&str>,
-        category: &str,
-    ) -> AppResult<i64> {
+    pub async fn upsert_api_key(&self, params: ApiKeyParams<'_>) -> AppResult<i64> {
+        let ApiKeyParams {
+            system_id,
+            email_address,
+            key_hash,
+            key_prefix,
+            scopes,
+            expires_at,
+            category,
+        } = params;
         let (system_id, email_address, key_hash, key_prefix) = (
             system_id.to_string(),
             email_address.to_string(),
@@ -1635,16 +1668,16 @@ impl Database {
         }).await
     }
 
-    pub async fn insert_api_key(
-        &self,
-        system_id: &str,
-        email_address: &str,
-        key_hash: &str,
-        key_prefix: &str,
-        scopes: &[String],
-        expires_at: Option<&str>,
-        category: &str,
-    ) -> AppResult<ApiKeyRecord> {
+    pub async fn insert_api_key(&self, params: ApiKeyParams<'_>) -> AppResult<ApiKeyRecord> {
+        let ApiKeyParams {
+            system_id,
+            email_address,
+            key_hash,
+            key_prefix,
+            scopes,
+            expires_at,
+            category,
+        } = params;
         let (system_id, email_address, key_hash, key_prefix) = (
             system_id.to_string(),
             email_address.to_string(),
@@ -3152,7 +3185,7 @@ mod tests {
     #[tokio::test]
     async fn gateway_and_agent_keys_coexist_for_one_system() {
         let db = temp_db();
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "system-1",
             "",
             "hashA",
@@ -3160,11 +3193,11 @@ mod tests {
             &["platform".to_string(), "system".to_string()],
             None,
             "platform",
-        )
+        ))
         .await
         .unwrap();
         // B under the reserved marker — must NOT collide with A's empty domain_addr.
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "system-1",
             crate::core::server::SYSTEM_KEY_DOMAIN_ADDR,
             "hashB",
@@ -3172,7 +3205,7 @@ mod tests {
             &["system".to_string()],
             None,
             "system",
-        )
+        ))
         .await
         .expect("system key must coexist with the platform key of the same system");
 
@@ -3204,7 +3237,7 @@ mod tests {
     #[tokio::test]
     async fn legacy_system_admin_key_is_aligned_in_place() {
         let db = temp_db();
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "system-1",
             "",
             "hashLegacy",
@@ -3212,7 +3245,7 @@ mod tests {
             &["system".to_string()],
             None,
             "system",
-        )
+        ))
         .await
         .unwrap();
         let factory = crate::core::factory::EnvFactory::new(
@@ -3265,7 +3298,7 @@ mod tests {
     #[tokio::test]
     async fn d11_identity_lookup_searches_via_indexes_not_full_scan() {
         let (db, path) = temp_db_with_path();
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "system-1",
             "agent@shared.example",
             "hashA",
@@ -3273,10 +3306,10 @@ mod tests {
             &["agent".to_string()],
             None,
             "agent",
-        )
+        ))
         .await
         .unwrap();
-        db.insert_api_key(
+        db.insert_api_key(crate::core::storage::ApiKeyParams::new(
             "system-1",
             "",
             "hashB",
@@ -3284,7 +3317,7 @@ mod tests {
             &["system".to_string()],
             None,
             "system",
-        )
+        ))
         .await
         .unwrap();
 
@@ -3398,7 +3431,7 @@ mod tests {
         let db = std::sync::Arc::new(Database::open(dir.join("aimail.db"), 4, None).unwrap());
 
         let rec = db
-            .insert_api_key(
+            .insert_api_key(crate::core::storage::ApiKeyParams::new(
                 "sys1",
                 "agent@test.com",
                 &"a".repeat(64),
@@ -3406,7 +3439,7 @@ mod tests {
                 &["agent".to_string()],
                 None,
                 "agent",
-            )
+            ))
             .await
             .unwrap();
 
