@@ -635,7 +635,15 @@ impl EnvFactory {
         category: &str,
     ) -> AppResult<i64> {
         self.db
-            .upsert_api_key(system_id, email_address, key_hash, key_prefix, scopes, expires_at, category)
+            .upsert_api_key(
+                system_id,
+                email_address,
+                key_hash,
+                key_prefix,
+                scopes,
+                expires_at,
+                category,
+            )
             .await
     }
 

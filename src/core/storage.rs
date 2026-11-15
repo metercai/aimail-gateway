@@ -1929,7 +1929,11 @@ impl Database {
         code_hash: &str,
         expires_at: &str,
     ) -> AppResult<()> {
-        let (email, code_hash, expires_at) = (email.to_string(), code_hash.to_string(), expires_at.to_string());
+        let (email, code_hash, expires_at) = (
+            email.to_string(),
+            code_hash.to_string(),
+            expires_at.to_string(),
+        );
         self.call(move |conn| {
             conn.execute(
                 "INSERT INTO email_verifications (email, code_hash, expires_at, verified)
@@ -1941,10 +1945,14 @@ impl Database {
                 params![email, code_hash, expires_at],
             )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
-    pub async fn get_email_verification(&self, email: &str) -> AppResult<Option<(String, String, bool)>> {
+    pub async fn get_email_verification(
+        &self,
+        email: &str,
+    ) -> AppResult<Option<(String, String, bool)>> {
         let email = email.to_string();
         self.call(move |conn| {
             let mut stmt = conn.prepare(
@@ -1956,23 +1964,32 @@ impl Database {
             } else {
                 Ok(None)
             }
-        }).await
+        })
+        .await
     }
 
     pub async fn mark_email_verified(&self, email: &str) -> AppResult<()> {
         let email = email.to_string();
         self.call(move |conn| {
-            conn.execute("UPDATE email_verifications SET verified = 1 WHERE email = ?1", params![email])?;
+            conn.execute(
+                "UPDATE email_verifications SET verified = 1 WHERE email = ?1",
+                params![email],
+            )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     pub async fn clear_email_verification(&self, email: &str) -> AppResult<()> {
         let email = email.to_string();
         self.call(move |conn| {
-            conn.execute("DELETE FROM email_verifications WHERE email = ?1", params![email])?;
+            conn.execute(
+                "DELETE FROM email_verifications WHERE email = ?1",
+                params![email],
+            )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     /// Simulated inbox for the pilot: read actual queued outbound emails by
@@ -1995,10 +2012,16 @@ impl Database {
                 out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
             }
             Ok(out)
-        }).await
+        })
+        .await
     }
 
-    pub async fn insert_mock_mail(&self, to_addr: &str, subject: &str, body: &str) -> AppResult<()> {
+    pub async fn insert_mock_mail(
+        &self,
+        to_addr: &str,
+        subject: &str,
+        body: &str,
+    ) -> AppResult<()> {
         let (to_addr, subject, body) = (to_addr.to_string(), subject.to_string(), body.to_string());
         self.call(move |conn| {
             conn.execute(
@@ -2006,10 +2029,15 @@ impl Database {
                 params![to_addr, subject, body],
             )?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
-    pub async fn list_mock_mail(&self, to_addr: &str, limit: i64) -> AppResult<Vec<(i64, String, String, String)>> {
+    pub async fn list_mock_mail(
+        &self,
+        to_addr: &str,
+        limit: i64,
+    ) -> AppResult<Vec<(i64, String, String, String)>> {
         let (to_addr, limit) = (to_addr.to_string(), limit.clamp(1, 50));
         self.call(move |conn| {
             let mut stmt = conn.prepare(
@@ -2039,7 +2067,8 @@ impl Database {
                 out.push((row.get(0)?, row.get(1)?));
             }
             Ok(out)
-        }).await
+        })
+        .await
     }
 
     // ── Activation Codes ──────────────────────────────────────────────
