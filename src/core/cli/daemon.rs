@@ -58,6 +58,14 @@ pub fn check_existing_pid(pid_file: &PathBuf) -> AppResult<()> {
         Ok(pid) => pid,
         Err(_) => return Ok(()),
     };
+    // In a container the gateway is PID 1; after a crash/restart the stale
+    // file contains 1 and `is_process_alive(1)` is true for the CURRENT
+    // process, causing an infinite "already running" restart loop. A PID file
+    // naming ourselves is stale by definition.
+    if pid == std::process::id() {
+        let _ = fs::remove_file(pid_file);
+        return Ok(());
+    }
     if super::is_process_alive(pid) {
         return Err(AppError::Config(format!(
             "Server is already running (PID: {pid}). Use 'stop' first or 'restart'."
