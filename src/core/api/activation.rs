@@ -111,8 +111,8 @@ pub async fn activate_address_code(
     // Address activation codes always produce an agent-scope key.
     let actual_scopes: Vec<String> = vec!["agent".to_string()];
 
-    let record = factory
-        .create_api_key(
+    let key_id = factory
+        .upsert_api_key(
             &system_id,
             email_address,
             &key_hash,
@@ -124,8 +124,9 @@ pub async fn activate_address_code(
         .await
         .map_err(|e| crate::core::errors::AppError::Internal(format!("create key: {e}")))?;
 
+    db.ensure_agent_address_domain(&system_id, email_address).await?;
     db.delete_activation_code(&hash).await?;
-    Ok((raw_key, record.id))
+    Ok((raw_key, key_id))
 }
 
 // ── Rate limiter for public activation endpoint ──────────────────
@@ -525,9 +526,9 @@ pub async fn activate_system_handler(
         .factories
         .email
         .env_factory
-        .create_api_key(
+        .upsert_api_key(
             &sid,
-            &domain,
+            "",
             &key_hash,
             &key_prefix,
             &["system".to_string()],
@@ -543,7 +544,7 @@ pub async fn activate_system_handler(
         .env_factory
         .list_domains_by_system(&sid)
         .await
-        .map(|rows| rows.into_iter().map(|d| d.domain).collect::<Vec<_>>())
+        .map(|rows| rows.into_iter().map(|d| d.domain).filter(|d| !d.contains('@')).collect::<Vec<_>>())
         .unwrap_or_default();
     let domains = if domains.is_empty() && !domain.is_empty() { vec![domain.clone()] } else { domains };
 

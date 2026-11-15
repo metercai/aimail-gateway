@@ -283,6 +283,46 @@ pub async fn create_api_key(
         }
     }
 
+    // ── domain/agent: one key per (system, domain_addr) — rotate on re-create ──
+    if req.category != "system" {
+        if let Ok(existing) = state
+            .factories
+            .email
+            .env_factory
+            .list_api_keys_by_system(&req.system_id, &req.category)
+            .await
+        {
+            if let Some(row) = existing
+                .into_iter()
+                .find(|k| k.email_address == req.email_address)
+            {
+                match state
+                    .factories
+                    .email
+                    .env_factory
+                    .rotate_api_key(row.id, &key_hash, key_prefix)
+                    .await
+                {
+                    Ok(Some(record)) => {
+                        let mut response: ApiKeyResponse = record.into();
+                        response.raw_key = Some(raw_key);
+                        return Ok((StatusCode::CREATED, Json(response)));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "Database error".to_string(),
+                                detail: Some(e.to_string()),
+                            }),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     let record = match state
         .factories
         .email

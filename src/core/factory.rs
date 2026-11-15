@@ -622,6 +622,23 @@ impl EnvFactory {
 
     /// Create a new API key record.
     #[allow(clippy::too_many_arguments)]
+    /// Activation-safe key write (insert or rotate in place).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_api_key(
+        &self,
+        system_id: &str,
+        email_address: &str,
+        key_hash: &str,
+        key_prefix: &str,
+        scopes: &[String],
+        expires_at: Option<&str>,
+        category: &str,
+    ) -> AppResult<i64> {
+        self.db
+            .upsert_api_key(system_id, email_address, key_hash, key_prefix, scopes, expires_at, category)
+            .await
+    }
+
     pub async fn create_api_key(
         &self,
         system_id: &str,

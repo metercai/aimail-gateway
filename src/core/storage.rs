@@ -1553,6 +1553,70 @@ impl Database {
     }
 
     #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
+    /// Ensure an activated agent address has a system_domains row so SMTP
+    /// RCPT resolves it (base's address activation historically only created
+    /// the key; advanced creates the row). Idempotent.
+    pub async fn ensure_agent_address_domain(
+        &self,
+        system_id: &str,
+        email_address: &str,
+    ) -> AppResult<()> {
+        let (system_id, email_address) = (system_id.to_string(), email_address.to_string());
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO system_domains (id, system_id, domain_addr, webhook_url, webhook_secret, is_active, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, NULL, NULL, 1, ?4, ?4)",
+                params![format!("addr-{}", email_address), system_id, email_address, now],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    /// Activation-safe key write: first activation inserts, a repeat
+    /// activation rotates the existing (system_id, domain_addr) row in place.
+    /// The old raw key is invalid immediately (key_hash replaced).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_api_key(
+        &self,
+        system_id: &str,
+        email_address: &str,
+        key_hash: &str,
+        key_prefix: &str,
+        scopes: &[String],
+        expires_at: Option<&str>,
+        category: &str,
+    ) -> AppResult<i64> {
+        let (system_id, email_address, key_hash, key_prefix) = (
+            system_id.to_string(),
+            email_address.to_string(),
+            key_hash.to_string(),
+            key_prefix.to_string(),
+        );
+        let scopes_json = serde_json::to_string(scopes)
+            .map_err(|e| AppError::Internal(format!("serde_json::to_string failed: {e}")))?;
+        let expires_at_owned = expires_at.map(String::from);
+        let category = category.to_string();
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.call(move |conn| {
+            let id: i64 = conn.query_row(
+                "INSERT INTO api_keys (system_id, domain_addr, key_hash, key_prefix, scopes, is_active, created_at, expires_at, last_used_at, category)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, NULL, ?8)
+                 ON CONFLICT(system_id, domain_addr) DO UPDATE SET
+                   key_hash = excluded.key_hash,
+                   key_prefix = excluded.key_prefix,
+                   scopes = excluded.scopes,
+                   is_active = 1,
+                   expires_at = excluded.expires_at,
+                   last_used_at = NULL
+                 RETURNING id",
+                params![system_id, email_address, key_hash, key_prefix, scopes_json, now, expires_at_owned, category],
+                |r| r.get(0),
+            )?;
+            Ok(id)
+        }).await
+    }
+
     pub async fn insert_api_key(
         &self,
         system_id: &str,
