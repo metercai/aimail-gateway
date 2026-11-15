@@ -4,6 +4,8 @@ use axum::{
     extract::{ConnectInfo, Extension, State},
     http::StatusCode,
     response::Json,
+    routing::post,
+    Router,
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -398,6 +400,218 @@ pub async fn activate_address_handler(
         "status": "activated", "raw_key": raw_key, "api_key_id": api_key_id, "email_address": email,
     }));
     Ok((StatusCode::OK, body))
+}
+
+// ── Base standalone activation API (not mounted by advanced) ─────────
+//
+// These handlers are composed only by the base binary (`src/server.rs`).
+// Advanced depends on the library and mounts its own activation routes, so
+// there is no duplicate-route risk and no shared policy layer.
+
+fn activation_error(status: StatusCode, error: &str, detail: Option<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(ErrorResponse { error: error.to_string(), detail }))
+}
+
+fn is_expired(expires_at: Option<&str>) -> bool {
+    let Some(raw) = expires_at else { return false };
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(t) => t.with_timezone(&chrono::Utc) <= chrono::Utc::now(),
+        Err(_) => false,
+    }
+}
+
+/// POST /api/v1/public/activation-code/preflight {code}
+/// Returns code metadata WITHOUT consuming the code.
+pub async fn preflight_activation_code_handler(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if code.is_empty() {
+        return Json(serde_json::json!({"valid": false, "error": "code is required"}));
+    }
+    let hash = crate::core::api::auth::sha256_hex(code);
+    let meta = state
+        .factories
+        .email
+        .env_factory
+        .db
+        .lookup_activation_code_meta(&hash)
+        .await
+        .ok()
+        .flatten();
+    let Some((code_type, system_id, domain, email, claimed, expires_at, frozen)) = meta else {
+        return Json(serde_json::json!({"valid": false, "error": "unknown activation code"}));
+    };
+    let expired = is_expired(expires_at.as_deref());
+    let scope = if system_id.starts_with("shared-") || system_id.starts_with("shared_") {
+        "shared"
+    } else {
+        "system"
+    };
+    Json(serde_json::json!({
+        "valid": !claimed && !frozen && !expired,
+        "code_type": code_type,
+        "scope": scope,
+        "system_id": system_id,
+        "domain": domain,
+        "system_name": "",
+        "email_address": email,
+        "claimed": claimed,
+        "is_frozen": frozen,
+        "expires_at": expires_at,
+        "error": if claimed { "already claimed" } else if frozen { "frozen" } else if expired { "expired" } else { "" },
+    }))
+}
+
+/// POST /api/v1/activate-system {code, system_name?, domain?, manager?}
+/// Base is single-system: the code names the existing system/domain; activation
+/// mints an agent-side system key for it. No product/quota layer.
+pub async fn activate_system_handler(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if code.is_empty() {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "code is required", None));
+    }
+    let hash = crate::core::api::auth::sha256_hex(code);
+    let meta = state
+        .factories
+        .email
+        .env_factory
+        .db
+        .lookup_activation_code_meta(&hash)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?
+        .ok_or_else(|| activation_error(StatusCode::GONE, "invalid or expired activation code", None))?;
+    let (code_type, meta_sid, meta_domain, _email, claimed, expires_at, frozen) = meta;
+    if code_type != "product" && code_type != "system" {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "this is not a system activation code", None));
+    }
+    if claimed || frozen || is_expired(expires_at.as_deref()) {
+        return Err(activation_error(StatusCode::GONE, "activation code is not redeemable", None));
+    }
+    let req_domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    if !meta_domain.is_empty() && !req_domain.is_empty() && meta_domain.to_lowercase() != req_domain {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "activation code is bound to a different domain", Some(meta_domain)));
+    }
+    let domain = if !req_domain.is_empty() { req_domain } else { meta_domain.to_lowercase() };
+    let sid = if meta_sid.is_empty() { "admin".to_string() } else { meta_sid };
+    let manager = body.get("manager").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+
+    let claimed_ok = state
+        .factories
+        .email
+        .env_factory
+        .db
+        .claim_activation_code(&hash, if manager.is_empty() { &sid } else { &manager })
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "claim failed", Some(e.to_string())))?;
+    if !claimed_ok {
+        return Err(activation_error(StatusCode::CONFLICT, "activation code already redeemed", None));
+    }
+
+    let (raw_key, key_hash, key_prefix) = {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let raw_bytes: [u8; 32] = rng.gen();
+        let raw_key = hex::encode(raw_bytes);
+        let hash = crate::core::api::auth::sha256_hex(&raw_key);
+        let prefix = raw_key[..8].to_string();
+        (raw_key, hash, prefix)
+    };
+    state
+        .factories
+        .email
+        .env_factory
+        .create_api_key(
+            &sid,
+            &domain,
+            &key_hash,
+            &key_prefix,
+            &["system".to_string()],
+            None,
+            "system",
+        )
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "key creation failed", Some(e.to_string())))?;
+
+    let domains = state
+        .factories
+        .email
+        .env_factory
+        .list_domains_by_system(&sid)
+        .await
+        .map(|rows| rows.into_iter().map(|d| d.domain).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let domains = if domains.is_empty() && !domain.is_empty() { vec![domain.clone()] } else { domains };
+
+    Ok((StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "status": "activated",
+        "raw_key": raw_key,
+        "system_id": sid,
+        "domain": domain,
+        "domains": domains,
+        "system_name": body.get("system_name").and_then(|v| v.as_str()).unwrap_or(""),
+        "manager_address": manager,
+        "kind": "new",
+    }))))
+}
+
+/// POST /api/v1/activate-address-code {code, email_address}
+/// Same credential as /activate-address, but returns the system binding and
+/// kind so a client can route/renew without a second lookup.
+pub async fn activate_address_code_compat_handler(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let email = body.get("email_address").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    if code.is_empty() || !email.contains('@') {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "code and email_address are required", None));
+    }
+    let hash = crate::core::api::auth::sha256_hex(code);
+    let meta = state
+        .factories
+        .email
+        .env_factory
+        .db
+        .lookup_activation_code_meta(&hash)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?
+        .ok_or_else(|| activation_error(StatusCode::GONE, "invalid or expired activation code", None))?;
+    let (_code_type, sid, _domain, _bound, claimed, expires_at, frozen) = meta;
+    if claimed || frozen || is_expired(expires_at.as_deref()) {
+        return Err(activation_error(StatusCode::GONE, "activation code is not redeemable", None));
+    }
+    let (raw_key, _key_id) = activate_address_code(
+        &state.factories.email.env_factory.db,
+        code,
+        &email,
+        &state.factories.email.env_factory,
+    )
+    .await
+    .map_err(|e| activation_error(e.status(), "activation failed", Some(e.to_string())))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({
+        "success": true,
+        "status": "activated",
+        "raw_key": raw_key,
+        "system_id": sid,
+        "email_address": email,
+        "kind": "new",
+        "expires_at": expires_at,
+    }))))
+}
+
+/// Base-only activation router (composed by src/server.rs, never by advanced).
+pub fn base_activation_router(state: HttpState) -> Router {
+    Router::new()
+        .route("/api/v1/public/activation-code/preflight", post(preflight_activation_code_handler))
+        .route("/api/v1/activate-system", post(activate_system_handler))
+        .route("/api/v1/activate-address-code", post(activate_address_code_compat_handler))
+        .with_state(state)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────

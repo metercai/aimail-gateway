@@ -1899,6 +1899,35 @@ impl Database {
         .await
     }
 
+    /// Full metadata for preflight (does NOT consume the code).
+    pub async fn lookup_activation_code_meta(
+        &self,
+        code_hash: &str,
+    ) -> AppResult<Option<(String, String, String, String, bool, Option<String>, bool)>> {
+        let code_hash = code_hash.to_string();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT code_type, system_id, domain, COALESCE(email_address,''), claimed, expires_at, is_frozen
+                 FROM activation_codes WHERE code_hash = ?1",
+            )?;
+            let mut rows = stmt.query(params![code_hash])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, i64>(4)? != 0,
+                    row.get(5)?,
+                    row.get::<_, i64>(6)? != 0,
+                )))
+            } else {
+                Ok(None)
+            }
+        })
+        .await
+    }
+
     /// Mark an activation code as claimed.
     /// Returns true if the claim succeeded (code existed and was unclaimed),
     /// false if the code was already claimed or no longer present.

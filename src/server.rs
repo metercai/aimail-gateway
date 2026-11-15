@@ -165,7 +165,13 @@ impl Server {
 
         // Clone http_state before create_router moves it
         let http_state_for_worker = http_state.clone();
+        let http_state_for_activation = http_state.clone();
         let router = create_router(http_state, router_hook, None, None, None, None);
+        // Base standalone activation API (advanced mounts its own; it never
+        // calls this function, so there is no duplicate-route conflict).
+        let router = router.merge(
+            aimail_base::core::api::activation::base_activation_router(http_state_for_activation),
+        );
 
         let retry_handle = aimail_base::core::server::spawn_retry_worker(
             &http_state_for_worker,
