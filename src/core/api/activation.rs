@@ -1165,8 +1165,11 @@ mod activation_status_tests {
         assert!(addr.contains("within 24 hours"));
         assert!(addr.contains("My safety officer (manager) is ada@example.com"));
         assert!(!addr.contains("dsh") && !addr.contains("renew") && !addr.contains("valid for the period"));
-        for text in [&sys, &addr] {
+        let verify = super::verification_email_body("123456");
+        assert!(verify.contains("It expires in 10 minutes"));
+        for text in [&sys, &addr, &verify] {
             assert!(!text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "CJK in email");
+            assert!(!text.contains("dsh") && !text.contains("renew") && !text.contains("valid for the period"));
         }
     }
 
