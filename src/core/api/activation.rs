@@ -12,8 +12,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Activation codes expire after this many days (single consumer, not configurable).
+/// System activation codes expire after 7 days; address codes are a 24-hour
+/// application window (same as advanced shared-domain defaults).
 const ACTIVATION_CODE_TTL_DAYS: i64 = 7;
+const ADDRESS_CODE_TTL_HOURS: i64 = 24;
 
 use crate::core::api::auth::require_scope_any;
 use crate::core::api::types::{ErrorResponse, HttpState};
@@ -31,22 +33,12 @@ pub async fn generate_activation_codes(
 ) -> crate::core::errors::AppResult<Vec<String>> {
     let email = email_address.unwrap_or("");
     let expires = {
-        let future = chrono::Utc::now() + chrono::Duration::days(ACTIVATION_CODE_TTL_DAYS);
+        let future = chrono::Utc::now() + chrono::Duration::hours(ADDRESS_CODE_TTL_HOURS);
         Some(future.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
     };
     let mut codes = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let code = {
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let parts: Vec<String> = (0..6)
-                .map(|_| {
-                    let val: u32 = rng.gen_range(0..0x10000);
-                    format!("{:04x}", val as u16)
-                })
-                .collect();
-            format!("addr-{}", parts.join("-"))
-        };
+        let code = random_code("addr");
         let hash = crate::core::api::auth::sha256_hex(&code);
         db.insert_activation_code(
             &hash,
@@ -256,27 +248,6 @@ pub async fn batch_generate_codes(
                 detail: None,
             }))),
             _ => {}
-        }
-        let meta = state
-            .factories
-            .email
-            .env_factory
-            .resolve_domain_addr_meta(email)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                )
-            })?;
-        if meta.as_ref().is_none_or(|m| m.manager_address.is_empty()) {
-            return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
-                error: "Cannot generate activation code: manager_address not configured for this address".to_string(),
-                detail: None,
-            })));
         }
     }
 
@@ -630,11 +601,18 @@ fn random_six_digits() -> String {
 }
 
 fn random_code(prefix: &str) -> String {
-    format!("{}-{}", prefix, uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string())
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let parts: Vec<String> = (0..6)
+        .map(|_| format!("{:04x}", rng.gen_range(0..0x10000u32) as u16))
+        .collect();
+    format!("{}-{}", prefix, parts.join("-"))
 }
 
 fn verification_email_body(code: &str) -> String {
-    format!("Your AIMail verification code is: {code}\n\nIt expires in 10 minutes. If you did not request it, ignore this mail.")
+    format!(
+        "Hello,\n\nYour AIMail verification code is:\n\n  {code}\n\nIt expires in 10 minutes. If you did not request this mail, please ignore it.\n\nBest regards,\nAIMail Team\n"
+    )
 }
 
 /// POST /api/v1/public/email-verify/send {email}
@@ -781,6 +759,20 @@ async fn require_verified(state: &HttpState, email: &str) -> Result<(), (StatusC
     Ok(())
 }
 
+fn system_activation_email(name: &str, domain: &str, code: &str, gateway_url: &str) -> String {
+    let greeting = if name.is_empty() { "Hello,".to_string() } else { format!("Hello {name},") };
+    format!(
+        "{greeting}\n\nAn AIMail system is ready for your agent:\n\n  system: {domain}\n\nPlease activate it within 7 days.\n\nCopy the message below into your agent's conversation and let the agent activate the system:\n\nActivate my AIMail system {domain} using the activation code {code}. AIMail gateway is at {gateway_url}. Follow the step-by-step instructions at https://raw.githubusercontent.com/metercai/aimail/main/docs/agent-self-setup.md\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+    )
+}
+
+fn address_activation_email(name: &str, address: &str, code: &str, manager: &str, gateway_url: &str) -> String {
+    let greeting = if name.is_empty() { "Hello,".to_string() } else { format!("Hello {name},") };
+    format!(
+        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate my AIMail mailbox {address} using the activation code {code}. My safety officer (manager) is {manager}. AIMail gateway is at {gateway_url}. Follow the step-by-step instructions at https://raw.githubusercontent.com/metercai/aimail/main/docs/agent-self-setup.md\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+    )
+}
+
 /// POST /api/v1/public/apply-system {email, name, domain}
 pub async fn apply_system_public(
     State(state): State<HttpState>,
@@ -800,13 +792,14 @@ pub async fn apply_system_public(
     };
     let code = random_code("sys");
     let hash = crate::core::api::auth::sha256_hex(&code);
-    let expires = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let expires = (chrono::Utc::now() + chrono::Duration::days(ACTIVATION_CODE_TTL_DAYS)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let db = &state.factories.email.env_factory.db;
     db.insert_activation_code(&hash, &code, "product", &sid, &domain, "", Some(&expires))
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
-    if let Err(e) = enqueue_apply_email(&state, &email, "AIMail system activation code",
-        &format!("Hi {name},\n\nSystem activation code for {domain}:\n\n{code}\n\nUse it in the dsh aimail_system tool. It expires in 7 days.")).await {
+    let gateway_url = crate::core::server::api_endpoint_url(&state.config);
+    let body = system_activation_email(name, &domain, &code, &gateway_url);
+    if let Err(e) = enqueue_apply_email(&state, &email, "Your AIMail system activation code", &body).await {
         db.delete_activation_code(&hash).await.ok();
         return Err(e);
     }
@@ -844,8 +837,9 @@ pub async fn apply_address_public(
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
     let code = codes.into_iter().next().unwrap_or_default();
-    if let Err(e) = enqueue_apply_email(&state, &email, "AIMail address activation code",
-        &format!("Hi {name},\n\nAddress activation code for {address}:\n\n{code}\n\nUse it in the dsh aimail_address tool. It expires in 7 days.")).await {
+    let gateway_url = crate::core::server::api_endpoint_url(&state.config);
+    let body = address_activation_email(name, &address, &code, &email, &gateway_url);
+    if let Err(e) = enqueue_apply_email(&state, &email, &format!("AIMail address activation code for {address}"), &body).await {
         db.delete_activation_code(&crate::core::api::auth::sha256_hex(&code)).await.ok();
         return Err(e);
     }
@@ -862,35 +856,44 @@ pub async fn apply_page() -> Html<&'static str> {
 }
 
 const APPLY_PAGE: &str = r#"<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AIMail Claim</title>
-<style>body{font:15px system-ui;max-width:720px;margin:40px auto;padding:0 16px;color:#111}
-h1{font-size:22px}fieldset{border:1px solid #ddd;border-radius:10px;margin:14px 0;padding:14px}
-label{display:block;margin:8px 0 4px;color:#333}input,select{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}
-button{padding:8px 14px;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer}
-pre{background:#f6f6f6;padding:10px;border-radius:6px;white-space:pre-wrap}.row{display:flex;gap:8px}.row>*{flex:1}
-#msg{color:#0a6}.err{color:#b00}</style></head><body>
-<h1>AIMail 激活码申领</h1>
-<p>先验证邮箱，再申领系统码或地址码。验证码会进入本机模拟收件箱。</p>
-<fieldset><legend>1. 邮箱验证</legend>
-<label>邮箱</label><input id="email" placeholder="you@example.com">
-<div class="row"><button onclick="sendCode()">发送验证码</button><button onclick="checkCode()">验证</button></div>
-<label>验证码</label><input id="vcode" placeholder="6 位数字">
-<div id="msg"></div><button onclick="showInbox()">查看模拟收件箱</button><pre id="inbox"></pre>
-</fieldset>
-<fieldset><legend>2. 申领系统码</legend>
-<div class="row"><label>姓名<input id="sname"></label><label>域名<select id="sdomain"></select></label></div>
-<button onclick="applySystem()">申领系统激活码</button></fieldset>
-<fieldset><legend>3. 申领地址码</legend>
-<div class="row"><label>姓名<input id="aname"></label><label>agentname<input id="agentname" placeholder="alice"></label><label>域名<select id="adomain"></select></label></div>
-<button onclick="applyAddress()">申领地址激活码</button></fieldset>
-<fieldset><legend>结果</legend><pre id="out"></pre></fieldset>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claim Activation Code - AIMail</title>
+<style>
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2d3143;--primary:#5b6af0;--primary-hover:#4a58d4;--text:#e4e6eb;--label:#8b8fa3}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+main{max-width:440px;margin:56px auto;padding:0 16px}h1{font-size:20px;margin:0 0 8px}
+p.lead{color:var(--label);font-size:13px;margin:0 0 20px}
+section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px;margin:14px 0}
+h2{font-size:14px;margin:0 0 12px}label{display:block;color:var(--label);font-size:13px;margin:10px 0 5px}
+input,select{width:100%;padding:10px;background:#11141d;border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px}
+.row{display:flex;gap:8px}.row>*{flex:1}
+button{padding:10px 14px;border:0;border-radius:8px;background:var(--primary);color:#fff;font-size:13px;cursor:pointer}
+button:hover{background:var(--primary-hover)}button.secondary{background:#252938;color:var(--text)}
+pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;font-size:12px;color:var(--text)}
+#msg{font-size:13px;color:#6ee7a8;margin-top:10px}#msg.err{color:#f28b82}.muted{color:var(--label);font-size:12px}
+</style></head><body><main>
+<h1>Claim Activation Code</h1>
+<p class="lead">Verify your email, then claim a system or address activation code. Codes are also delivered to the simulated inbox.</p>
+<section><h2>1. Email verification</h2>
+<label for="email">Email</label><input id="email" placeholder="you@example.com" autocomplete="email">
+<div class="row"><button onclick="sendCode()">Send code</button><button class="secondary" onclick="checkCode()">Verify</button></div>
+<label for="vcode">Verification code</label><input id="vcode" placeholder="6-digit code" inputmode="numeric">
+<div id="msg"></div><button class="secondary" onclick="showInbox()">Open simulated inbox</button><pre id="inbox"></pre>
+</section>
+<section><h2>2. Claim system code</h2>
+<div class="row"><label for="sname">Name<input id="sname"></label><label for="sdomain">Domain<select id="sdomain"></select></label></div>
+<button onclick="applySystem()">Claim system activation code</button></section>
+<section><h2>3. Claim address code</h2>
+<div class="row"><label for="aname">Name<input id="aname"></label><label for="agentname">Agent name<input id="agentname" placeholder="alice"></label><label for="adomain">Domain<select id="adomain"></select></label></div>
+<button onclick="applyAddress()">Claim address activation code</button></section>
+<section><h2>Result</h2><pre id="out"></pre><p class="muted">Codes are single-use. Keep the email.</p></section>
+</main>
 <script>
-const $=id=>document.getElementById(id); const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
-async function j(url,opt){const r=await fetch(url,opt); const t=await r.text(); let v; try{v=JSON.parse(t)}catch{v={raw:t}}; if(!r.ok) throw new Error(v.error||v.detail||t); return v}
-async function loadDomains(){try{const v=await j('/api/v1/public/system/domains'); for(const sel of ['sdomain','adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
-async function sendCode(){try{const v=await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='验证码已发送到模拟收件箱';showInbox()}catch(e){msg(e.message,1)}}
-async function checkCode(){try{const v=await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('邮箱已验证',0)}catch(e){msg(e.message,1)}}
+const $=id=>document.getElementById(id);const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
+async function j(url,opt){const r=await fetch(url,opt);const t=await r.text();let v;try{v=JSON.parse(t)}catch{v={raw:t}}if(!r.ok)throw new Error(v.error||v.detail||t);return v}
+async function loadDomains(){try{const v=await j('/api/v1/public/system/domains');for(const sel of ['sdomain','adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
+async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='Verification code sent to the simulated inbox.';showInbox()}catch(e){msg(e.message,1)}}
+async function checkCode(){try{await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('Email verified.',0)}catch(e){msg(e.message,1)}}
 async function showInbox(){try{const v=await j('/api/v1/public/mock-inbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
 async function applySystem(){try{const v=await j('/api/v1/public/apply-system',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('sname').value,domain:$('sdomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
 async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
@@ -1142,4 +1145,38 @@ mod activation_status_tests {
         // (the u32-fit check is a belt-and-braces guard for narrow targets).
         assert_eq!(parse_code_count(Some(&json!(u32::MAX as u64))), None);
     }
+    #[test]
+    fn activation_code_format_is_unified() {
+        use super::random_code;
+        for prefix in ["sys", "addr"] {
+            let code = random_code(prefix);
+            let re = regex::Regex::new(r"^(sys|addr)-([0-9a-f]{4}-){5}[0-9a-f]{4}$").unwrap();
+            assert!(re.is_match(&code), "bad code: {code}");
+        }
+    }
+
+    #[test]
+    fn email_templates_are_english_and_advanced_aligned() {
+        let sys = super::system_activation_email("Ada", "test.local", "sys-1111-2222-3333-4444-5555-6666", "http://gw");
+        assert!(sys.contains("within 7 days"));
+        assert!(sys.contains("Activate my AIMail system test.local"));
+        assert!(!sys.contains("dsh") && !sys.contains("renew") && !sys.contains("valid for the period"));
+        let addr = super::address_activation_email("Ada", "alice@test.local", "addr-1111-2222-3333-4444-5555-6666", "ada@example.com", "http://gw");
+        assert!(addr.contains("within 24 hours"));
+        assert!(addr.contains("My safety officer (manager) is ada@example.com"));
+        assert!(!addr.contains("dsh") && !addr.contains("renew") && !addr.contains("valid for the period"));
+        for text in [&sys, &addr] {
+            assert!(!text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "CJK in email");
+        }
+    }
+
+    #[test]
+    fn apply_page_is_english_and_dark() {
+        let p = super::APPLY_PAGE;
+        assert!(p.contains("lang=\"en\""));
+        assert!(p.contains("#0f1117"));
+        assert!(p.contains("#5b6af0"));
+        assert!(!p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "CJK in /apply");
+    }
+
 }
