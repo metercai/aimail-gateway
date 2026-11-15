@@ -587,6 +587,17 @@ pub async fn activate_address_code_compat_handler(
     if claimed || frozen || is_expired(expires_at.as_deref()) {
         return Err(activation_error(StatusCode::GONE, "activation code is not redeemable", None));
     }
+    // A live agent key for the same address means this redemption rotates it.
+    let already_active = state
+        .factories
+        .email
+        .env_factory
+        .db
+        .get_api_key_by_email(&email)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
     let (raw_key, _key_id) = activate_address_code(
         &state.factories.email.env_factory.db,
         code,
@@ -601,7 +612,7 @@ pub async fn activate_address_code_compat_handler(
         "raw_key": raw_key,
         "system_id": sid,
         "email_address": email,
-        "kind": "new",
+        "kind": if already_active { "rotation" } else { "new" },
         "expires_at": expires_at,
     }))))
 }
