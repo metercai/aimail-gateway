@@ -474,6 +474,24 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_activation_codes_system ON activation_codes(system_id);
         CREATE INDEX IF NOT EXISTS idx_activation_codes_domain ON activation_codes(domain);
 
+        -- Public self-service apply: email verification + a simulated local
+        -- inbox (pilot mode; production can replace the mock inbox with SMTP).
+        CREATE TABLE IF NOT EXISTS email_verifications (
+            email       TEXT PRIMARY KEY,
+            code_hash   TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            verified    INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        );
+        CREATE TABLE IF NOT EXISTS mock_inbox (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            to_addr     TEXT NOT NULL,
+            subject     TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_mock_inbox_to ON mock_inbox(to_addr);
+
         CREATE TABLE IF NOT EXISTS agent_state (
             agent_addr  TEXT NOT NULL,
             state_key   TEXT NOT NULL,
@@ -1901,6 +1919,104 @@ impl Database {
     #[allow(dead_code)]
     pub fn raw_pool(&self) -> Pool<SqliteConnectionManager> {
         self.pool.clone()
+    }
+
+    // ── Public apply: email verification + simulated inbox ──────────
+
+    pub async fn upsert_email_verification(
+        &self,
+        email: &str,
+        code_hash: &str,
+        expires_at: &str,
+    ) -> AppResult<()> {
+        let (email, code_hash, expires_at) = (email.to_string(), code_hash.to_string(), expires_at.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO email_verifications (email, code_hash, expires_at, verified)
+                 VALUES (?1, ?2, ?3, 0)
+                 ON CONFLICT(email) DO UPDATE SET
+                   code_hash = excluded.code_hash,
+                   expires_at = excluded.expires_at,
+                   verified = 0",
+                params![email, code_hash, expires_at],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn get_email_verification(&self, email: &str) -> AppResult<Option<(String, String, bool)>> {
+        let email = email.to_string();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT code_hash, expires_at, verified FROM email_verifications WHERE email = ?1",
+            )?;
+            let mut rows = stmt.query(params![email])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)))
+            } else {
+                Ok(None)
+            }
+        }).await
+    }
+
+    pub async fn mark_email_verified(&self, email: &str) -> AppResult<()> {
+        let email = email.to_string();
+        self.call(move |conn| {
+            conn.execute("UPDATE email_verifications SET verified = 1 WHERE email = ?1", params![email])?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn clear_email_verification(&self, email: &str) -> AppResult<()> {
+        let email = email.to_string();
+        self.call(move |conn| {
+            conn.execute("DELETE FROM email_verifications WHERE email = ?1", params![email])?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn insert_mock_mail(&self, to_addr: &str, subject: &str, body: &str) -> AppResult<()> {
+        let (to_addr, subject, body) = (to_addr.to_string(), subject.to_string(), body.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO mock_inbox (to_addr, subject, body) VALUES (?1, ?2, ?3)",
+                params![to_addr, subject, body],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn list_mock_mail(&self, to_addr: &str, limit: i64) -> AppResult<Vec<(i64, String, String, String)>> {
+        let (to_addr, limit) = (to_addr.to_string(), limit.clamp(1, 50));
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, subject, body, created_at FROM mock_inbox WHERE to_addr = ?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(params![to_addr, limit])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+            }
+            Ok(out)
+        }).await
+    }
+
+    /// Distinct bare domains of the current (single) system, excluding the
+    /// built-in admin relay and address rows.
+    pub async fn current_system_domains(&self) -> AppResult<Vec<(String, String)>> {
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT system_id, domain_addr FROM system_domains
+                 WHERE domain_addr NOT LIKE '%@%' AND domain_addr != 'admin.relay' AND is_active = 1
+                 ORDER BY domain_addr",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push((row.get(0)?, row.get(1)?));
+            }
+            Ok(out)
+        }).await
     }
 
     // ── Activation Codes ──────────────────────────────────────────────

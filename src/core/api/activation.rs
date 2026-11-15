@@ -3,8 +3,8 @@
 use axum::{
     extract::{ConnectInfo, Extension, State},
     http::StatusCode,
-    response::Json,
-    routing::post,
+    response::{Html, Json},
+    routing::{get, post},
     Router,
 };
 use std::collections::HashMap;
@@ -606,12 +606,263 @@ pub async fn activate_address_code_compat_handler(
     }))))
 }
 
+// ── Public self-service apply (base pilot) ────────────────────────
+//
+// The gateway has no external SMTP sender on the public path, so the pilot
+// simulates the recipient mailbox: verification and activation codes are
+// appended to `mock_inbox` and the /apply webapp/API reads them back. The
+// production replacement is SMTP delivery; the API shape stays the same.
+
+fn random_six_digits() -> String {
+    use rand::Rng;
+    format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32))
+}
+
+fn random_code(prefix: &str) -> String {
+    format!("{}-{}", prefix, uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string())
+}
+
+fn verification_email_body(code: &str) -> String {
+    format!("Your AIMail verification code is: {code}\n\nIt expires in 10 minutes. If you did not request it, ignore this mail.")
+}
+
+/// POST /api/v1/public/email-verify/send {email}
+pub async fn apply_email_verify_send(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    if !email.contains('@') {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "valid email is required", None));
+    }
+    let code = random_six_digits();
+    let hash = crate::core::api::auth::sha256_hex(&code);
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let db = &state.factories.email.env_factory.db;
+    db.upsert_email_verification(&email, &hash, &expires)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    db.insert_mock_mail(&email, "AIMail verification code", &verification_email_body(&code))
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({
+        "status": "sent",
+        "email": email,
+        "expires_at": expires,
+        "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
+    }))))
+}
+
+fn urlencoding(s: &str) -> String {
+    s.chars().map(|c| match c {
+        'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '@' => c.to_string(),
+        _ => format!("%{:02X}", c as u32),
+    }).collect()
+}
+
+/// POST /api/v1/public/email-verify/check {email, code}
+pub async fn apply_email_verify_check(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if !email.contains('@') || code.is_empty() {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "email and code are required", None));
+    }
+    let db = &state.factories.email.env_factory.db;
+    let row = db.get_email_verification(&email).await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?
+        .ok_or_else(|| activation_error(StatusCode::BAD_REQUEST, "no verification request for this email", None))?;
+    let (hash, expires, _verified) = row;
+    if is_expired(Some(&expires)) {
+        return Err(activation_error(StatusCode::GONE, "verification code expired", None));
+    }
+    if crate::core::api::auth::sha256_hex(code) != hash {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "verification code mismatch", None));
+    }
+    db.mark_email_verified(&email).await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    Ok((StatusCode::OK, Json(serde_json::json!({"status": "verified", "email": email}))))
+}
+
+/// GET /api/v1/public/mock-inbox?email=...
+pub async fn apply_mock_inbox(
+    State(state): State<HttpState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let email = q.get("email").map(|s| s.trim().to_lowercase()).unwrap_or_default();
+    if !email.contains('@') {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "email is required", None));
+    }
+    let mail = state.factories.email.env_factory.db
+        .list_mock_mail(&email, 20)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    let items: Vec<serde_json::Value> = mail.into_iter().map(|(id, subject, body, created_at)| serde_json::json!({
+        "id": id, "subject": subject, "body": body, "created_at": created_at
+    })).collect();
+    Ok((StatusCode::OK, Json(serde_json::json!({"email": email, "messages": items}))))
+}
+
+/// GET /api/v1/public/system/domains — current single system's bare domains.
+pub async fn apply_system_domains(
+    State(state): State<HttpState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let rows = state.factories.email.env_factory.db
+        .current_system_domains()
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    let domains: Vec<serde_json::Value> = rows.into_iter().map(|(sid, domain)| serde_json::json!({
+        "system_id": sid, "domain": domain
+    })).collect();
+    Ok((StatusCode::OK, Json(serde_json::json!({"domains": domains}))))
+}
+
+async fn require_verified(state: &HttpState, email: &str) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let row = state.factories.email.env_factory.db
+        .get_email_verification(email)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?
+        .ok_or_else(|| activation_error(StatusCode::BAD_REQUEST, "verify the email first", None))?;
+    let (_, expires, verified) = row;
+    if !verified {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "email is not verified", None));
+    }
+    if is_expired(Some(&expires)) {
+        return Err(activation_error(StatusCode::GONE, "email verification expired; verify again", None));
+    }
+    Ok(())
+}
+
+/// POST /api/v1/public/apply-system {email, name, domain}
+pub async fn apply_system_public(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    if !email.contains('@') || domain.is_empty() {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "email and domain are required", None));
+    }
+    require_verified(&state, &email).await?;
+    let domains = state.factories.email.env_factory.db.current_system_domains().await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    let Some((sid, _)) = domains.into_iter().find(|(_, d)| d.eq_ignore_ascii_case(&domain)) else {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "domain is not offered by this gateway", None));
+    };
+    let code = random_code("sys");
+    let hash = crate::core::api::auth::sha256_hex(&code);
+    let expires = (chrono::Utc::now() + chrono::Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let db = &state.factories.email.env_factory.db;
+    db.insert_activation_code(&hash, &code, "product", &sid, &domain, "", Some(&expires))
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    db.insert_mock_mail(&email, "AIMail system activation code",
+        &format!("Hi {name},\n\nSystem activation code for {domain}:\n\n{code}\n\nUse it in the dsh aimail_system tool. It expires in 7 days."))
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    db.clear_email_verification(&email).await.ok();
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "status": "created", "email": email, "system_id": sid, "domain": domain, "activation_code": code,
+        "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
+    }))))
+}
+
+/// POST /api/v1/public/apply-address {email, name, agentname, domain}
+pub async fn apply_address_public(
+    State(state): State<HttpState>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let agentname = body.get("agentname").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    let domain = body.get("domain").and_then(|v| v.as_str()).unwrap_or("").trim().to_lowercase();
+    if !email.contains('@') || agentname.is_empty() || domain.is_empty() {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "email, agentname and domain are required", None));
+    }
+    if !agentname.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "invalid agentname", None));
+    }
+    require_verified(&state, &email).await?;
+    let domains = state.factories.email.env_factory.db.current_system_domains().await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    let Some((sid, _)) = domains.into_iter().find(|(_, d)| d.eq_ignore_ascii_case(&domain)) else {
+        return Err(activation_error(StatusCode::BAD_REQUEST, "domain is not offered by this gateway", None));
+    };
+    let address = format!("{}@{}", agentname, domain);
+    let db = &state.factories.email.env_factory.db;
+    let codes = crate::core::api::activation::generate_activation_codes(db, &sid, &domain, Some(&address), 1)
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    let code = codes.into_iter().next().unwrap_or_default();
+    db.insert_mock_mail(&email, "AIMail address activation code",
+        &format!("Hi {name},\n\nAddress activation code for {address}:\n\n{code}\n\nUse it in the dsh aimail_address tool. It expires in 7 days."))
+        .await
+        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    db.clear_email_verification(&email).await.ok();
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
+        "status": "created", "email": email, "system_id": sid, "domain": domain, "address": address, "activation_code": code,
+        "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
+    }))))
+}
+
+/// GET /apply — pilot SPA (system/address claim + mock inbox).
+pub async fn apply_page() -> Html<&'static str> {
+    Html(APPLY_PAGE)
+}
+
+const APPLY_PAGE: &str = r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AIMail Claim</title>
+<style>body{font:15px system-ui;max-width:720px;margin:40px auto;padding:0 16px;color:#111}
+h1{font-size:22px}fieldset{border:1px solid #ddd;border-radius:10px;margin:14px 0;padding:14px}
+label{display:block;margin:8px 0 4px;color:#333}input,select{width:100%;padding:8px;border:1px solid #ccc;border-radius:6px;box-sizing:border-box}
+button{padding:8px 14px;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer}
+pre{background:#f6f6f6;padding:10px;border-radius:6px;white-space:pre-wrap}.row{display:flex;gap:8px}.row>*{flex:1}
+#msg{color:#0a6}.err{color:#b00}</style></head><body>
+<h1>AIMail 激活码申领</h1>
+<p>先验证邮箱，再申领系统码或地址码。验证码会进入本机模拟收件箱。</p>
+<fieldset><legend>1. 邮箱验证</legend>
+<label>邮箱</label><input id="email" placeholder="you@example.com">
+<div class="row"><button onclick="sendCode()">发送验证码</button><button onclick="checkCode()">验证</button></div>
+<label>验证码</label><input id="vcode" placeholder="6 位数字">
+<div id="msg"></div><button onclick="showInbox()">查看模拟收件箱</button><pre id="inbox"></pre>
+</fieldset>
+<fieldset><legend>2. 申领系统码</legend>
+<div class="row"><label>姓名<input id="sname"></label><label>域名<select id="sdomain"></select></label></div>
+<button onclick="applySystem()">申领系统激活码</button></fieldset>
+<fieldset><legend>3. 申领地址码</legend>
+<div class="row"><label>姓名<input id="aname"></label><label>agentname<input id="agentname" placeholder="alice"></label><label>域名<select id="adomain"></select></label></div>
+<button onclick="applyAddress()">申领地址激活码</button></fieldset>
+<fieldset><legend>结果</legend><pre id="out"></pre></fieldset>
+<script>
+const $=id=>document.getElementById(id); const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
+async function j(url,opt){const r=await fetch(url,opt); const t=await r.text(); let v; try{v=JSON.parse(t)}catch{v={raw:t}}; if(!r.ok) throw new Error(v.error||v.detail||t); return v}
+async function loadDomains(){try{const v=await j('/api/v1/public/system/domains'); for(const sel of ['sdomain','adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
+async function sendCode(){try{const v=await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='验证码已发送到模拟收件箱';showInbox()}catch(e){msg(e.message,1)}}
+async function checkCode(){try{const v=await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('邮箱已验证',0)}catch(e){msg(e.message,1)}}
+async function showInbox(){try{const v=await j('/api/v1/public/mock-inbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
+async function applySystem(){try{const v=await j('/api/v1/public/apply-system',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('sname').value,domain:$('sdomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
+async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
+loadDomains();
+</script></body></html>"#;
+
 /// Base-only activation router (composed by src/server.rs, never by advanced).
 pub fn base_activation_router(state: HttpState) -> Router {
     Router::new()
         .route("/api/v1/public/activation-code/preflight", post(preflight_activation_code_handler))
         .route("/api/v1/activate-system", post(activate_system_handler))
         .route("/api/v1/activate-address-code", post(activate_address_code_compat_handler))
+        .route("/api/v1/public/email-verify/send", post(apply_email_verify_send))
+        .route("/api/v1/public/email-verify/check", post(apply_email_verify_check))
+        .route("/api/v1/public/mock-inbox", get(apply_mock_inbox))
+        .route("/api/v1/public/system/domains", get(apply_system_domains))
+        .route("/api/v1/public/apply-system", post(apply_system_public))
+        .route("/api/v1/public/apply-address", post(apply_address_public))
+        .route("/apply", get(apply_page))
         .with_state(state)
 }
 
