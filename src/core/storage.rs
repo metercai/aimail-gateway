@@ -1975,6 +1975,29 @@ impl Database {
         }).await
     }
 
+    /// Simulated inbox for the pilot: read actual queued outbound emails by
+    /// recipient (the advanced pattern queues via create_outbound).
+    pub async fn list_outbound_for_recipient(
+        &self,
+        to_addr: &str,
+        limit: i64,
+    ) -> AppResult<Vec<(String, String, String, String)>> {
+        let (to_addr, limit) = (to_addr.to_string(), limit.clamp(1, 50));
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, subject, body, created_at FROM emails
+                 WHERE direction = 'outbound' AND recipients LIKE '%' || ?1 || '%'
+                 ORDER BY created_at DESC LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(params![to_addr, limit])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+            }
+            Ok(out)
+        }).await
+    }
+
     pub async fn insert_mock_mail(&self, to_addr: &str, subject: &str, body: &str) -> AppResult<()> {
         let (to_addr, subject, body) = (to_addr.to_string(), subject.to_string(), body.to_string());
         self.call(move |conn| {

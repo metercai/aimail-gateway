@@ -643,9 +643,10 @@ pub async fn apply_email_verify_send(
     db.upsert_email_verification(&email, &hash, &expires)
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
-    db.insert_mock_mail(&email, "AIMail verification code", &verification_email_body(&code))
-        .await
-        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    if let Err(e) = enqueue_apply_email(&state, &email, "AIMail verification code", &verification_email_body(&code)).await {
+        db.clear_email_verification(&email).await.ok();
+        return Err(e);
+    }
     Ok((StatusCode::OK, Json(serde_json::json!({
         "status": "sent",
         "email": email,
@@ -659,6 +660,39 @@ fn urlencoding(s: &str) -> String {
         'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '@' => c.to_string(),
         _ => format!("%{:02X}", c as u32),
     }).collect()
+}
+
+/// Queue an application email through the real outbound pipeline (the
+/// advanced gateway's pattern): create_outbound + first-delivery trigger.
+/// The pilot's simulated inbox reads these queued rows back by recipient.
+async fn enqueue_apply_email(
+    state: &HttpState,
+    to_email: &str,
+    subject: &str,
+    body: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let from = state.config.system_sender();
+    let recipients = serde_json::json!({ "to": [to_email], "cc": [] }).to_string();
+    let id = format!("apply-{}", uuid::Uuid::new_v4());
+    state
+        .factories
+        .email
+        .create_outbound(
+            &id,
+            "admin",
+            &from,
+            &recipients,
+            subject,
+            body,
+            None,
+            None,
+            None,
+            state.config.retry.max_attempts as i32,
+        )
+        .await
+        .map_err(|e| activation_error(StatusCode::BAD_GATEWAY, "failed to queue email", Some(e.to_string())))?;
+    state.dispatch_first_delivery(&id);
+    Ok(())
 }
 
 /// POST /api/v1/public/email-verify/check {email, code}
@@ -697,7 +731,7 @@ pub async fn apply_mock_inbox(
         return Err(activation_error(StatusCode::BAD_REQUEST, "email is required", None));
     }
     let mail = state.factories.email.env_factory.db
-        .list_mock_mail(&email, 20)
+        .list_outbound_for_recipient(&email, 20)
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
     let items: Vec<serde_json::Value> = mail.into_iter().map(|(id, subject, body, created_at)| serde_json::json!({
@@ -760,10 +794,11 @@ pub async fn apply_system_public(
     db.insert_activation_code(&hash, &code, "product", &sid, &domain, "", Some(&expires))
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
-    db.insert_mock_mail(&email, "AIMail system activation code",
-        &format!("Hi {name},\n\nSystem activation code for {domain}:\n\n{code}\n\nUse it in the dsh aimail_system tool. It expires in 7 days."))
-        .await
-        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    if let Err(e) = enqueue_apply_email(&state, &email, "AIMail system activation code",
+        &format!("Hi {name},\n\nSystem activation code for {domain}:\n\n{code}\n\nUse it in the dsh aimail_system tool. It expires in 7 days.")).await {
+        db.delete_activation_code(&hash).await.ok();
+        return Err(e);
+    }
     db.clear_email_verification(&email).await.ok();
     Ok((StatusCode::CREATED, Json(serde_json::json!({
         "status": "created", "email": email, "system_id": sid, "domain": domain, "activation_code": code,
@@ -798,10 +833,11 @@ pub async fn apply_address_public(
         .await
         .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
     let code = codes.into_iter().next().unwrap_or_default();
-    db.insert_mock_mail(&email, "AIMail address activation code",
-        &format!("Hi {name},\n\nAddress activation code for {address}:\n\n{code}\n\nUse it in the dsh aimail_address tool. It expires in 7 days."))
-        .await
-        .map_err(|e| activation_error(StatusCode::INTERNAL_SERVER_ERROR, "database error", Some(e.to_string())))?;
+    if let Err(e) = enqueue_apply_email(&state, &email, "AIMail address activation code",
+        &format!("Hi {name},\n\nAddress activation code for {address}:\n\n{code}\n\nUse it in the dsh aimail_address tool. It expires in 7 days.")).await {
+        db.delete_activation_code(&crate::core::api::auth::sha256_hex(&code)).await.ok();
+        return Err(e);
+    }
     db.clear_email_verification(&email).await.ok();
     Ok((StatusCode::CREATED, Json(serde_json::json!({
         "status": "created", "email": email, "system_id": sid, "domain": domain, "address": address, "activation_code": code,
