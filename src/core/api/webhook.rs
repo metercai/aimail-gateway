@@ -1926,7 +1926,7 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("aimailgw-wb-approval-{ts}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let db = crate::core::storage::Database::open(dir.join("aimail.db"), 4, None).unwrap();
+        let db = crate::core::storage::Database::open(dir.join("aimail.db"), 1, None).unwrap();
         let arc = std::sync::Arc::new(db);
         let env = EnvFactory::new(arc.clone(), std::sync::Arc::new(BaseSystemStore));
         let ef = EmailFactory::new(
