@@ -1588,6 +1588,21 @@ mod activation_status_tests {
                 && !addr.contains("renew")
                 && !addr.contains("valid for the period")
         );
+        let sys_noname = super::system_activation_email(
+            "",
+            "test.local",
+            "sys-1111-2222-3333-4444-5555-6666",
+            "http://gw",
+        );
+        assert!(sys_noname.starts_with("Hello,\n"));
+        let addr_noname = super::address_activation_email(
+            "",
+            "alice@test.local",
+            "addr-1111-2222-3333-4444-5555-6666",
+            "ada@example.com",
+            "http://gw",
+        );
+        assert!(addr_noname.starts_with("Hello,\n"));
         let verify = super::verification_email_body("123456");
         assert!(verify.contains("It expires in 10 minutes"));
         for text in [&sys, &addr, &verify] {
