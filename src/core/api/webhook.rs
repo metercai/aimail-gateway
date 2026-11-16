@@ -2463,6 +2463,54 @@ mod tests {
         );
     }
 
+    // SSE/welcome regression: an inbound welcome with no webhook endpoint must
+    // be queued in pending_deliveries, not lost to a push endpoint.
+    #[tokio::test]
+    async fn welcome_without_webhook_is_queued_for_sse() {
+        let (env, ef) = approval_env();
+        env.create_domain("d1", "sys1", "agent@test.com", None, None, None)
+            .await
+            .unwrap();
+        let rec = ef
+            .create_inbound(
+                "welcome-sse-1",
+                "sys1",
+                "noreply@e2e.local",
+                r#"{"to":["agent@test.com"],"cc":[],"rcpt":["agent@test.com"]}"#,
+                "Welcome to AIMail World, agent, since 2026-11-16!",
+                "welcome body",
+                None,
+                None,
+                None,
+                3,
+            )
+            .await
+            .unwrap();
+        let client = reqwest::Client::new();
+        let ok = super::process_email_webhook(
+            &env,
+            &ef,
+            &ack_cfg(),
+            &client,
+            &rec,
+            Some(crate::core::api::outbound::AckCtx {
+                cfg: &ack_cfg(),
+                email_factory: &ef,
+                metrics: None,
+                trigger_tx: None,
+            }),
+            None,
+        )
+        .await;
+        assert!(ok, "pull delivery must report success");
+        let pending = env
+            .db
+            .list_pending_by_email("sys1", "agent@test.com", 10)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1, "welcome must be queued for SSE");
+    }
+
     // ─── P1-2 path b + B4: push loop resolves the secret via 2-tier lookup ───
 
     /// One-shot raw HTTP capture: read the full request (headers + body per
