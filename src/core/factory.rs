@@ -621,8 +621,6 @@ impl EnvFactory {
         Ok(false)
     }
 
-    /// Create a new API key record.
-    #[allow(clippy::too_many_arguments)]
     /// Activation-safe key write (insert or rotate in place).
     pub async fn upsert_api_key(&self, params: ApiKeyParams<'_>) -> AppResult<i64> {
         self.db.upsert_api_key(params).await

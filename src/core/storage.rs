@@ -1604,7 +1604,6 @@ impl Database {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)] // explicit parameter list is deliberate: internal constructor/handler API
     /// Ensure an activated agent address has a system_domains row so SMTP
     /// RCPT resolves it (base's address activation historically only created
     /// the key; advanced creates the row). Idempotent.
