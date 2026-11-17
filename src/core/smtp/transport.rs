@@ -47,6 +47,27 @@ fn parse_host_port<'a>(server: &'a str, scheme: &'a str) -> (&'a str, u16) {
     }
 }
 
+/// Split a supported relay URL scheme from its host:port payload.
+/// `smtp://` is explicit plain SMTP; an unknown scheme is a startup
+/// configuration error instead of a DNS lookup on a string containing `://`.
+fn split_server(server: &str) -> AppResult<(&str, &str)> {
+    if let Some(h) = server.strip_prefix("smtps://") {
+        return Ok((h, "smtps"));
+    }
+    if let Some(h) = server.strip_prefix("smtp+starttls://") {
+        return Ok((h, "starttls"));
+    }
+    if let Some(h) = server.strip_prefix("smtp://") {
+        return Ok((h, "plain"));
+    }
+    if server.contains("://") {
+        return Err(AppError::Config(format!(
+            "unsupported relay.smtp_server scheme (expected smtp://, smtp+starttls:// or smtps://): {server}"
+        )));
+    }
+    Ok((server, "plain"))
+}
+
 /// Build a lettre SMTP transport from `RelayConfig` (upstream relay mode).
 ///
 /// Supports:
@@ -60,14 +81,7 @@ pub(crate) fn build_transport(
 ) -> AppResult<AsyncSmtpTransport<Tokio1Executor>> {
     let server = config.smtp_server.as_deref().unwrap_or("127.0.0.1:25");
 
-    let (scheme_stripped, has_scheme) = if let Some(h) = server.strip_prefix("smtps://") {
-        (h, "smtps")
-    } else if let Some(h) = server.strip_prefix("smtp+starttls://") {
-        (h, "starttls")
-    } else {
-        (server, "plain")
-    };
-
+    let (scheme_stripped, has_scheme) = split_server(server)?;
     let (host, port) = parse_host_port(scheme_stripped, has_scheme);
 
     let builder: lettre::transport::smtp::AsyncSmtpTransportBuilder = match has_scheme {
@@ -116,6 +130,29 @@ mod tests {
             parse_host_port("mail.example.com", "plain"),
             ("mail.example.com", 25)
         );
+    }
+
+    #[test]
+    fn split_server_accepts_smtp_scheme() {
+        assert_eq!(
+            split_server("smtp://mailpit:1025").unwrap(),
+            ("mailpit:1025", "plain")
+        );
+        assert_eq!(
+            split_server("smtp+starttls://mail:587").unwrap(),
+            ("mail:587", "starttls")
+        );
+        assert_eq!(
+            split_server("smtps://mail:465").unwrap(),
+            ("mail:465", "smtps")
+        );
+        assert_eq!(split_server("mail:25").unwrap(), ("mail:25", "plain"));
+    }
+
+    #[test]
+    fn split_server_rejects_unknown_scheme_at_startup() {
+        let err = split_server("http://mail:25").unwrap_err();
+        assert!(format!("{err}").contains("unsupported relay.smtp_server scheme"));
     }
 
     #[test]
