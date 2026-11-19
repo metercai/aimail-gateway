@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 
 /// System activation codes expire after 7 days; address codes are a 24-hour
 /// application window (same as advanced shared-domain defaults).
-const ACTIVATION_CODE_TTL_DAYS: i64 = 7;
 const ADDRESS_CODE_TTL_HOURS: i64 = 24;
 
 use crate::core::api::auth::require_scope_any;
@@ -1013,6 +1012,7 @@ async fn require_verified(
     Ok(())
 }
 
+#[cfg(test)]
 fn system_activation_email(name: &str, domain: &str, code: &str, gateway_url: &str) -> String {
     let greeting = if name.is_empty() {
         "Hello,".to_string()
@@ -1039,92 +1039,6 @@ fn address_activation_email(
     format!(
         "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent_aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
     )
-}
-
-/// POST /api/v1/public/apply-system {email, name, domain}
-pub async fn apply_system_public(
-    State(state): State<HttpState>,
-    Json(body): Json<serde_json::Value>,
-) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
-    let email = body
-        .get("email")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    let name = body
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let domain = body
-        .get("domain")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-    if !email.contains('@') || domain.is_empty() {
-        return Err(activation_error(
-            StatusCode::BAD_REQUEST,
-            "email and domain are required",
-            None,
-        ));
-    }
-    require_verified(&state, &email).await?;
-    let domains = state
-        .factories
-        .email
-        .env_factory
-        .db
-        .current_system_domains()
-        .await
-        .map_err(|e| {
-            activation_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database error",
-                Some(e.to_string()),
-            )
-        })?;
-    let Some((sid, _)) = domains
-        .into_iter()
-        .find(|(_, d)| d.eq_ignore_ascii_case(&domain))
-    else {
-        return Err(activation_error(
-            StatusCode::BAD_REQUEST,
-            "domain is not offered by this gateway",
-            None,
-        ));
-    };
-    let code = random_code("sys");
-    let hash = crate::core::api::auth::sha256_hex(&code);
-    let expires = (chrono::Utc::now() + chrono::Duration::days(ACTIVATION_CODE_TTL_DAYS))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let db = &state.factories.email.env_factory.db;
-    db.insert_activation_code(&hash, &code, "product", &sid, &domain, "", Some(&expires))
-        .await
-        .map_err(|e| {
-            activation_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database error",
-                Some(e.to_string()),
-            )
-        })?;
-    let gateway_url = crate::core::server::api_endpoint_url(&state.config);
-    let body = system_activation_email(name, &domain, &code, &gateway_url);
-    if let Err(e) =
-        enqueue_apply_email(&state, &email, "Your AIMail system activation code", &body).await
-    {
-        db.delete_activation_code(&hash).await.ok();
-        return Err(e);
-    }
-    db.clear_email_verification(&email).await.ok();
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({
-            "status": "created", "email": email, "system_id": sid, "domain": domain, "activation_code": code,
-            "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
-        })),
-    ))
 }
 
 /// POST /api/v1/public/apply-address {email, name, agentname, domain}
