@@ -244,10 +244,6 @@ pub async fn batch_generate_codes(
                 error: "Cannot generate activation code: domain registration is inactive".to_string(),
                 detail: None,
             }))),
-            Some(ref r) if r.webhook_url.as_deref().unwrap_or("").is_empty() => return Err((StatusCode::PRECONDITION_FAILED, Json(ErrorResponse {
-                error: "Cannot generate activation code: address has no webhook routing configured".to_string(),
-                detail: None,
-            }))),
             _ => {}
         }
     }
@@ -1267,17 +1263,14 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 #msg{font-size:13px;color:#6ee7a8;margin-top:10px}#msg.err{color:#f28b82}.muted{color:var(--label);font-size:12px}
 </style></head><body><main>
 <h1>Claim Activation Code</h1>
-<p class="lead">Verify your email, then claim a system or address activation code. Codes are also delivered to the simulated inbox.</p>
+<p class="lead">Verify your email, then claim an address activation code. Codes are also delivered to the simulated inbox.</p>
 <section><h2>1. Email verification</h2>
 <label for="email">Email</label><input id="email" placeholder="you@example.com" autocomplete="email">
 <div class="row"><button onclick="sendCode()">Send code</button><button class="secondary" onclick="checkCode()">Verify</button></div>
 <label for="vcode">Verification code</label><input id="vcode" placeholder="6-digit code" inputmode="numeric">
 <div id="msg"></div><button class="secondary" onclick="showInbox()">Open simulated inbox</button><pre id="inbox"></pre>
 </section>
-<section><h2>2. Claim system code</h2>
-<div class="row"><label for="sname">Name<input id="sname"></label><label for="sdomain">Domain<select id="sdomain"></select></label></div>
-<button onclick="applySystem()">Claim system activation code</button></section>
-<section><h2>3. Claim address code</h2>
+<section><h2>2. Claim address code</h2>
 <div class="row"><label for="aname">Name<input id="aname"></label><label for="agentname">Agent name<input id="agentname" placeholder="alice"></label><label for="adomain">Domain<select id="adomain"></select></label></div>
 <button onclick="applyAddress()">Claim address activation code</button></section>
 <section><h2>Result</h2><pre id="out"></pre><p class="muted">Codes are single-use. Keep the email.</p></section>
@@ -1285,11 +1278,10 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 <script>
 const $=id=>document.getElementById(id);const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
 async function j(url,opt){const r=await fetch(url,opt);const t=await r.text();let v;try{v=JSON.parse(t)}catch{v={raw:t}}if(!r.ok)throw new Error(v.error||v.detail||t);return v}
-async function loadDomains(){try{const v=await j('/api/v1/public/system/domains');for(const sel of ['sdomain','adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
+async function loadDomains(){try{const v=await j('/api/v1/public/system/domains');for(const sel of ['adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
 async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='Verification code sent to the simulated inbox.';showInbox()}catch(e){msg(e.message,1)}}
 async function checkCode(){try{await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('Email verified.',0)}catch(e){msg(e.message,1)}}
 async function showInbox(){try{const v=await j('/api/v1/public/mock-inbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
-async function applySystem(){try{const v=await j('/api/v1/public/apply-system',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('sname').value,domain:$('sdomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
 async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
 loadDomains();
 </script></body></html>"#;
@@ -1316,7 +1308,6 @@ pub fn base_activation_router(state: HttpState) -> Router {
         )
         .route("/api/v1/public/mock-inbox", get(apply_mock_inbox))
         .route("/api/v1/public/system/domains", get(apply_system_domains))
-        .route("/api/v1/public/apply-system", post(apply_system_public))
         .route("/api/v1/public/apply-address", post(apply_address_public))
         .route("/apply", get(apply_page))
         .with_state(state)
@@ -1582,7 +1573,9 @@ mod activation_status_tests {
             "http://gw",
         );
         assert!(addr.contains("within 24 hours"));
-        assert!(addr.contains("My safety officer (manager) is ada@example.com"));
+        assert!(addr.contains("Activate and bind my AIMail mailbox address alice@test.local"));
+        assert!(addr.contains("using `aimail_address`"));
+        assert!(!addr.contains("My safety officer"));
         assert!(
             !addr.contains("dsh")
                 && !addr.contains("renew")
@@ -1628,5 +1621,8 @@ mod activation_status_tests {
             !p.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)),
             "CJK in /apply"
         );
+        assert!(!p.contains("apply-system"));
+        assert!(!p.contains("Claim system"));
+        assert!(!p.contains("sdomain"));
     }
 }
