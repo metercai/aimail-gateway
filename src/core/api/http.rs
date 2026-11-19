@@ -148,6 +148,10 @@ pub fn create_router(
             "/api/v1/agent-system/pending/ack",
             post(ack_agent_system_pending),
         )
+        .route(
+            "/api/v1/agent-system/pending/stream",
+            get(agent_system_stream),
+        )
         // Admin: probe inbound-endpoint reachability (CLI install webhook plan,
         // 2026-10-13: restored from v1.0; pure TCP classifier — the caller
         // interprets the error class, e.g. the agent probe treats
@@ -3391,6 +3395,26 @@ async fn require_agent_system_owner(
     Ok(())
 }
 
+async fn agent_system_stream(
+    state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    headers: axum::http::HeaderMap,
+    client_id: ClientId,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let agent_system_id = agent_system_id_from_headers(&headers)?;
+    let db = &state.factories.email.env_factory.db;
+    require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    sse_response_scoped(
+        state,
+        api_key,
+        std::time::Duration::from_secs(SSE_HEARTBEAT_SECS),
+        std::time::Duration::from_secs(SSE_MAX_LIFE_SECS),
+        client_id.0,
+        Some(agent_system_id),
+    )
+    .await
+}
+
 async fn list_agent_system_pending(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
@@ -3555,6 +3579,8 @@ struct SseStreamState {
     started: tokio::time::Instant,
     /// Connect-time rows, emitted as the first frame.
     pending_first: Option<Vec<crate::core::storage::PendingDeliveryRecord>>,
+    /// When set, this stream is scoped to an AgentSystemId (aggregate mode).
+    agent_system_id: Option<String>,
     /// Single-slot claim: released on drop (abrupt disconnect, zero grace)
     /// or explicitly on the max-life rotation (grace window).
     guard: SlotGuard,
@@ -3636,6 +3662,27 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
             st.guard.release_on_rotation();
             return None;
         }
+        if let Some(agent_system_id) = st.agent_system_id.as_deref() {
+            tokio::time::sleep(st.heartbeat).await;
+            match st
+                .db
+                .list_pending_for_agent_system(agent_system_id, st.req.limit)
+                .await
+            {
+                Ok(records) => {
+                    let fresh: Vec<_> = records
+                        .into_iter()
+                        .filter(|r| r.id > st.watermark)
+                        .collect();
+                    if !fresh.is_empty() {
+                        st.watermark = fresh.iter().map(|r| r.id).max().unwrap_or(st.watermark);
+                        return Some((sse_mail_frame(&group_pending_batches(&fresh)), st));
+                    }
+                }
+                Err(_) => { /* next tick re-queries */ }
+            }
+            return Some((Ok(": ping\n\n".to_string()), st));
+        }
         let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
         // Snapshot AFTER the wait: a notify between the wait and this point
         // has gen > snapshot ⇒ caught by the NEXT wait; one before has
@@ -3668,12 +3715,13 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
 /// Build the SSE response for the given caller. `heartbeat`/`life` are
 /// parameters so tests can inject short periods; the public handler passes
 /// the contract constants.
-async fn sse_response(
+async fn sse_response_scoped(
     state: State<HttpState>,
     api_key: crate::core::storage::ApiKeyRecord,
     heartbeat: std::time::Duration,
     life: std::time::Duration,
     client_id: String,
+    agent_system_id: Option<String>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // Single-slot claim BEFORE any work: the first connection wins; a
     // different client is 409 without building a stream. Same client
@@ -3704,7 +3752,23 @@ async fn sse_response(
         filter: Vec::new(),
         timeout_ms: 0,
     };
-    let (nkey, initial) = pending_records_for(db, &api_key, &req).await?;
+    let (nkey, initial) = if let Some(ref agent_system_id) = agent_system_id {
+        let records = db
+            .list_pending_for_agent_system(agent_system_id, req.limit)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Database error".to_string(),
+                        detail: Some(e.to_string()),
+                    }),
+                )
+            })?;
+        (pending_notify_key(&api_key).unwrap(), records)
+    } else {
+        pending_records_for(db, &api_key, &req).await?
+    };
     // Snapshot AFTER the connect query: rows already emitted cannot be
     // double-emitted by their own notify.
     let since = notifier.snapshot(&nkey);
@@ -3720,6 +3784,7 @@ async fn sse_response(
         life,
         started: tokio::time::Instant::now(),
         pending_first: Some(initial),
+        agent_system_id,
         guard: SlotGuard::new(state.delivery_slot.clone(), api_key.id, client_id.as_str()),
     };
     let stream = unfold(st, |st| async move { sse_stream_step(st).await });
@@ -3742,6 +3807,16 @@ async fn sse_response(
             }),
         )),
     }
+}
+
+async fn sse_response(
+    state: State<HttpState>,
+    api_key: crate::core::storage::ApiKeyRecord,
+    heartbeat: std::time::Duration,
+    life: std::time::Duration,
+    client_id: String,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    sse_response_scoped(state, api_key, heartbeat, life, client_id, None).await
 }
 
 async fn pending_stream(
