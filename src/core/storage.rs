@@ -3638,6 +3638,25 @@ mod tests {
         assert!(db.list_pending_for_agent_system("asid_b", 50).await.unwrap().iter().any(|r| r.id == b));
     }
 
+    #[tokio::test]
+    async fn agent_system_pending_is_isolated_across_gateway_databases() {
+        // Two Gateways are independent databases; the same AgentSystemId and
+        // address must not leak pending rows across them.
+        let a = temp_db();
+        let b = temp_db();
+        a.bind_agent_system_address("asid_same", "same@x.test", "sys_a").await.unwrap();
+        b.bind_agent_system_address("asid_same", "same@x.test", "sys_b").await.unwrap();
+        let id_a = a.insert_pending_delivery("sys_a", "same@x.test", "same@x.test", "{}", "{}").await.unwrap();
+        let id_b = b.insert_pending_delivery("sys_b", "same@x.test", "same@x.test", "{}", "{}").await.unwrap();
+
+        assert_eq!(a.list_pending_for_agent_system("asid_same", 50).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![id_a]);
+        assert_eq!(b.list_pending_for_agent_system("asid_same", 50).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![id_b]);
+        // Ack ids are local to each Gateway's database; acking A's row must
+        // not clear B's row.
+        assert_eq!(a.ack_pending_for_agent_system("asid_same", &[id_a]).await.unwrap(), 1);
+        assert_eq!(b.list_pending_for_agent_system("asid_same", 50).await.unwrap().len(), 1);
+    }
+
     #[test]
     fn d5_tracker_note_is_idempotent_and_drain_clears() {
         use crate::core::factory::LastUsedTracker;
