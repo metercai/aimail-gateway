@@ -139,6 +139,15 @@ pub fn create_router(
         .route("/api/v1/admin/pending", post(list_pending_deliveries))
         .route("/api/v1/admin/pending/stream", get(pending_stream))
         .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
+        // AgentSystemId aggregation (one client identity, many addresses)
+        .route(
+            "/api/v1/agent-system/pending",
+            post(list_agent_system_pending),
+        )
+        .route(
+            "/api/v1/agent-system/pending/ack",
+            post(ack_agent_system_pending),
+        )
         // Admin: probe inbound-endpoint reachability (CLI install webhook plan,
         // 2026-10-13: restored from v1.0; pure TCP classifier — the caller
         // interprets the error class, e.g. the agent probe treats
@@ -3325,6 +3334,118 @@ async fn list_pending_deliveries(
     }
 
     Ok(Json(group_pending_batches(&records)))
+}
+
+fn agent_system_id_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    let id = headers
+        .get("x-agent-system-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 80
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "missing AgentSystemId".to_string(),
+                    detail: Some("X-Agent-System-Id header is required".to_string()),
+                }),
+            )
+        })?;
+    Ok(id.to_string())
+}
+
+async fn require_agent_system_owner(
+    db: &crate::core::storage::Database,
+    api_key: &ApiKeyRecord,
+    agent_system_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !api_key.scopes.iter().any(|s| s == "agent") || api_key.email_address.is_empty() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "agent scope required".to_string(),
+                detail: Some("AgentSystemId aggregation requires an address-scoped key".to_string()),
+            }),
+        ));
+    }
+    let owned = db
+        .list_agent_system_addresses(agent_system_id)
+        .await
+        .unwrap_or_default();
+    let email = api_key.email_address.to_lowercase();
+    if !owned.iter().any(|(a, _)| a.to_lowercase() == email) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "not the AgentSystemId owner".to_string(),
+                detail: Some(format!("{email} is not owned by {agent_system_id}")),
+            }),
+        ));
+    }
+    Ok(())
+}
+
+async fn list_agent_system_pending(
+    state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<PendingPollRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let agent_system_id = agent_system_id_from_headers(&headers)?;
+    let db = &state.factories.email.env_factory.db;
+    require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    let records = db
+        .list_pending_for_agent_system(&agent_system_id, req.limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+        })?;
+    Ok(Json(group_pending_batches(&records)))
+}
+
+async fn ack_agent_system_pending(
+    state: axum::extract::State<HttpState>,
+    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<AckRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if req.ids.len() > 500 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "too many ids".to_string(),
+                detail: Some("max 500 ids per ACK".to_string()),
+            }),
+        ));
+    }
+    let agent_system_id = agent_system_id_from_headers(&headers)?;
+    let db = &state.factories.email.env_factory.db;
+    require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    let count = db
+        .ack_pending_for_agent_system(&agent_system_id, &req.ids)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+        })?;
+    Ok(Json(serde_json::json!({ "acked": count })))
 }
 
 async fn ack_pending_deliveries(

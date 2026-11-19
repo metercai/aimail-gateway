@@ -2406,6 +2406,84 @@ impl Database {
         .await
     }
 
+    /// AgentSystemId aggregation: pending rows for every address owned by the
+    /// local Agent-system instance. The join is on BOTH address and system id
+    /// so a coincidentally same-named address in another system is excluded.
+    pub async fn list_pending_for_agent_system(
+        &self,
+        agent_system_id: &str,
+        limit: i64,
+    ) -> AppResult<Vec<PendingDeliveryRecord>> {
+        let id = agent_system_id.to_string();
+        let lim = limit.clamp(1, 200);
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT p.id, p.system_id, p.domain_addr, p.email, p.headers, p.payload,
+                        p.status, p.created_at
+                 FROM pending_deliveries p
+                 JOIN agent_system_addresses a
+                   ON a.address = p.email AND a.system_id = p.system_id
+                 WHERE a.agent_system_id = ?1 AND p.status = 'pending'
+                 ORDER BY p.id ASC LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(rusqlite::params![id, lim], |r| {
+                    Ok(PendingDeliveryRecord {
+                        id: r.get(0)?,
+                        system_id: r.get(1)?,
+                        domain_addr: r.get(2)?,
+                        email: r.get(3)?,
+                        headers: r.get(4)?,
+                        payload: r.get(5)?,
+                        status: r.get(6)?,
+                        created_at: r.get(7)?,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(rows)
+        })
+        .await
+    }
+
+    /// AgentSystemId-scoped ack: only rows whose address is owned by this
+    /// Agent-system instance can be deleted.
+    pub async fn ack_pending_for_agent_system(
+        &self,
+        agent_system_id: &str,
+        ids: &[i64],
+    ) -> AppResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let id = agent_system_id.to_string();
+        let id_list = ids.to_vec();
+        self.call(move |conn| {
+            let placeholders: Vec<String> =
+                (2..=id_list.len() + 1).map(|i| format!("?{}", i)).collect();
+            let sql = format!(
+                "DELETE FROM pending_deliveries
+                 WHERE id IN ({})
+                   AND EXISTS (
+                     SELECT 1 FROM agent_system_addresses a
+                     WHERE a.agent_system_id = ?1
+                       AND a.address = pending_deliveries.email
+                       AND a.system_id = pending_deliveries.system_id
+                   )",
+                placeholders.join(",")
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(id)];
+            for id in id_list.iter() {
+                params.push(Box::new(*id));
+            }
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let n = conn.execute(&sql, param_refs.as_slice())?;
+            Ok(n)
+        })
+        .await
+    }
+
     /// Agent-scoped ack: delete ONLY rows whose (system_id, email) match —
     /// cross-address ids affect 0 rows (ownership check: ids outside the
     /// (system_id, email) scope are simply not matched).
