@@ -270,6 +270,7 @@ pub async fn batch_generate_codes(
 pub async fn activate_address_handler(
     State(state): State<HttpState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let ip = addr.ip();
@@ -290,6 +291,33 @@ pub async fn activate_address_handler(
         .get("email_address")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    let agent_system_id = headers
+        .get("x-agent-system-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 80
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_string);
+    // Read the code's system before activation consumes it; the ownership map
+    // is written only after the activation succeeds.
+    let agent_system_sid = if agent_system_id.is_some() {
+        let h = crate::core::api::auth::sha256_hex(code);
+        state
+            .factories
+            .email
+            .env_factory
+            .db
+            .lookup_activation_code(&h)
+            .await
+            .ok()
+            .flatten()
+            .map(|(sid, _)| sid)
+    } else {
+        None
+    };
     let email_domain = email.rsplit('@').next().unwrap_or("");
     if !email_domain.is_empty() {
         // Domain-anchor lookup mirrors register_address: non-shared keys
@@ -364,8 +392,20 @@ pub async fn activate_address_handler(
 
     clear_activation_limit(ip);
 
+    if let (Some(agent_system_id), Some(system_id)) = (agent_system_id.as_deref(), agent_system_sid.as_deref()) {
+        state
+            .factories
+            .email
+            .env_factory
+            .db
+            .bind_agent_system_address(agent_system_id, email, system_id)
+            .await
+            .ok();
+    }
+
     let body = Json(serde_json::json!({
         "status": "activated", "raw_key": raw_key, "api_key_id": api_key_id, "email_address": email,
+        "agent_system_id": agent_system_id,
     }));
     Ok((StatusCode::OK, body))
 }

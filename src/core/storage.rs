@@ -455,6 +455,19 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         -- without this index that half of the OR was a full table scan.
         CREATE INDEX IF NOT EXISTS idx_api_keys_system_id ON api_keys(system_id, is_active);
 
+        -- AgentSystemId aggregation ownership: one address belongs to exactly
+        -- one local Agent-system instance. Re-activation by another instance
+        -- transfers ownership (upsert on address), while the SSE/pending query
+        -- is scoped by agent_system_id.
+        CREATE TABLE IF NOT EXISTS agent_system_addresses (
+            address          TEXT PRIMARY KEY,
+            agent_system_id  TEXT NOT NULL,
+            system_id        TEXT NOT NULL,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_system_addresses_owner
+            ON agent_system_addresses(agent_system_id);
+
         -- Remaining tables
         CREATE TABLE IF NOT EXISTS activation_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1534,6 +1547,53 @@ impl<'a> ApiKeyParams<'a> {
             expires_at,
             category,
         }
+    }
+}
+
+impl Database {
+    /// Bind an address to the local AgentSystemId that activated it.
+    pub async fn bind_agent_system_address(
+        &self,
+        agent_system_id: &str,
+        address: &str,
+        system_id: &str,
+    ) -> AppResult<()> {
+        let id = agent_system_id.trim().to_string();
+        let addr = address.trim().to_lowercase();
+        let sid = system_id.trim().to_string();
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO agent_system_addresses (address, agent_system_id, system_id)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(address) DO UPDATE SET
+                   agent_system_id = excluded.agent_system_id,
+                   system_id = excluded.system_id",
+                params![addr, id, sid],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Addresses owned by one AgentSystemId on this gateway.
+    pub async fn list_agent_system_addresses(
+        &self,
+        agent_system_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        let id = agent_system_id.trim().to_string();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT address, system_id FROM agent_system_addresses
+                 WHERE agent_system_id = ?1 ORDER BY address",
+            )?;
+            let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .await
     }
 }
 
