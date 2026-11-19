@@ -662,6 +662,7 @@ pub async fn activate_system_handler(
 /// kind so a client can route/renew without a second lookup.
 pub async fn activate_address_code_compat_handler(
     State(state): State<HttpState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let code = body
@@ -727,6 +728,26 @@ pub async fn activate_address_code_compat_handler(
     )
     .await
     .map_err(|e| activation_error(e.status(), "activation failed", Some(e.to_string())))?;
+    let agent_system_id = headers
+        .get("x-agent-system-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= 80
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        })
+        .map(str::to_string);
+    if let Some(agent_system_id) = agent_system_id.as_deref() {
+        state
+            .factories
+            .email
+            .env_factory
+            .db
+            .bind_agent_system_address(agent_system_id, &email, &sid)
+            .await
+            .ok();
+    }
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -737,6 +758,7 @@ pub async fn activate_address_code_compat_handler(
             "email_address": email,
             "kind": if already_active { "rotation" } else { "new" },
             "expires_at": expires_at,
+            "agent_system_id": agent_system_id,
         })),
     ))
 }
