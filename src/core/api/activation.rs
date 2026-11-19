@@ -1041,7 +1041,7 @@ fn address_activation_email(
         format!("Hello {name},")
     };
     format!(
-        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate my AIMail mailbox {address} using the activation code {code}. My safety officer (manager) is {manager}. AIMail gateway is at {gateway_url}. Follow the address activation SKILL at https://raw.githubusercontent.com/metercai/aimail/main/resources/skills/activation/SKILL.md\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation:\n\n[AIMAIL-ACTIVATE]\nMy AIMail mailbox: {address}\nActivation code: {code}\nSafety officer: {manager}\nGateway: {gateway_url}\nUse the AIMail address-activation skill; do not use system onboarding.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
     )
 }
 
