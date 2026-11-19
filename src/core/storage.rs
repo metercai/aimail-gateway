@@ -3619,6 +3619,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn agent_system_pending_is_isolated_and_ackable() {
+        let db = temp_db();
+        db.bind_agent_system_address("asid_a", "a@x.test", "sys_a").await.unwrap();
+        db.bind_agent_system_address("asid_b", "b@x.test", "sys_b").await.unwrap();
+        let a = db.insert_pending_delivery("sys_a", "a@x.test", "a@x.test", "{}", "{}").await.unwrap();
+        let b = db.insert_pending_delivery("sys_b", "b@x.test", "b@x.test", "{}", "{}").await.unwrap();
+
+        let only_a = db.list_pending_for_agent_system("asid_a", 50).await.unwrap();
+        assert_eq!(only_a.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a]);
+        let only_b = db.list_pending_for_agent_system("asid_b", 50).await.unwrap();
+        assert_eq!(only_b.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b]);
+
+        // Cross-owner ack must affect 0 rows.
+        assert_eq!(db.ack_pending_for_agent_system("asid_a", &[b]).await.unwrap(), 0);
+        assert_eq!(db.ack_pending_for_agent_system("asid_a", &[a]).await.unwrap(), 1);
+        assert!(db.list_pending_for_agent_system("asid_b", 50).await.unwrap().iter().any(|r| r.id == b));
+    }
+
     #[test]
     fn d5_tracker_note_is_idempotent_and_drain_clears() {
         use crate::core::factory::LastUsedTracker;
