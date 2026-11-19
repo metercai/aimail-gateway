@@ -1028,7 +1028,7 @@ fn address_activation_email(
     name: &str,
     address: &str,
     code: &str,
-    manager: &str,
+    _manager: &str,
     gateway_url: &str,
 ) -> String {
     let greeting = if name.is_empty() {
