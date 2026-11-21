@@ -3350,7 +3350,8 @@ fn agent_system_id_from_headers(
         .filter(|v| {
             !v.is_empty()
                 && v.len() <= 80
-                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
         .ok_or_else(|| {
             (
@@ -3374,7 +3375,9 @@ async fn require_agent_system_owner(
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
                 error: "agent scope required".to_string(),
-                detail: Some("AgentSystemId aggregation requires an address-scoped key".to_string()),
+                detail: Some(
+                    "AgentSystemId aggregation requires an address-scoped key".to_string(),
+                ),
             }),
         ));
     }

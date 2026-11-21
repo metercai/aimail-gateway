@@ -298,7 +298,8 @@ pub async fn activate_address_handler(
         .filter(|v| {
             !v.is_empty()
                 && v.len() <= 80
-                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
         .map(str::to_string);
     // Read the code's system before activation consumes it; the ownership map
@@ -392,7 +393,9 @@ pub async fn activate_address_handler(
 
     clear_activation_limit(ip);
 
-    if let (Some(agent_system_id), Some(system_id)) = (agent_system_id.as_deref(), agent_system_sid.as_deref()) {
+    if let (Some(agent_system_id), Some(system_id)) =
+        (agent_system_id.as_deref(), agent_system_sid.as_deref())
+    {
         state
             .factories
             .email
@@ -735,7 +738,8 @@ pub async fn activate_address_code_compat_handler(
         .filter(|v| {
             !v.is_empty()
                 && v.len() <= 80
-                && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
         .map(str::to_string);
     if let Some(agent_system_id) = agent_system_id.as_deref() {

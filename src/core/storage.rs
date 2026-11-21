@@ -3622,20 +3622,51 @@ mod tests {
     #[tokio::test]
     async fn agent_system_pending_is_isolated_and_ackable() {
         let db = temp_db();
-        db.bind_agent_system_address("asid_a", "a@x.test", "sys_a").await.unwrap();
-        db.bind_agent_system_address("asid_b", "b@x.test", "sys_b").await.unwrap();
-        let a = db.insert_pending_delivery("sys_a", "a@x.test", "a@x.test", "{}", "{}").await.unwrap();
-        let b = db.insert_pending_delivery("sys_b", "b@x.test", "b@x.test", "{}", "{}").await.unwrap();
+        db.bind_agent_system_address("asid_a", "a@x.test", "sys_a")
+            .await
+            .unwrap();
+        db.bind_agent_system_address("asid_b", "b@x.test", "sys_b")
+            .await
+            .unwrap();
+        let a = db
+            .insert_pending_delivery("sys_a", "a@x.test", "a@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        let b = db
+            .insert_pending_delivery("sys_b", "b@x.test", "b@x.test", "{}", "{}")
+            .await
+            .unwrap();
 
-        let only_a = db.list_pending_for_agent_system("asid_a", 50).await.unwrap();
+        let only_a = db
+            .list_pending_for_agent_system("asid_a", 50)
+            .await
+            .unwrap();
         assert_eq!(only_a.iter().map(|r| r.id).collect::<Vec<_>>(), vec![a]);
-        let only_b = db.list_pending_for_agent_system("asid_b", 50).await.unwrap();
+        let only_b = db
+            .list_pending_for_agent_system("asid_b", 50)
+            .await
+            .unwrap();
         assert_eq!(only_b.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b]);
 
         // Cross-owner ack must affect 0 rows.
-        assert_eq!(db.ack_pending_for_agent_system("asid_a", &[b]).await.unwrap(), 0);
-        assert_eq!(db.ack_pending_for_agent_system("asid_a", &[a]).await.unwrap(), 1);
-        assert!(db.list_pending_for_agent_system("asid_b", 50).await.unwrap().iter().any(|r| r.id == b));
+        assert_eq!(
+            db.ack_pending_for_agent_system("asid_a", &[b])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.ack_pending_for_agent_system("asid_a", &[a])
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(db
+            .list_pending_for_agent_system("asid_b", 50)
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.id == b));
     }
 
     #[tokio::test]
@@ -3644,17 +3675,54 @@ mod tests {
         // address must not leak pending rows across them.
         let a = temp_db();
         let b = temp_db();
-        a.bind_agent_system_address("asid_same", "same@x.test", "sys_a").await.unwrap();
-        b.bind_agent_system_address("asid_same", "same@x.test", "sys_b").await.unwrap();
-        let id_a = a.insert_pending_delivery("sys_a", "same@x.test", "same@x.test", "{}", "{}").await.unwrap();
-        let id_b = b.insert_pending_delivery("sys_b", "same@x.test", "same@x.test", "{}", "{}").await.unwrap();
+        a.bind_agent_system_address("asid_same", "same@x.test", "sys_a")
+            .await
+            .unwrap();
+        b.bind_agent_system_address("asid_same", "same@x.test", "sys_b")
+            .await
+            .unwrap();
+        let id_a = a
+            .insert_pending_delivery("sys_a", "same@x.test", "same@x.test", "{}", "{}")
+            .await
+            .unwrap();
+        let id_b = b
+            .insert_pending_delivery("sys_b", "same@x.test", "same@x.test", "{}", "{}")
+            .await
+            .unwrap();
 
-        assert_eq!(a.list_pending_for_agent_system("asid_same", 50).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![id_a]);
-        assert_eq!(b.list_pending_for_agent_system("asid_same", 50).await.unwrap().iter().map(|r| r.id).collect::<Vec<_>>(), vec![id_b]);
+        assert_eq!(
+            a.list_pending_for_agent_system("asid_same", 50)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![id_a]
+        );
+        assert_eq!(
+            b.list_pending_for_agent_system("asid_same", 50)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.id)
+                .collect::<Vec<_>>(),
+            vec![id_b]
+        );
         // Ack ids are local to each Gateway's database; acking A's row must
         // not clear B's row.
-        assert_eq!(a.ack_pending_for_agent_system("asid_same", &[id_a]).await.unwrap(), 1);
-        assert_eq!(b.list_pending_for_agent_system("asid_same", 50).await.unwrap().len(), 1);
+        assert_eq!(
+            a.ack_pending_for_agent_system("asid_same", &[id_a])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            b.list_pending_for_agent_system("asid_same", 50)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
