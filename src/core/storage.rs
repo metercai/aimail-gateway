@@ -476,6 +476,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             code_type TEXT NOT NULL CHECK(code_type IN ('address','product')),
             product_id TEXT, system_id TEXT,
             domain TEXT, email_address TEXT,
+            requester_email TEXT,
             claimed INTEGER NOT NULL DEFAULT 0,
             claimed_at TEXT, claimed_by TEXT, expires_at TEXT,
             is_frozen INTEGER NOT NULL DEFAULT 0,
@@ -595,6 +596,32 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
                 [],
             )?;
             tracing::info!(dirty, "D10: lowercased legacy manager_address rows");
+        }
+    }
+
+    // activation_codes.requester_email (V2 self-service): add the column to
+    // databases created before it existed. CREATE TABLE IF NOT EXISTS does not
+    // alter existing tables, and a SCHEMA_VERSION bump would reject every
+    // pre-existing database — so this is an idempotent per-boot ALTER (D10
+    // pattern). The column carries the applicant who requested an address
+    // code; activation wires them in as the address's default manager.
+    {
+        let has_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('activation_codes') WHERE name = 'requester_email'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0);
+        if has_col == 0 {
+            conn.execute(
+                "ALTER TABLE activation_codes ADD COLUMN requester_email TEXT",
+                [],
+            )?;
+            tracing::info!(
+                operation = "schema_migration",
+                "Added activation_codes.requester_email column to pre-existing database"
+            );
         }
     }
 
@@ -2282,6 +2309,47 @@ impl Database {
                 params![code_hash],
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    /// Record the requesting user's email on a self-service applied code
+    /// (written at apply time, before redemption). The requester becomes the
+    /// address's default manager (safety officer) when the code is activated —
+    /// mirroring the admin registration path, where the manager is resolved and
+    /// bound at registration.
+    pub async fn set_activation_code_requester(
+        &self,
+        code_hash: &str,
+        requester_email: &str,
+    ) -> AppResult<()> {
+        let (code_hash, requester_email) = (code_hash.to_string(), requester_email.to_string());
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE activation_codes SET requester_email = ?2 WHERE code_hash = ?1",
+                params![code_hash, requester_email],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Read the requesting user's email bound to a self-service applied code.
+    /// `None` for admin/batch codes (no requester recorded).
+    pub async fn get_activation_code_requester(
+        &self,
+        code_hash: &str,
+    ) -> AppResult<Option<String>> {
+        let code_hash = code_hash.to_string();
+        self.call(move |conn| {
+            let v: Option<String> = conn
+                .query_row(
+                    "SELECT COALESCE(requester_email, '') FROM activation_codes WHERE code_hash = ?1",
+                    params![code_hash],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(v.filter(|s| !s.is_empty()))
         })
         .await
     }

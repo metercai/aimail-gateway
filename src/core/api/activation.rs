@@ -117,6 +117,38 @@ pub async fn activate_address_code(
 
     db.ensure_agent_address_domain(&system_id, email_address)
         .await?;
+
+    // V2 self-service: the applicant who requested the code becomes the
+    // address's default manager (safety officer). Mirror the admin
+    // registration path (register_address): write the manager row and the
+    // agent<->manager whitelist so the applicant can send [CMD] commands to
+    // the address. Admin/batch codes carry no requester, so this is a no-op
+    // for them — the old behaviour is preserved.
+    if let Ok(Some(applicant)) = db.get_activation_code_requester(&hash).await {
+        if !applicant.eq_ignore_ascii_case(email_address) {
+            factory
+                .upsert_domain_addr_meta(email_address, &system_id, Some(&applicant), None, None)
+                .await
+                .ok();
+            if let Err(e) = factory
+                .create_whitelist_entry(
+                    email_address,
+                    "all",
+                    &applicant,
+                    Some("Agent <-> Manager (auto-created)"),
+                )
+                .await
+            {
+                tracing::warn!(
+                    operation = "self_service_whitelist_failed",
+                    email = %email_address,
+                    error = %e,
+                    "Failed to whitelist self-service applicant as manager"
+                );
+            }
+        }
+    }
+
     db.delete_activation_code(&hash).await?;
     Ok((raw_key, key_id))
 }
@@ -752,6 +784,16 @@ pub async fn activate_address_code_compat_handler(
             .await
             .ok();
     }
+    let manager_address = state
+        .factories
+        .email
+        .env_factory
+        .resolve_domain_addr_meta(&email)
+        .await
+        .ok()
+        .flatten()
+        .map(|r| r.manager_address)
+        .unwrap_or_default();
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -763,6 +805,7 @@ pub async fn activate_address_code_compat_handler(
             "kind": if already_active { "rotation" } else { "new" },
             "expires_at": expires_at,
             "agent_system_id": agent_system_id,
+            "manager_address": manager_address,
         })),
     ))
 }
@@ -1195,6 +1238,17 @@ pub async fn apply_address_public(
         )
     })?;
     let code = codes.into_iter().next().unwrap_or_default();
+    // The applicant becomes the address's default manager (safety officer).
+    // Record it on the code row so activation (activate_address_code) can
+    // wire manager + whitelist the same way admin registration does.
+    let code_hash = crate::core::api::auth::sha256_hex(&code);
+    if let Err(e) = db.set_activation_code_requester(&code_hash, &email).await {
+        tracing::warn!(
+            operation = "set_activation_code_requester",
+            error = %e,
+            "Failed to record applicant as default manager on activation code"
+        );
+    }
     let gateway_url = crate::core::server::api_endpoint_url(&state.config);
     let body = address_activation_email(name, &address, &code, &email, &gateway_url);
     if let Err(e) = enqueue_apply_email(
