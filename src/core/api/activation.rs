@@ -119,32 +119,36 @@ pub async fn activate_address_code(
         .await?;
 
     // V2 self-service: the applicant who requested the code becomes the
-    // address's default manager (safety officer). Mirror the admin
-    // registration path (register_address): write the manager row and the
-    // agent<->manager whitelist so the applicant can send [CMD] commands to
-    // the address. Admin/batch codes carry no requester, so this is a no-op
-    // for them — the old behaviour is preserved.
-    if let Ok(Some(applicant)) = db.get_activation_code_requester(&hash).await {
+    // address's default manager (safety officer), with the advanced gateway's
+    // exact activation semantics: first activation writes the applicant; an
+    // existing non-empty manager is preserved (self-service change is not
+    // valid); persona/signature are never touched. The whitelist entry uses
+    // the EFFECTIVE manager (read back after the upsert) so the binding the
+    // agent persists cannot diverge from what the gateway set.
+    // Admin/batch codes carry no applicant → no-op (old behaviour preserved).
+    if let Ok(Some(applicant)) = db.get_activation_code_applicant(&hash).await {
         if !applicant.eq_ignore_ascii_case(email_address) {
-            factory
-                .upsert_domain_addr_meta(email_address, &system_id, Some(&applicant), None, None)
+            let effective = db
+                .set_domain_addr_meta_manager(email_address, &system_id, &applicant)
                 .await
-                .ok();
-            if let Err(e) = factory
-                .create_whitelist_entry(
-                    email_address,
-                    "all",
-                    &applicant,
-                    Some("Agent <-> Manager (auto-created)"),
-                )
-                .await
-            {
-                tracing::warn!(
-                    operation = "self_service_whitelist_failed",
-                    email = %email_address,
-                    error = %e,
-                    "Failed to whitelist self-service applicant as manager"
-                );
+                .unwrap_or(None);
+            if let Some(mgr) = effective {
+                if let Err(e) = factory
+                    .create_whitelist_entry(
+                        email_address,
+                        "all",
+                        &mgr,
+                        Some("Agent <-> Manager (auto-created)"),
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        operation = "self_service_whitelist_failed",
+                        email = %email_address,
+                        error = %e,
+                        "Failed to whitelist self-service applicant as manager"
+                    );
+                }
             }
         }
     }
@@ -812,15 +816,11 @@ pub async fn activate_address_code_compat_handler(
 
 // ── Public self-service apply (base pilot) ────────────────────────
 //
-// The gateway has no external SMTP sender on the public path, so the pilot
-// simulates the recipient mailbox: verification and activation codes are
-// appended to `mock_inbox` and the /apply webapp/API reads them back. The
-// production replacement is SMTP delivery; the API shape stays the same.
-
-fn random_six_digits() -> String {
-    use rand::Rng;
-    format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32))
-}
+// Verification codes live in the in-process verification map (email_verify
+// module, ported from the advanced gateway). Mails go through the real
+// outbound queue; the /apply webapp reads them back via the public outbox
+// endpoint. Production delivery is SMTP — the readback endpoint is a pilot
+// convenience and test fixtures read the SMTP spool directly.
 
 fn random_code(prefix: &str) -> String {
     use rand::Rng;
@@ -838,6 +838,11 @@ fn verification_email_body(code: &str) -> String {
 }
 
 /// POST /api/v1/public/email-verify/send {email}
+/// → {ok:true, retry_after:120} | 429 {error:"cooldown", retry_after}
+///
+/// Codes live in the in-process verification map (email_verify module,
+/// ported from the advanced gateway); the mail itself goes through the real
+/// outbound queue so delivery and retry semantics match production.
 pub async fn apply_email_verify_send(
     State(state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
@@ -855,38 +860,28 @@ pub async fn apply_email_verify_send(
             None,
         ));
     }
-    let code = random_six_digits();
-    let hash = crate::core::api::auth::sha256_hex(&code);
-    let expires = (chrono::Utc::now() + chrono::Duration::minutes(10))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let db = &state.factories.email.env_factory.db;
-    db.upsert_email_verification(&email, &hash, &expires)
-        .await
-        .map_err(|e| {
-            activation_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database error",
-                Some(e.to_string()),
-            )
-        })?;
-    if let Err(e) = enqueue_apply_email(
+    let code = match crate::core::api::email_verify::issue(&email) {
+        Ok(c) => c,
+        Err(retry_after) => {
+            return Err(activation_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &format!("cooldown — retry in {retry_after}s"),
+                Some("send cooldown not elapsed".into()),
+            ));
+        }
+    };
+    enqueue_apply_email(
         &state,
         &email,
         "AIMail verification code",
         &verification_email_body(&code),
     )
-    .await
-    {
-        db.clear_email_verification(&email).await.ok();
-        return Err(e);
-    }
+    .await?;
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
-            "status": "sent",
-            "email": email,
-            "expires_at": expires,
-            "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
+            "ok": true,
+            "retry_after": crate::core::api::email_verify::SEND_COOLDOWN.as_secs(),
         })),
     ))
 }
@@ -902,7 +897,7 @@ fn urlencoding(s: &str) -> String {
 
 /// Queue an application email through the real outbound pipeline (the
 /// advanced gateway's pattern): create_outbound + first-delivery trigger.
-/// The pilot's simulated inbox reads these queued rows back by recipient.
+/// The public outbox endpoint reads these queued rows back by recipient.
 async fn enqueue_apply_email(
     state: &HttpState,
     to_email: &str,
@@ -940,8 +935,14 @@ async fn enqueue_apply_email(
 }
 
 /// POST /api/v1/public/email-verify/check {email, code}
+/// → {ok:true} | 404 {ok:false, reason:"no_code"}
+/// | 403 {ok:false, reason:"bad_code", remaining:N}
+///
+/// Async frontend check: NEVER issues credentials — the full submit still
+/// re-verifies server-side. Shared attempt budget with submit (in-process
+/// verification map, ported from the advanced gateway).
 pub async fn apply_email_verify_check(
-    State(state): State<HttpState>,
+    State(_state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
     let email = body
@@ -962,54 +963,26 @@ pub async fn apply_email_verify_check(
             None,
         ));
     }
-    let db = &state.factories.email.env_factory.db;
-    let row = db
-        .get_email_verification(&email)
-        .await
-        .map_err(|e| {
-            activation_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database error",
-                Some(e.to_string()),
-            )
-        })?
-        .ok_or_else(|| {
-            activation_error(
-                StatusCode::BAD_REQUEST,
-                "no verification request for this email",
-                None,
-            )
-        })?;
-    let (hash, expires, _verified) = row;
-    if is_expired(Some(&expires)) {
-        return Err(activation_error(
-            StatusCode::GONE,
-            "verification code expired",
+    match crate::core::api::email_verify::verify(&email, code) {
+        Ok(()) => Ok((StatusCode::OK, Json(serde_json::json!({"ok": true})))),
+        Err(crate::core::api::email_verify::VerifyError::NoCode) => Err(activation_error(
+            StatusCode::NOT_FOUND,
+            "no live verification code for this email; send a new one",
             None,
-        ));
+        )),
+        Err(crate::core::api::email_verify::VerifyError::Attempts(remaining)) => {
+            Err(activation_error(
+                StatusCode::FORBIDDEN,
+                "verification code mismatch",
+                Some(format!("{remaining} attempt(s) left")),
+            ))
+        }
     }
-    if crate::core::api::auth::sha256_hex(code) != hash {
-        return Err(activation_error(
-            StatusCode::BAD_REQUEST,
-            "verification code mismatch",
-            None,
-        ));
-    }
-    db.mark_email_verified(&email).await.map_err(|e| {
-        activation_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "database error",
-            Some(e.to_string()),
-        )
-    })?;
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({"status": "verified", "email": email})),
-    ))
 }
 
-/// GET /api/v1/public/mock-inbox?email=...
-pub async fn apply_mock_inbox(
+/// GET /api/v1/public/outbox?email=... — readback of the real outbound queue
+/// for a recipient (pilot convenience; production delivery is SMTP).
+pub async fn apply_outbox(
     State(state): State<HttpState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorResponse>)> {
@@ -1084,41 +1057,29 @@ pub async fn apply_system_domains(
     ))
 }
 
-async fn require_verified(
-    state: &HttpState,
+/// Server-side re-verification at submit time (advanced pattern): the
+/// frontend check only unlocks the form; the full submit re-verifies the
+/// code against the in-process verification map. One attempt budget per code
+/// lifetime, shared between the two paths.
+async fn require_email_verified(
     email: &str,
+    verify_code: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let row = state
-        .factories
-        .email
-        .env_factory
-        .db
-        .get_email_verification(email)
-        .await
-        .map_err(|e| {
-            activation_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database error",
-                Some(e.to_string()),
-            )
-        })?
-        .ok_or_else(|| activation_error(StatusCode::BAD_REQUEST, "verify the email first", None))?;
-    let (_, expires, verified) = row;
-    if !verified {
-        return Err(activation_error(
-            StatusCode::BAD_REQUEST,
-            "email is not verified",
+    match crate::core::api::email_verify::verify(email, verify_code) {
+        Ok(()) => Ok(()),
+        Err(crate::core::api::email_verify::VerifyError::NoCode) => Err(activation_error(
+            StatusCode::FORBIDDEN,
+            "email verification code not found or expired — send a new one",
             None,
-        ));
+        )),
+        Err(crate::core::api::email_verify::VerifyError::Attempts(remaining)) => {
+            Err(activation_error(
+                StatusCode::FORBIDDEN,
+                "wrong email verification code",
+                Some(format!("{remaining} attempt(s) left")),
+            ))
+        }
     }
-    if is_expired(Some(&expires)) {
-        return Err(activation_error(
-            StatusCode::GONE,
-            "email verification expired; verify again",
-            None,
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1150,7 +1111,7 @@ fn address_activation_email(
     )
 }
 
-/// POST /api/v1/public/apply-address {email, name, agentname, domain}
+/// POST /api/v1/public/apply-address {email, name, agentname, domain, email_verify_code}
 pub async fn apply_address_public(
     State(state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
@@ -1166,6 +1127,12 @@ pub async fn apply_address_public(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
+    let email_verify_code = body
+        .get("email_verify_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let agentname = body
         .get("agentname")
         .and_then(|v| v.as_str())
@@ -1195,7 +1162,7 @@ pub async fn apply_address_public(
             None,
         ));
     }
-    require_verified(&state, &email).await?;
+    require_email_verified(&email, &email_verify_code).await?;
     let domains = state
         .factories
         .email
@@ -1239,12 +1206,13 @@ pub async fn apply_address_public(
     })?;
     let code = codes.into_iter().next().unwrap_or_default();
     // The applicant becomes the address's default manager (safety officer).
-    // Record it on the code row so activation (activate_address_code) can
+    // Record it on the code row (applicant_email, same column as the advanced
+    // activation-code structure) so activation (activate_address_code) can
     // wire manager + whitelist the same way admin registration does.
     let code_hash = crate::core::api::auth::sha256_hex(&code);
-    if let Err(e) = db.set_activation_code_requester(&code_hash, &email).await {
+    if let Err(e) = db.set_activation_code_applicant(&code_hash, &email).await {
         tracing::warn!(
-            operation = "set_activation_code_requester",
+            operation = "set_activation_code_applicant",
             error = %e,
             "Failed to record applicant as default manager on activation code"
         );
@@ -1264,17 +1232,16 @@ pub async fn apply_address_public(
             .ok();
         return Err(e);
     }
-    db.clear_email_verification(&email).await.ok();
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
             "status": "created", "email": email, "system_id": sid, "domain": domain, "address": address, "activation_code": code,
-            "mock_inbox": format!("/api/v1/public/mock-inbox?email={}", urlencoding(&email)),
+            "outbox": format!("/api/v1/public/outbox?email={}", urlencoding(&email)),
         })),
     ))
 }
 
-/// GET /apply — pilot SPA (system/address claim + mock inbox).
+/// GET /apply — pilot SPA (email verification + address claim).
 pub async fn apply_page() -> Html<&'static str> {
     Html(APPLY_PAGE)
 }
@@ -1297,12 +1264,12 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 #msg{font-size:13px;color:#6ee7a8;margin-top:10px}#msg.err{color:#f28b82}.muted{color:var(--label);font-size:12px}
 </style></head><body><main>
 <h1>Claim Activation Code</h1>
-<p class="lead">Verify your email, then claim an address activation code. Codes are also delivered to the simulated inbox.</p>
+<p class="lead">Verify your email, then claim an address activation code. Mails are delivered by the gateway; the outbox below shows what was queued for your address.</p>
 <section><h2>1. Email verification</h2>
 <label for="email">Email</label><input id="email" placeholder="you@example.com" autocomplete="email">
 <div class="row"><button onclick="sendCode()">Send code</button><button class="secondary" onclick="checkCode()">Verify</button></div>
 <label for="vcode">Verification code</label><input id="vcode" placeholder="6-digit code" inputmode="numeric">
-<div id="msg"></div><button class="secondary" onclick="showInbox()">Open simulated inbox</button><pre id="inbox"></pre>
+<div id="msg"></div><button class="secondary" onclick="showOutbox()">Show outbox</button><pre id="inbox"></pre>
 </section>
 <section><h2>2. Claim address code</h2>
 <div class="row"><label for="aname">Name<input id="aname"></label><label for="agentname">Agent name<input id="agentname" placeholder="alice"></label><label for="adomain">Domain<select id="adomain"></select></label></div>
@@ -1313,10 +1280,10 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 const $=id=>document.getElementById(id);const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
 async function j(url,opt){const r=await fetch(url,opt);const t=await r.text();let v;try{v=JSON.parse(t)}catch{v={raw:t}}if(!r.ok)throw new Error(v.error||v.detail||t);return v}
 async function loadDomains(){try{const v=await j('/api/v1/public/system/domains');for(const sel of ['adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
-async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='Verification code sent to the simulated inbox.';showInbox()}catch(e){msg(e.message,1)}}
+async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='Verification code sent to your email.';showOutbox()}catch(e){msg(e.message,1)}}
 async function checkCode(){try{await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('Email verified.',0)}catch(e){msg(e.message,1)}}
-async function showInbox(){try{const v=await j('/api/v1/public/mock-inbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
-async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value})});$('out').textContent=JSON.stringify(v,null,2);showInbox()}catch(e){msg(e.message,1)}}
+async function showOutbox(){try{const v=await j('/api/v1/public/outbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
+async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value,email_verify_code:$('vcode').value})});$('out').textContent=JSON.stringify(v,null,2);showOutbox()}catch(e){msg(e.message,1)}}
 loadDomains();
 </script></body></html>"#;
 
@@ -1340,7 +1307,7 @@ pub fn base_activation_router(state: HttpState) -> Router {
             "/api/v1/public/email-verify/check",
             post(apply_email_verify_check),
         )
-        .route("/api/v1/public/mock-inbox", get(apply_mock_inbox))
+        .route("/api/v1/public/outbox", get(apply_outbox))
         .route("/api/v1/public/system/domains", get(apply_system_domains))
         .route("/api/v1/public/apply-address", post(apply_address_public))
         .route("/apply", get(apply_page))

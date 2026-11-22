@@ -476,7 +476,7 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             code_type TEXT NOT NULL CHECK(code_type IN ('address','product')),
             product_id TEXT, system_id TEXT,
             domain TEXT, email_address TEXT,
-            requester_email TEXT,
+            applicant_email TEXT,
             claimed INTEGER NOT NULL DEFAULT 0,
             claimed_at TEXT, claimed_by TEXT, expires_at TEXT,
             is_frozen INTEGER NOT NULL DEFAULT 0,
@@ -487,24 +487,6 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_activation_lookup ON activation_codes(claimed, is_frozen);
         CREATE INDEX IF NOT EXISTS idx_activation_codes_system ON activation_codes(system_id);
         CREATE INDEX IF NOT EXISTS idx_activation_codes_domain ON activation_codes(domain);
-
-        -- Public self-service apply: email verification + a simulated local
-        -- inbox (pilot mode; production can replace the mock inbox with SMTP).
-        CREATE TABLE IF NOT EXISTS email_verifications (
-            email       TEXT PRIMARY KEY,
-            code_hash   TEXT NOT NULL,
-            expires_at  TEXT NOT NULL,
-            verified    INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        );
-        CREATE TABLE IF NOT EXISTS mock_inbox (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            to_addr     TEXT NOT NULL,
-            subject     TEXT NOT NULL,
-            body        TEXT NOT NULL,
-            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_mock_inbox_to ON mock_inbox(to_addr);
 
         CREATE TABLE IF NOT EXISTS agent_state (
             agent_addr  TEXT NOT NULL,
@@ -577,7 +559,17 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             mail_id      TEXT,
             created_at   TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_attachments_meta_created ON attachments_meta(created_at);",
+        CREATE INDEX IF NOT EXISTS idx_attachments_meta_created ON attachments_meta(created_at);
+
+        -- Schema convergence (V2 self-service cleanup): the pilot-era
+        -- email_verifications and mock_inbox tables were dev-only fixtures
+        -- that never belonged in the product schema — advanced verifies
+        -- through an in-process map and mails flow through the real outbound
+        -- queue. Drop them on upgrade so existing databases converge to the
+        -- exact structure fresh ones get (SCHEMA_VERSION unchanged).
+        DROP TABLE IF EXISTS email_verifications;
+        DROP TABLE IF EXISTS mock_inbox;
+",
     )?;
     // D10: one-time legacy migration — lowercase any manager_address written
     // before case-insensitive comparison existed. Rows already lowercase are
@@ -599,29 +591,49 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         }
     }
 
-    // activation_codes.requester_email (V2 self-service): add the column to
-    // databases created before it existed. CREATE TABLE IF NOT EXISTS does not
-    // alter existing tables, and a SCHEMA_VERSION bump would reject every
-    // pre-existing database — so this is an idempotent per-boot ALTER (D10
-    // pattern). The column carries the applicant who requested an address
-    // code; activation wires them in as the address's default manager.
+    // activation_codes.applicant_email (V2 self-service): the applicant who
+    // requested an address code; activation wires them in as the address's
+    // default manager. Column name matches the advanced gateway's
+    // activation-code structure so both editions share the same schema.
+    // Idempotent per-boot migration (D10 pattern; SCHEMA_VERSION unchanged):
+    //  - fresh DB: CREATE TABLE already has the column → no-op
+    //  - v1.0.10 DB: legacy requester_email column → rename in place
+    //  - pre-1.0.10 DB: add the column
     {
-        let has_col: i64 = conn
+        let has_applicant: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('activation_codes') WHERE name = 'requester_email'",
+                "SELECT COUNT(*) FROM pragma_table_info('activation_codes') WHERE name = 'applicant_email'",
                 [],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap_or(0);
-        if has_col == 0 {
-            conn.execute(
-                "ALTER TABLE activation_codes ADD COLUMN requester_email TEXT",
-                [],
-            )?;
-            tracing::info!(
-                operation = "schema_migration",
-                "Added activation_codes.requester_email column to pre-existing database"
-            );
+        if has_applicant == 0 {
+            let has_legacy: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('activation_codes') WHERE name = 'requester_email'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0);
+            if has_legacy > 0 {
+                conn.execute(
+                    "ALTER TABLE activation_codes RENAME COLUMN requester_email TO applicant_email",
+                    [],
+                )?;
+                tracing::info!(
+                    operation = "schema_migration",
+                    "Renamed activation_codes.requester_email to applicant_email"
+                );
+            } else {
+                conn.execute(
+                    "ALTER TABLE activation_codes ADD COLUMN applicant_email TEXT",
+                    [],
+                )?;
+                tracing::info!(
+                    operation = "schema_migration",
+                    "Added activation_codes.applicant_email column to pre-existing database"
+                );
+            }
         }
     }
 
@@ -1166,6 +1178,52 @@ COMMIT;
                 updated_at: now,
             })
         }).await
+    }
+
+    /// Set the safety-officer (manager) landing point for an address-code
+    /// activation, with the advanced gateway's exact semantics:
+    ///   - first activation → the applicant is written;
+    ///   - existing non-empty manager → **preserved** (self-service change is
+    ///     not valid; changes go through the admin path only);
+    ///   - agent_signature / agent_persona → never touched (welcome persona
+    ///     chain values must survive re-activation).
+    ///
+    /// Returns the EFFECTIVE manager after the upsert (may differ from the
+    /// passed applicant on renewal) — the value the activation response and
+    /// the whitelist entry must use so the binding cannot diverge.
+    pub async fn set_domain_addr_meta_manager(
+        &self,
+        email: &str,
+        system_id: &str,
+        manager: &str,
+    ) -> AppResult<Option<String>> {
+        let (email, system_id, manager) = (
+            email.to_lowercase(),
+            system_id.to_string(),
+            manager.to_lowercase(),
+        );
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO domain_addr_meta (email_address, system_id, manager_address, agent_signature, agent_persona, is_active, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, '', '', 1, ?4, ?4)
+                 ON CONFLICT(email_address) DO UPDATE SET
+                   manager_address = CASE WHEN domain_addr_meta.manager_address = ''
+                                          THEN excluded.manager_address
+                                          ELSE domain_addr_meta.manager_address END,
+                   updated_at = excluded.updated_at",
+                params![email, system_id, manager, now],
+            )?;
+            let effective: Option<String> = conn
+                .query_row(
+                    "SELECT manager_address FROM domain_addr_meta WHERE email_address = ?1",
+                    params![email],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            Ok(effective.filter(|s: &String| !s.is_empty()))
+        })
+        .await
     }
 
     /// Get agent metadata by email address.
@@ -2040,79 +2098,11 @@ impl Database {
         self.pool.clone()
     }
 
-    // ── Public apply: email verification + simulated inbox ──────────
+    // ── Public apply: outbound-mail readback ─────────────────────────
 
-    pub async fn upsert_email_verification(
-        &self,
-        email: &str,
-        code_hash: &str,
-        expires_at: &str,
-    ) -> AppResult<()> {
-        let (email, code_hash, expires_at) = (
-            email.to_string(),
-            code_hash.to_string(),
-            expires_at.to_string(),
-        );
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO email_verifications (email, code_hash, expires_at, verified)
-                 VALUES (?1, ?2, ?3, 0)
-                 ON CONFLICT(email) DO UPDATE SET
-                   code_hash = excluded.code_hash,
-                   expires_at = excluded.expires_at,
-                   verified = 0",
-                params![email, code_hash, expires_at],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn get_email_verification(
-        &self,
-        email: &str,
-    ) -> AppResult<Option<(String, String, bool)>> {
-        let email = email.to_string();
-        self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT code_hash, expires_at, verified FROM email_verifications WHERE email = ?1",
-            )?;
-            let mut rows = stmt.query(params![email])?;
-            if let Some(row) = rows.next()? {
-                Ok(Some((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)))
-            } else {
-                Ok(None)
-            }
-        })
-        .await
-    }
-
-    pub async fn mark_email_verified(&self, email: &str) -> AppResult<()> {
-        let email = email.to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "UPDATE email_verifications SET verified = 1 WHERE email = ?1",
-                params![email],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn clear_email_verification(&self, email: &str) -> AppResult<()> {
-        let email = email.to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "DELETE FROM email_verifications WHERE email = ?1",
-                params![email],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Simulated inbox for the pilot: read actual queued outbound emails by
-    /// recipient (the advanced pattern queues via create_outbound).
+    /// Read actual queued outbound emails by recipient (the advanced pattern
+    /// queues via create_outbound; tests and the /apply page read the spool
+    /// or this queue — never a dedicated product table).
     pub async fn list_outbound_for_recipient(
         &self,
         to_addr: &str,
@@ -2133,42 +2123,6 @@ impl Database {
             Ok(out)
         })
         .await
-    }
-
-    pub async fn insert_mock_mail(
-        &self,
-        to_addr: &str,
-        subject: &str,
-        body: &str,
-    ) -> AppResult<()> {
-        let (to_addr, subject, body) = (to_addr.to_string(), subject.to_string(), body.to_string());
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO mock_inbox (to_addr, subject, body) VALUES (?1, ?2, ?3)",
-                params![to_addr, subject, body],
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    pub async fn list_mock_mail(
-        &self,
-        to_addr: &str,
-        limit: i64,
-    ) -> AppResult<Vec<(i64, String, String, String)>> {
-        let (to_addr, limit) = (to_addr.to_string(), limit.clamp(1, 50));
-        self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, subject, body, created_at FROM mock_inbox WHERE to_addr = ?1 ORDER BY id DESC LIMIT ?2",
-            )?;
-            let mut rows = stmt.query(params![to_addr, limit])?;
-            let mut out = Vec::new();
-            while let Some(row) = rows.next()? {
-                out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
-            }
-            Ok(out)
-        }).await
     }
 
     /// Distinct bare domains of the current (single) system, excluding the
@@ -2313,30 +2267,32 @@ impl Database {
         .await
     }
 
-    /// Record the requesting user's email on a self-service applied code
-    /// (written at apply time, before redemption). The requester becomes the
+    /// Record the applicant's email on a self-service applied code
+    /// (written at apply time, before redemption). The applicant becomes the
     /// address's default manager (safety officer) when the code is activated —
     /// mirroring the admin registration path, where the manager is resolved and
-    /// bound at registration.
-    pub async fn set_activation_code_requester(
+    /// bound at registration. Column name matches the advanced gateway's
+    /// activation-code structure (`applicant_email`) so both editions share the
+    /// same activation-code schema.
+    pub async fn set_activation_code_applicant(
         &self,
         code_hash: &str,
-        requester_email: &str,
+        applicant_email: &str,
     ) -> AppResult<()> {
-        let (code_hash, requester_email) = (code_hash.to_string(), requester_email.to_string());
+        let (code_hash, applicant_email) = (code_hash.to_string(), applicant_email.to_string());
         self.call(move |conn| {
             conn.execute(
-                "UPDATE activation_codes SET requester_email = ?2 WHERE code_hash = ?1",
-                params![code_hash, requester_email],
+                "UPDATE activation_codes SET applicant_email = ?2 WHERE code_hash = ?1",
+                params![code_hash, applicant_email],
             )?;
             Ok(())
         })
         .await
     }
 
-    /// Read the requesting user's email bound to a self-service applied code.
-    /// `None` for admin/batch codes (no requester recorded).
-    pub async fn get_activation_code_requester(
+    /// Read the applicant's email bound to a self-service applied code.
+    /// `None` for admin/batch codes (no applicant recorded).
+    pub async fn get_activation_code_applicant(
         &self,
         code_hash: &str,
     ) -> AppResult<Option<String>> {
@@ -2344,7 +2300,7 @@ impl Database {
         self.call(move |conn| {
             let v: Option<String> = conn
                 .query_row(
-                    "SELECT COALESCE(requester_email, '') FROM activation_codes WHERE code_hash = ?1",
+                    "SELECT COALESCE(applicant_email, '') FROM activation_codes WHERE code_hash = ?1",
                     params![code_hash],
                     |row| row.get(0),
                 )
@@ -2658,6 +2614,204 @@ mod tests {
         let path = dir.join("aimail.db");
         let db = Database::open(&path, 4, None).unwrap();
         (db, path)
+    }
+
+    /// Unique on-disk SQLite file with only the given DDL (raw rusqlite, so
+    /// Database::open's migration path is what under test).
+    fn scratch_db_with_ddl(ddl: &str) -> (std::path::PathBuf, rusqlite::Connection) {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-legacy-{}", ts));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("aimail.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(ddl).unwrap();
+        (path, conn)
+    }
+
+    fn table_names(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    fn activation_code_columns(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("PRAGMA table_info(activation_codes)").unwrap();
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    }
+
+    /// The advanced gateway's activation-code structure — base must stay
+    /// column-for-column identical (the whole point of the V2 cleanup).
+    const ADVANCED_ACTIVATION_COLUMNS: &[&str] = &[
+        "id",
+        "code_hash",
+        "code_prefix",
+        "code_cipher",
+        "code_type",
+        "product_id",
+        "system_id",
+        "domain",
+        "email_address",
+        "applicant_email",
+        "claimed",
+        "claimed_at",
+        "claimed_by",
+        "expires_at",
+        "is_frozen",
+        "is_shipped",
+        "created_by",
+        "created_at",
+    ];
+
+    /// Column SET parity (not physical order): legacy databases gain the
+    /// column via ADD COLUMN (appended), while fresh ones carry it in the
+    /// CREATE TABLE — both editions do the same, so order is a physical
+    /// artifact; the invariant is "same 18 columns, no more no less".
+    fn assert_advanced_aligned(conn: &rusqlite::Connection) {
+        let mut got = activation_code_columns(conn);
+        let mut want: Vec<String> = ADVANCED_ACTIVATION_COLUMNS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        got.sort();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "activation_codes must match the advanced column structure exactly"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_db_has_advanced_activation_schema_and_no_fixture_tables() {
+        let (db, _path) = temp_db_with_path();
+        db.call(|conn| {
+            let tables = table_names(conn);
+            assert!(
+                !tables.contains(&"email_verifications".to_string()),
+                "email_verifications must not exist (in-process verification instead)"
+            );
+            assert!(
+                !tables.contains(&"mock_inbox".to_string()),
+                "mock_inbox must not exist (test fixtures live in files, not the product DB)"
+            );
+            assert!(tables.contains(&"agent_system_addresses".to_string()));
+            assert_advanced_aligned(conn);
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn v1_0_10_db_converges_on_open() {
+        // v1.0.10 shape: requester_email column + the two fixture tables.
+        let (path, seed) = scratch_db_with_ddl(
+            "CREATE TABLE activation_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_hash TEXT NOT NULL UNIQUE, code_prefix TEXT NOT NULL,
+                code_cipher TEXT,
+                code_type TEXT NOT NULL CHECK(code_type IN ('address','product')),
+                product_id TEXT, system_id TEXT,
+                domain TEXT, email_address TEXT,
+                requester_email TEXT,
+                claimed INTEGER NOT NULL DEFAULT 0,
+                claimed_at TEXT, claimed_by TEXT, expires_at TEXT,
+                is_frozen INTEGER NOT NULL DEFAULT 0,
+                is_shipped INTEGER NOT NULL DEFAULT 0,
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            INSERT INTO activation_codes (code_hash, code_prefix, code_type, email_address, requester_email)
+            VALUES ('h1', 'addr-', 'address', 'a@x.test', 'old-applicant@x.test');
+            CREATE TABLE email_verifications (email TEXT PRIMARY KEY);
+            CREATE TABLE mock_inbox (id INTEGER PRIMARY KEY);
+            CREATE TABLE _schema_version (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
+            INSERT INTO _schema_version (id, version) VALUES (1, 1);",
+        );
+        // Pre-seed a row in the fixture tables: dropping them is expected.
+        seed.execute("INSERT INTO mock_inbox (id) VALUES (1)", [])
+            .unwrap();
+        drop(seed);
+
+        let db = Database::open(&path, 4, None).unwrap();
+        db.call(|conn| {
+            let tables = table_names(conn);
+            assert!(
+                !tables.contains(&"email_verifications".to_string()),
+                "legacy email_verifications must be dropped on upgrade"
+            );
+            assert!(
+                !tables.contains(&"mock_inbox".to_string()),
+                "legacy mock_inbox must be dropped on upgrade"
+            );
+            assert_advanced_aligned(conn);
+            // The applicant value must survive the RENAME COLUMN.
+            let kept: Option<String> = conn
+                .query_row(
+                    "SELECT applicant_email FROM activation_codes WHERE code_hash = 'h1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(kept.as_deref(), Some("old-applicant@x.test"));
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_1_0_10_db_gains_applicant_column_on_open() {
+        // 1.0.0 baseline shape: no requester/applicant column at all.
+        let (path, _seed) = scratch_db_with_ddl(
+            "CREATE TABLE activation_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_hash TEXT NOT NULL UNIQUE, code_prefix TEXT NOT NULL,
+                code_cipher TEXT,
+                code_type TEXT NOT NULL CHECK(code_type IN ('address','product')),
+                product_id TEXT, system_id TEXT,
+                domain TEXT, email_address TEXT,
+                claimed INTEGER NOT NULL DEFAULT 0,
+                claimed_at TEXT, claimed_by TEXT, expires_at TEXT,
+                is_frozen INTEGER NOT NULL DEFAULT 0,
+                is_shipped INTEGER NOT NULL DEFAULT 0,
+                created_by TEXT,
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            );
+            CREATE TABLE _schema_version (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
+            INSERT INTO _schema_version (id, version) VALUES (1, 1);",
+        );
+        drop(_seed);
+
+        let db = Database::open(&path, 4, None).unwrap();
+        db.call(|conn| {
+            assert_advanced_aligned(conn);
+            let legacy: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('activation_codes') WHERE name = 'requester_email'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(legacy, 0, "requester_email must not be introduced");
+            Ok(())
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
