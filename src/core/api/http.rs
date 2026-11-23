@@ -3365,6 +3365,17 @@ fn agent_system_id_from_headers(
     Ok(id.to_string())
 }
 
+/// Stable synthetic slot id for an AgentSystemId. The address key used to
+/// authenticate the aggregate is only a representative; the single-slot lock
+/// must be per (AgentSystemId, Gateway), not per representative address key.
+/// Negative ids cannot collide with sqlite api_keys row ids.
+fn agent_system_slot_id(agent_system_id: &str) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    agent_system_id.hash(&mut hasher);
+    -((hasher.finish() & 0x7fff_ffff_ffff_ffff) as i64) - 1
+}
+
 async fn require_agent_system_owner(
     db: &crate::core::storage::Database,
     api_key: &ApiKeyRecord,
@@ -3422,11 +3433,30 @@ async fn list_agent_system_pending(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
     headers: axum::http::HeaderMap,
+    client_id: ClientId,
     Json(req): Json<PendingPollRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let agent_system_id = agent_system_id_from_headers(&headers)?;
     let db = &state.factories.email.env_factory.db;
     require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    // One consumer per (AgentSystemId, Gateway): the aggregate stream and the
+    // aggregate long-poll share the same synthetic slot, so a second client
+    // cannot double-deliver the same ASID mailbox.
+    let slot_key = agent_system_slot_id(&agent_system_id);
+    if !state.delivery_slot.try_acquire(
+        slot_key,
+        client_id_of(&client_id),
+        std::time::Duration::from_secs(SLOT_POLL_LEASE_SECS),
+    ) {
+        return Err(occupied_error(
+            "another client holds this AgentSystemId; retry later".to_string(),
+        ));
+    }
+    let _guard = SlotGuard::new(
+        state.delivery_slot.clone(),
+        slot_key,
+        client_id_of(&client_id),
+    );
     let records = db
         .list_pending_for_agent_system(&agent_system_id, req.limit)
         .await
@@ -3728,9 +3758,14 @@ async fn sse_response_scoped(
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // Single-slot claim BEFORE any work: the first connection wins; a
     // different client is 409 without building a stream. Same client
-    // (reconnect / rotation) re-acquires and refreshes.
+    // (reconnect / rotation) re-acquires and refreshes. Aggregate streams use
+    // a synthetic ASID slot (the representative key is not the identity).
+    let slot_key = agent_system_id
+        .as_deref()
+        .map(agent_system_slot_id)
+        .unwrap_or(api_key.id);
     if !state.delivery_slot.try_acquire(
-        api_key.id,
+        slot_key,
         client_id.as_str(),
         std::time::Duration::from_secs(SLOT_STREAM_LEASE_SECS),
     ) {
@@ -3738,7 +3773,7 @@ async fn sse_response_scoped(
         // not this rejected requester.
         let holder = state
             .delivery_slot
-            .holder_id(api_key.id)
+            .holder_id(slot_key)
             .filter(|h| !h.is_empty())
             .map(|h| format!(" (client {h})"))
             .unwrap_or_default();
@@ -3788,7 +3823,7 @@ async fn sse_response_scoped(
         started: tokio::time::Instant::now(),
         pending_first: Some(initial),
         agent_system_id,
-        guard: SlotGuard::new(state.delivery_slot.clone(), api_key.id, client_id.as_str()),
+        guard: SlotGuard::new(state.delivery_slot.clone(), slot_key, client_id.as_str()),
     };
     let stream = unfold(st, |st| async move { sse_stream_step(st).await });
     let resp = Response::builder()

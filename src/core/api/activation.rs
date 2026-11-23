@@ -338,9 +338,10 @@ pub async fn activate_address_handler(
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         })
         .map(str::to_string);
-    // Read the code's system before activation consumes it; the ownership map
-    // is written only after the activation succeeds.
-    let agent_system_sid = if agent_system_id.is_some() {
+    // Read the code's system before activation consumes it. This is returned
+    // as `system_id` (GatewaySystemId) even when the client did not send an
+    // AgentSystemId, so every activation path carries the ownership key.
+    let agent_system_sid = {
         let h = crate::core::api::auth::sha256_hex(code);
         state
             .factories
@@ -352,8 +353,6 @@ pub async fn activate_address_handler(
             .ok()
             .flatten()
             .map(|(sid, _)| sid)
-    } else {
-        None
     };
     let email_domain = email.rsplit('@').next().unwrap_or("");
     if !email_domain.is_empty() {
@@ -439,11 +438,20 @@ pub async fn activate_address_handler(
             .db
             .bind_agent_system_address(agent_system_id, email, system_id)
             .await
+            .map_err(|e| {
+                tracing::warn!(
+                    operation = "agent_system_bind_failed",
+                    agent_system_id = %agent_system_id,
+                    %e,
+                    "activation succeeded but AgentSystemId ownership bind failed"
+                )
+            })
             .ok();
     }
 
     let body = Json(serde_json::json!({
         "status": "activated", "raw_key": raw_key, "api_key_id": api_key_id, "email_address": email,
+        "system_id": agent_system_sid.as_deref().unwrap_or(""),
         "agent_system_id": agent_system_id,
     }));
     Ok((StatusCode::OK, body))
@@ -786,6 +794,14 @@ pub async fn activate_address_code_compat_handler(
             .db
             .bind_agent_system_address(agent_system_id, &email, &sid)
             .await
+            .map_err(|e| {
+                tracing::warn!(
+                    operation = "agent_system_bind_failed",
+                    agent_system_id = %agent_system_id,
+                    %e,
+                    "activation succeeded but AgentSystemId ownership bind failed"
+                )
+            })
             .ok();
     }
     let manager_address = state
@@ -1107,7 +1123,7 @@ fn address_activation_email(
         format!("Hello {name},")
     };
     format!(
-        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent_aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent_aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
     )
 }
 

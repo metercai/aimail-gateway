@@ -775,6 +775,34 @@ pub async fn delete_api_key(
 
     match state.factories.email.env_factory.delete_api_key(id).await {
         Ok(()) => {
+            // D2: once the last active agent key for this address is gone, drop
+            // its AgentSystemId ownership row so a deleted address cannot keep
+            // receiving aggregate deliveries.
+            match state
+                .factories
+                .email
+                .env_factory
+                .db
+                .remove_agent_system_address_if_unowned(
+                    &existing.system_id,
+                    &existing.email_address,
+                )
+                .await
+            {
+                Ok(true) => info!(
+                    operation = "agent_system_ownership_removed",
+                    api_key_id = id,
+                    address = %existing.email_address,
+                    "AgentSystemId ownership row removed after key deletion"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    operation = "agent_system_ownership_cleanup_failed",
+                    api_key_id = id,
+                    %e,
+                    "Failed to remove AgentSystemId ownership row (non-fatal)"
+                ),
+            }
             info!(
                 operation = "api_key_deleted",
                 api_key_id = id,

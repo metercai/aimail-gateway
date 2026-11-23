@@ -1660,6 +1660,33 @@ impl Database {
         .await
     }
 
+    /// Remove the ASID ownership row for an address once its LAST active
+    /// agent key is gone. Re-activation by another instance still upserts the
+    /// row; this only cleans up after deregistration so a deleted address can
+    /// never keep receiving aggregate deliveries.
+    pub async fn remove_agent_system_address_if_unowned(
+        &self,
+        system_id: &str,
+        address: &str,
+    ) -> AppResult<bool> {
+        let sid = system_id.trim().to_string();
+        let addr = address.trim().to_lowercase();
+        self.call(move |conn| {
+            let n = conn.execute(
+                "DELETE FROM agent_system_addresses
+                 WHERE system_id = ?1 AND address = ?2
+                   AND NOT EXISTS (
+                     SELECT 1 FROM api_keys
+                     WHERE system_id = ?1 AND domain_addr = ?2
+                       AND category = 'agent' AND is_active = 1
+                   )",
+                params![sid, addr],
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     /// Addresses owned by one AgentSystemId on this gateway.
     pub async fn list_agent_system_addresses(
         &self,
@@ -3904,6 +3931,49 @@ mod tests {
             .unwrap()
             .iter()
             .any(|r| r.id == b));
+    }
+
+    #[tokio::test]
+    async fn agent_system_ownership_is_removed_only_after_last_agent_key() {
+        let db = temp_db();
+        db.bind_agent_system_address("asid_x", "x@x.test", "sys_x")
+            .await
+            .unwrap();
+        let key = db
+            .insert_api_key(ApiKeyParams::new(
+                "sys_x",
+                "x@x.test",
+                "hash_x",
+                "prefix",
+                &["agent".to_string()],
+                None,
+                "agent",
+            ))
+            .await
+            .unwrap();
+        // A live agent key still owns the address: keep the mapping.
+        assert!(!db
+            .remove_agent_system_address_if_unowned("sys_x", "x@x.test")
+            .await
+            .unwrap());
+        assert_eq!(
+            db.list_agent_system_addresses("asid_x")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // Last key removed ⇒ ownership row is deleted.
+        db.delete_api_key(key.id).await.unwrap();
+        assert!(db
+            .remove_agent_system_address_if_unowned("sys_x", "x@x.test")
+            .await
+            .unwrap());
+        assert!(db
+            .list_agent_system_addresses("asid_x")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
