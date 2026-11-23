@@ -563,20 +563,34 @@ mod tests {
         let rec = ctx
             .ef
             .create_inbound(
-                "ip", "sys1", "ext@ext.com",
+                "ip",
+                "sys1",
+                "ext@ext.com",
                 r#"{"to":["a@x.com"],"cc":[],"rcpt":["a@x.com"]}"#,
-                "s", "b", None, None, None, 3,
+                "s",
+                "b",
+                None,
+                None,
+                None,
+                3,
             )
             .await
             .unwrap();
         queue_pull_pending(&ctx, &rec.id).await;
 
         // Config::default() has no relay => webhook arm is taken.
-        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook")
-            .await;
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook").await;
 
-        let after = ctx.ef.get(&rec.id).await.unwrap().expect("ledger row kept for pull mode");
-        assert_eq!(after.status, "delivered", "pull-queued inbound row stays as delivered");
+        let after = ctx
+            .ef
+            .get(&rec.id)
+            .await
+            .unwrap()
+            .expect("ledger row kept for pull mode");
+        assert_eq!(
+            after.status, "delivered",
+            "pull-queued inbound row stays as delivered"
+        );
     }
 
     #[tokio::test]
@@ -587,15 +601,21 @@ mod tests {
         let rec = ctx
             .ef
             .create_inbound(
-                "iw", "sys1", "ext@ext.com",
+                "iw",
+                "sys1",
+                "ext@ext.com",
                 r#"{"to":["a@x.com"],"cc":[],"rcpt":["a@x.com"]}"#,
-                "s", "b", None, None, None, 3,
+                "s",
+                "b",
+                None,
+                None,
+                None,
+                3,
             )
             .await
             .unwrap();
 
-        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook")
-            .await;
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook").await;
 
         assert!(
             ctx.ef.get(&rec.id).await.unwrap().is_none(),
@@ -611,17 +631,28 @@ mod tests {
         let rec = ctx
             .ef
             .create_outbound(
-                "od", "sys1", "a@x.com",
+                "od",
+                "sys1",
+                "a@x.com",
                 r#"{"to":["r@ext.com"],"cc":[],"rcpt":["r@ext.com"]}"#,
-                "s", "b", None, None, None, 3,
+                "s",
+                "b",
+                None,
+                None,
+                None,
+                3,
             )
             .await
             .unwrap();
 
-        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "smtp")
-            .await;
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "smtp").await;
 
-        let after = ctx.ef.get(&rec.id).await.unwrap().expect("direct-mode row kept for NDR window");
+        let after = ctx
+            .ef
+            .get(&rec.id)
+            .await
+            .unwrap()
+            .expect("direct-mode row kept for NDR window");
         assert_eq!(after.status, "delivered");
     }
 
@@ -632,17 +663,23 @@ mod tests {
         let rec = ctx
             .ef
             .create_outbound(
-                "or", "sys1", "a@x.com",
+                "or",
+                "sys1",
+                "a@x.com",
                 r#"{"to":["r@ext.com"],"cc":[],"rcpt":["r@ext.com"]}"#,
-                "s", "b", None, None, None, 3,
+                "s",
+                "b",
+                None,
+                None,
+                None,
+                3,
             )
             .await
             .unwrap();
         let mut cfg = Config::default();
         cfg.relay.smtp_server = Some("127.0.0.1:2525".to_string());
 
-        finalize_after_delivery(&ctx.ef, &ctx.af, &cfg, &rec, "smtp")
-            .await;
+        finalize_after_delivery(&ctx.ef, &ctx.af, &cfg, &rec, "smtp").await;
 
         assert!(
             ctx.ef.get(&rec.id).await.unwrap().is_none(),
