@@ -2333,6 +2333,21 @@ impl Database {
         }).await
     }
 
+    /// Count pending-delivery rows whose payload references `mail_id`
+    /// (the pull payload carries the source mail id as top-level `mail_id`).
+    pub async fn count_pending_for_mail_id(&self, mail_id: &str) -> AppResult<i64> {
+        let mid = mail_id.to_string();
+        self.call(move |conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pending_deliveries WHERE json_extract(payload, '$.mail_id') = ?1",
+                params![mid],
+                |r| r.get(0),
+            )?;
+            Ok(n)
+        })
+        .await
+    }
+
     pub async fn list_pending_deliveries(
         &self,
         system_id: &str,

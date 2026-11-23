@@ -14,14 +14,18 @@ use super::exhaustion::{insert_exhaustion_auto_reply, insert_exhaustion_notifica
 
 // ── Post-delivery finalization ──────────────────────────────────────
 
-/// After a successful SMTP delivery, decide whether to keep the record for
-/// NDR bounce correlation (MX direct mode) or finalize immediately (relay mode).
+/// After a successful delivery attempt, decide the record's final state.
 ///
 /// - **MX direct mode** (no relay configured): marks as "delivered" — the record
 ///   stays in the DB for `delivery_window_secs` so incoming bounce/NDR emails
 ///   can be matched. The expired_delivered batch in `batch.rs` finalizes them later.
 /// - **Relay mode** (upstream SMTP configured): immediately completes + cleans up,
 ///   since the relay handles bounces on its own.
+/// - **Inbound pull mode** (webhook delivery that only enqueued a pending
+///   delivery for a pull-mode recipient): the host has NOT consumed the mail yet,
+///   so completing would delete the ledger row while delivery is still pending.
+///   Mark "delivered" and let the expired_delivered batch finalize it after the
+///   window (ack only removes the pending row, never the ledger).
 async fn finalize_after_delivery(
     email_factory: &EmailFactory,
     attachment_factory: &AttachmentFactory,
@@ -40,10 +44,28 @@ async fn finalize_after_delivery(
             error!(email_id = %record.id, %e, "Failed to mark delivered");
         }
     } else {
-        if let Err(e) = email_factory.complete(&record.id).await {
-            error!(email_id = %record.id, %e, "Failed to mark completed");
+        let keep_for_pull = record.direction == "inbound"
+            && delivery_type == "webhook"
+            && matches!(
+                email_factory
+                    .env_factory
+                    .db
+                    .count_pending_for_mail_id(&record.id)
+                    .await,
+                Ok(n) if n > 0
+            );
+        if keep_for_pull {
+            // Pull enqueue is not delivery: keep the ledger row (status
+            // "delivered") until the expired_delivered batch finalizes it.
+            if let Err(e) = email_factory.mark_delivered(&record.id).await {
+                error!(email_id = %record.id, %e, "Failed to mark pull-queued inbound delivered");
+            }
         } else {
-            cleanup_completed_email(attachment_factory, email_factory, record).await;
+            if let Err(e) = email_factory.complete(&record.id).await {
+                error!(email_id = %record.id, %e, "Failed to mark completed");
+            } else {
+                cleanup_completed_email(attachment_factory, email_factory, record).await;
+            }
         }
     }
 }
@@ -490,5 +512,141 @@ pub(crate) async fn process_expired_attachments(
                 warn!(%mail_id, %e, "Failed to check remaining attachments for cascade");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::strategy::BaseSystemStore;
+    use crate::core::storage::Database;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct Ctx {
+        db: Database,
+        ef: EmailFactory,
+        af: AttachmentFactory,
+    }
+
+    fn temp_ctx() -> Ctx {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("aimailgw-flows-{ts}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Database::open(dir.join("aimail.db"), 4, None).unwrap();
+        let arc = Arc::new(db.clone());
+        let att_dir = dir.join("attachments");
+        std::fs::create_dir_all(&att_dir).unwrap();
+        let ef = EmailFactory::new(arc.clone(), att_dir.clone(), Arc::new(BaseSystemStore));
+        let af = AttachmentFactory::new(arc, att_dir);
+        Ctx { db, ef, af }
+    }
+
+    /// Insert a pull-mode pending delivery whose payload references `mail_id`
+    /// (the real pull payload carries the source mail id as top-level `mail_id`).
+    async fn queue_pull_pending(ctx: &Ctx, mail_id: &str) {
+        let payload = serde_json::json!({ "mail_id": mail_id }).to_string();
+        ctx.db
+            .insert_pending_delivery("sys1", "a@x.com", "a@x.com", "{}", &payload)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_pull_keeps_ledger_row_as_delivered() {
+        // Pull enqueue is not delivery: the ledger row must survive (status
+        // "delivered") until the expired_delivered batch finalizes it.
+        let ctx = temp_ctx();
+        let rec = ctx
+            .ef
+            .create_inbound(
+                "ip", "sys1", "ext@ext.com",
+                r#"{"to":["a@x.com"],"cc":[],"rcpt":["a@x.com"]}"#,
+                "s", "b", None, None, None, 3,
+            )
+            .await
+            .unwrap();
+        queue_pull_pending(&ctx, &rec.id).await;
+
+        // Config::default() has no relay => webhook arm is taken.
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook")
+            .await;
+
+        let after = ctx.ef.get(&rec.id).await.unwrap().expect("ledger row kept for pull mode");
+        assert_eq!(after.status, "delivered", "pull-queued inbound row stays as delivered");
+    }
+
+    #[tokio::test]
+    async fn inbound_webhook_push_without_pending_completes_and_deletes() {
+        // Regression guard: a real webhook push (no pending row) keeps the
+        // existing complete+cleanup behavior.
+        let ctx = temp_ctx();
+        let rec = ctx
+            .ef
+            .create_inbound(
+                "iw", "sys1", "ext@ext.com",
+                r#"{"to":["a@x.com"],"cc":[],"rcpt":["a@x.com"]}"#,
+                "s", "b", None, None, None, 3,
+            )
+            .await
+            .unwrap();
+
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "webhook")
+            .await;
+
+        assert!(
+            ctx.ef.get(&rec.id).await.unwrap().is_none(),
+            "webhook-pushed inbound row is completed+deleted (unchanged behavior)"
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_direct_delivery_stays_delivered() {
+        // Regression guard: MX direct mode (no relay) keeps the NDR-correlation
+        // "delivered" behavior.
+        let ctx = temp_ctx();
+        let rec = ctx
+            .ef
+            .create_outbound(
+                "od", "sys1", "a@x.com",
+                r#"{"to":["r@ext.com"],"cc":[],"rcpt":["r@ext.com"]}"#,
+                "s", "b", None, None, None, 3,
+            )
+            .await
+            .unwrap();
+
+        finalize_after_delivery(&ctx.ef, &ctx.af, &Config::default(), &rec, "smtp")
+            .await;
+
+        let after = ctx.ef.get(&rec.id).await.unwrap().expect("direct-mode row kept for NDR window");
+        assert_eq!(after.status, "delivered");
+    }
+
+    #[tokio::test]
+    async fn outbound_relay_mode_completes_and_deletes() {
+        // Regression guard: relay mode immediately completes + cleans up.
+        let ctx = temp_ctx();
+        let rec = ctx
+            .ef
+            .create_outbound(
+                "or", "sys1", "a@x.com",
+                r#"{"to":["r@ext.com"],"cc":[],"rcpt":["r@ext.com"]}"#,
+                "s", "b", None, None, None, 3,
+            )
+            .await
+            .unwrap();
+        let mut cfg = Config::default();
+        cfg.relay.smtp_server = Some("127.0.0.1:2525".to_string());
+
+        finalize_after_delivery(&ctx.ef, &ctx.af, &cfg, &rec, "smtp")
+            .await;
+
+        assert!(
+            ctx.ef.get(&rec.id).await.unwrap().is_none(),
+            "relay-mode outbound row is completed+deleted (unchanged behavior)"
+        );
     }
 }
