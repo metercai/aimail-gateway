@@ -1123,7 +1123,7 @@ fn address_activation_email(
         format!("Hello {name},")
     };
     format!(
-        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent_aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent-aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
     )
 }
 
@@ -1592,6 +1592,8 @@ mod activation_status_tests {
         assert!(addr.contains("within 24 hours"));
         assert!(addr.contains("Activate and bind my AIMail mailbox address alice@test.local"));
         assert!(addr.contains("using `aimail_address`"));
+        assert!(addr.contains("`agent-aimail` plugin SDK"));
+        assert!(!addr.contains("agent_aimail"));
         assert!(!addr.contains("My safety officer"));
         assert!(
             !addr.contains("dsh")
