@@ -136,6 +136,11 @@ async fn cmd_start(cli: &Cli) -> AppResult<()> {
     // Provision admin API key and persist to {db_path}.admin_key
     let keys = server.setup_admin_key().await?;
     let admin_key = keys.admin_key.clone();
+    // Config bootstrap domains: insert missing rows only; never overwrite API state.
+    let seeded = server.seed_config_domains(&keys.system_id).await?;
+    if seeded > 0 {
+        tracing::info!(count = seeded, "Config bootstrap domains seeded");
+    }
 
     // ── Persist both keys + announce the agent-side one (2026-09-26 owner ruling) ──
     // Shared helper so every binary that provisions keys behaves and speaks identically:

@@ -150,6 +150,7 @@ curl -sf http://127.0.0.1:8080/health
 | `timeout_secs` | `[webhook]` | Webhook 推送超时（秒） |
 | `max_attempts` | `[retry]` | 投递失败最大重试次数 |
 | `manager_default` | `[admin]` | agent 地址注册时，请求与系统都没提供 manager 的兜底安全员地址；默认空 |
+| `domains` | `[admin]` | 启动时补齐的**裸域名**列表（如 `["mail.example.com"]`）。仅在 `system_domains` 中缺失时插入；新增/修改/停用及其他属性（webhook、归属）走域名 API。删除配置项不会删除数据库记录 |
 | `encryption` | `[storage]` | SQLCipher 页级加密，默认 `false`；需用 `--features sqlcipher` 构建（默认构建无 SQLCipher，会拒绝 `true`）。两段式：先以 `false` 启动一次（生成 admin key），再改为 `true`，下次启动在原地迁移为加密库 |
 
 ### config.toml 示例
@@ -213,6 +214,7 @@ path = "./data"
 [admin]
 # email = "admin@yourdomain.com"
 # manager_default = "admin@yourdomain.com"
+# domains = ["mail.example.com"]          # 仅裸域名；缺失时启动补齐
 
 [board]
 # heartbeat_stale_seconds = 14400

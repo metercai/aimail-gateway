@@ -25,8 +25,45 @@ use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 /// it instead of carrying a second copy of the wording.
 pub fn address_activation_prompt(address: &str, gateway_url: &str, code: &str) -> String {
     format!(
-        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the `agent-aimail` plugin with the current runtime's package manager, then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
+        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the `agent-aimail` plugin using your platform's plugin install command, then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
     )
+}
+
+/// Generate a random activation code in the shared `xxxx-...` format,
+/// optionally with a scope prefix (e.g. `Some("addr-")`). This is the single
+/// implementation used by base address/system codes and advanced codes.
+pub fn generate_activation_code(prefix: Option<&str>) -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let parts: Vec<String> = (0..6)
+        .map(|_| format!("{:04x}", rng.gen_range(0..0x10000u32) as u16))
+        .collect();
+    let code = parts.join("-");
+    match prefix {
+        Some(p) if !p.is_empty() => format!("{p}{code}"),
+        _ => code,
+    }
+}
+
+/// Shared agent-name rule: 1-64 chars, [a-z0-9] start, only [a-z0-9_-], no
+/// dots, `a2a`/`.a2a` reserved. Input is trimmed/lowercased.
+pub fn valid_agentname(raw: &str) -> Option<String> {
+    let n = raw.trim().to_lowercase();
+    if n.is_empty() || n.len() > 64 {
+        return None;
+    }
+    let mut chars = n.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
+        _ => return None,
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return None;
+    }
+    if n.contains('.') || n == "a2a" || n.contains(".a2a") {
+        return None;
+    }
+    Some(n)
 }
 
 /// Generate agent key material shared by base and advanced activation paths.
@@ -40,6 +77,83 @@ pub fn generate_key_material() -> (String, String, String) {
         crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
     let prefix = raw_key[..8].to_string();
     (raw_key, stored_hash, prefix)
+}
+
+/// Activation-code category shared by base and advanced callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivationCodeKind {
+    SystemShared,
+    SystemDedicated,
+    Address,
+}
+
+impl ActivationCodeKind {
+    /// Reply-to-email activation is only for system/product codes; address
+    /// codes are activated by the agent binding path.
+    pub fn allowed_for_email_reply(self) -> bool {
+        matches!(self, Self::SystemShared | Self::SystemDedicated)
+    }
+}
+
+/// Normalized activation target (pure data; the DB lookup stays in each
+/// edition's service layer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivationTarget {
+    SystemShared {
+        system_id: String,
+        identifier: String,
+        domain: String,
+    },
+    SystemDedicated {
+        system_id: String,
+        domain: String,
+    },
+    Address {
+        system_id: String,
+        address: String,
+    },
+}
+
+/// Normalize a bare domain: trim + lowercase, reject empty / whitespace / '@'
+/// and require at least one dot. This is the single rule used by base config
+/// seeding and advanced dedicated-domain handling.
+pub fn normalize_bare_domain(raw: &str) -> Option<String> {
+    let d = raw.trim().to_lowercase();
+    if d.is_empty() || d.contains('@') || d.split_whitespace().count() != 1 || !d.contains('.') {
+        return None;
+    }
+    Some(d)
+}
+
+pub fn valid_bare_domain(raw: &str) -> bool {
+    normalize_bare_domain(raw).is_some()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodeExtractError {
+    NoCode,
+    Multiple,
+}
+
+/// Extract exactly one activation code from an email body. Codes are six
+/// 4-hex groups with an optional lowercase prefix (e.g. `addr-...`, `sys-...`,
+/// `pro-...`); quoted replies may repeat the same code, distinct codes are
+/// rejected as ambiguous.
+pub fn extract_activation_code(text: &str) -> Result<String, CodeExtractError> {
+    let re = regex::Regex::new(r"(?i)\b(?:[a-z0-9]{2,16}-)?(?:[0-9a-f]{4}-){5}[0-9a-f]{4}\b")
+        .expect("activation code regex");
+    let mut found: Vec<String> = Vec::new();
+    for m in re.find_iter(text) {
+        let code = m.as_str().to_string();
+        if !found.iter().any(|c| c.eq_ignore_ascii_case(&code)) {
+            found.push(code);
+        }
+    }
+    match found.len() {
+        0 => Err(CodeExtractError::NoCode),
+        1 => Ok(found.pop().unwrap()),
+        _ => Err(CodeExtractError::Multiple),
+    }
 }
 
 // ── Address activation helpers ──
@@ -845,12 +959,7 @@ pub async fn activate_address_code_compat_handler(
 // convenience and test fixtures read the SMTP spool directly.
 
 fn random_code(prefix: &str) -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let parts: Vec<String> = (0..6)
-        .map(|_| format!("{:04x}", rng.gen_range(0..0x10000u32) as u16))
-        .collect();
-    format!("{}-{}", prefix, parts.join("-"))
+    generate_activation_code(Some(&format!("{prefix}-")))
 }
 
 fn verification_email_body(code: &str) -> String {
@@ -859,12 +968,15 @@ fn verification_email_body(code: &str) -> String {
     )
 }
 
-/// POST /api/v1/public/email-verify/send {email}
+/// POST /api/v1/public/email-verify/send {name, email}
 /// → {ok:true, retry_after:120} | 429 {error:"cooldown", retry_after}
 ///
 /// Codes live in the in-process verification map (email_verify module,
 /// ported from the advanced gateway); the mail itself goes through the real
 /// outbound queue so delivery and retry semantics match production.
+///
+/// `name` is required and recorded with the code: verification is a
+/// name+email+code triple match (reform §3.3).
 pub async fn apply_email_verify_send(
     State(state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
@@ -875,14 +987,20 @@ pub async fn apply_email_verify_send(
         .unwrap_or("")
         .trim()
         .to_lowercase();
-    if !email.contains('@') {
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !email.contains('@') || name.is_empty() {
         return Err(activation_error(
             StatusCode::BAD_REQUEST,
-            "valid email is required",
+            "valid name and email are required",
             None,
         ));
     }
-    let code = match crate::core::api::email_verify::issue(&email) {
+    let code = match crate::core::api::email_verify::issue(&email, &name) {
         Ok(c) => c,
         Err(retry_after) => {
             return Err(activation_error(
@@ -956,13 +1074,14 @@ async fn enqueue_apply_email(
     Ok(())
 }
 
-/// POST /api/v1/public/email-verify/check {email, code}
+/// POST /api/v1/public/email-verify/check {name, email, code}
 /// → {ok:true} | 404 {ok:false, reason:"no_code"}
 /// | 403 {ok:false, reason:"bad_code", remaining:N}
 ///
 /// Async frontend check: NEVER issues credentials — the full submit still
 /// re-verifies server-side. Shared attempt budget with submit (in-process
-/// verification map, ported from the advanced gateway).
+/// verification map, ported from the advanced gateway). Requires the same
+/// name+email+code triple as the submit path.
 pub async fn apply_email_verify_check(
     State(_state): State<HttpState>,
     Json(body): Json<serde_json::Value>,
@@ -973,19 +1092,25 @@ pub async fn apply_email_verify_check(
         .unwrap_or("")
         .trim()
         .to_lowercase();
+    let name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let code = body
         .get("code")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    if !email.contains('@') || code.is_empty() {
+    if !email.contains('@') || name.is_empty() || code.is_empty() {
         return Err(activation_error(
             StatusCode::BAD_REQUEST,
-            "email and code are required",
+            "name, email and code are required",
             None,
         ));
     }
-    match crate::core::api::email_verify::verify(&email, code) {
+    match crate::core::api::email_verify::verify(&email, &name, code) {
         Ok(()) => Ok((StatusCode::OK, Json(serde_json::json!({"ok": true})))),
         Err(crate::core::api::email_verify::VerifyError::NoCode) => Err(activation_error(
             StatusCode::NOT_FOUND,
@@ -1085,9 +1210,10 @@ pub async fn apply_system_domains(
 /// lifetime, shared between the two paths.
 async fn require_email_verified(
     email: &str,
+    name: &str,
     verify_code: &str,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    match crate::core::api::email_verify::verify(email, verify_code) {
+    match crate::core::api::email_verify::verify(email, name, verify_code) {
         Ok(()) => Ok(()),
         Err(crate::core::api::email_verify::VerifyError::NoCode) => Err(activation_error(
             StatusCode::FORBIDDEN,
@@ -1168,24 +1294,21 @@ pub async fn apply_address_public(
         .unwrap_or("")
         .trim()
         .to_lowercase();
-    if !email.contains('@') || agentname.is_empty() || domain.is_empty() {
+    if !email.contains('@') || name.is_empty() || agentname.is_empty() || domain.is_empty() {
         return Err(activation_error(
             StatusCode::BAD_REQUEST,
-            "email, agentname and domain are required",
+            "name, email, agentname and domain are required",
             None,
         ));
     }
-    if !agentname
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
+    let Some(agentname) = valid_agentname(&agentname) else {
         return Err(activation_error(
             StatusCode::BAD_REQUEST,
             "invalid agentname",
             None,
         ));
-    }
-    require_email_verified(&email, &email_verify_code).await?;
+    };
+    require_email_verified(&email, name, &email_verify_code).await?;
     let domains = state
         .factories
         .email
@@ -1290,12 +1413,13 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 <p class="lead">Verify your email, then claim an address activation code. Mails are delivered by the gateway; the outbox below shows what was queued for your address.</p>
 <section><h2>1. Email verification</h2>
 <label for="email">Email</label><input id="email" placeholder="you@example.com" autocomplete="email">
+<label for="aname">Name</label><input id="aname" placeholder="Your name — must match the code request">
 <div class="row"><button onclick="sendCode()">Send code</button><button class="secondary" onclick="checkCode()">Verify</button></div>
 <label for="vcode">Verification code</label><input id="vcode" placeholder="6-digit code" inputmode="numeric">
 <div id="msg"></div><button class="secondary" onclick="showOutbox()">Show outbox</button><pre id="inbox"></pre>
 </section>
 <section><h2>2. Claim address code</h2>
-<div class="row"><label for="aname">Name<input id="aname"></label><label for="agentname">Agent name<input id="agentname" placeholder="alice"></label><label for="adomain">Domain<select id="adomain"></select></label></div>
+<div class="row"><label for="agentname">Agent name<input id="agentname" placeholder="alice"></label><label for="adomain">Domain<select id="adomain"></select></label></div>
 <button onclick="applyAddress()">Claim address activation code</button></section>
 <section><h2>Result</h2><pre id="out"></pre><p class="muted">Codes are single-use. Keep the email.</p></section>
 </main>
@@ -1303,8 +1427,8 @@ pre{background:#11141d;border:1px solid var(--border);border-radius:8px;padding:
 const $=id=>document.getElementById(id);const msg=(t,e)=>{$('msg').textContent=t;$('msg').className=e?'err':''};
 async function j(url,opt){const r=await fetch(url,opt);const t=await r.text();let v;try{v=JSON.parse(t)}catch{v={raw:t}}if(!r.ok)throw new Error(v.error||v.detail||t);return v}
 async function loadDomains(){try{const v=await j('/api/v1/public/system/domains');for(const sel of ['adomain']){$(sel).innerHTML=v.domains.map(d=>`<option value="${d.domain}">${d.domain}</option>`).join('')}}catch(e){msg(e.message,1)}}
-async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value})});$('out').textContent='Verification code sent to your email.';showOutbox()}catch(e){msg(e.message,1)}}
-async function checkCode(){try{await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,code:$('vcode').value})});msg('Email verified.',0)}catch(e){msg(e.message,1)}}
+async function sendCode(){try{await j('/api/v1/public/email-verify/send',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value})});$('out').textContent='Verification code sent to your email.';showOutbox()}catch(e){msg(e.message,1)}}
+async function checkCode(){try{await j('/api/v1/public/email-verify/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,code:$('vcode').value})});msg('Email verified.',0)}catch(e){msg(e.message,1)}}
 async function showOutbox(){try{const v=await j('/api/v1/public/outbox?email='+encodeURIComponent($('email').value));$('inbox').textContent=v.messages.map(m=>`#${m.id} ${m.subject}\n${m.body}`).join('\n---\n')}catch(e){$('inbox').textContent=e.message}}
 async function applyAddress(){try{const v=await j('/api/v1/public/apply-address',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:$('email').value,name:$('aname').value,agentname:$('agentname').value,domain:$('adomain').value,email_verify_code:$('vcode').value})});$('out').textContent=JSON.stringify(v,null,2);showOutbox()}catch(e){msg(e.message,1)}}
 loadDomains();
@@ -1567,6 +1691,35 @@ mod activation_status_tests {
         assert_eq!(parse_code_count(Some(&json!(u32::MAX as u64))), None);
     }
     #[test]
+    fn shared_code_extract_handles_quotes_and_ambiguity() {
+        let one = "sys-1111-2222-3333-4444-5555-6666";
+        let body = format!("my code is {one}\n\n> code: {one}");
+        assert_eq!(super::extract_activation_code(&body), Ok(one.to_string()));
+        assert_eq!(
+            super::extract_activation_code("no code here"),
+            Err(super::CodeExtractError::NoCode)
+        );
+        let two = format!("{one} addr-aaaa-bbbb-cccc-dddd-eeee-ffff");
+        assert_eq!(
+            super::extract_activation_code(&two),
+            Err(super::CodeExtractError::Multiple)
+        );
+    }
+
+    #[test]
+    fn shared_bare_domain_normalization() {
+        assert_eq!(
+            super::normalize_bare_domain("  Mail.Example.COM "),
+            Some("mail.example.com".to_string())
+        );
+        for bad in ["", "no-dot", "a@b.com", "two words.com"] {
+            assert!(super::normalize_bare_domain(bad).is_none(), "{bad}");
+        }
+        assert!(super::ActivationCodeKind::SystemShared.allowed_for_email_reply());
+        assert!(!super::ActivationCodeKind::Address.allowed_for_email_reply());
+    }
+
+    #[test]
     fn activation_code_format_is_unified() {
         use super::random_code;
         let re = regex::Regex::new(r"^(sys|addr)-([0-9a-f]{4}-){5}[0-9a-f]{4}$").unwrap();
@@ -1603,7 +1756,7 @@ mod activation_status_tests {
         assert!(addr
             .contains("gateway: http://gw; activation code: addr-1111-2222-3333-4444-5555-6666"));
         assert!(addr.contains(
-            "install the `agent-aimail` plugin with the current runtime's package manager"
+            "install the `agent-aimail` plugin using your platform's plugin install command"
         ));
         assert!(addr.contains("no reinstallation is needed"));
         assert!(!addr.contains("agent_aimail"));

@@ -310,6 +310,18 @@ impl SmtpRelay {
         {
             builder = builder.header(lettre::message::header::References::from(v.to_string()));
         }
+        // Reply-To (either casing): the activation mailbox lives here, so a
+        // reply to an activation mail comes back to `activate@{hostname}` even
+        // when the recipient answers instead of replying to all. An unparsable
+        // value is dropped rather than failing the send.
+        let reply_to = headers_val
+            .get("reply-to")
+            .or_else(|| headers_val.get("Reply-To"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        if let Some(mbox) = reply_to.and_then(crate::core::smtp::mime::parse_mailbox) {
+            builder = builder.reply_to(mbox);
+        }
         // ── Custom header passthrough (outbound-only whitelist) ──────────
         // X-AIMail-Agent / X-Agentmail-Agent / X-Board-Members / X-AIMail-AutoReply
         // are forwarded verbatim (same whitelist as mx_deliverer). All other

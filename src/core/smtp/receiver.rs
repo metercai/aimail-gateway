@@ -891,6 +891,7 @@ impl ConnectionHandler {
             if key.eq_ignore_ascii_case("to")
                 || key.eq_ignore_ascii_case("cc")
                 || key.eq_ignore_ascii_case("from")
+                || key.to_ascii_lowercase().starts_with("x-aimail-")
             {
                 let val = h.get_value();
                 if !val.is_empty() && !headers_map.contains_key(&key.to_lowercase()) {

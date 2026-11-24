@@ -33,6 +33,19 @@ async fn finalize_after_delivery(
     record: &EmailRecord,
     delivery_type: &str,
 ) {
+    // Activation confirmation records are deliberately retained in `emails`
+    // as the reply source; the existing expired-delivered cleanup removes
+    // them after the activation-code expiry header.
+    if record
+        .headers_parsed()
+        .get("x-aimail-activation-confirm")
+        .is_some()
+    {
+        if let Err(e) = email_factory.mark_delivered(&record.id).await {
+            error!(email_id = %record.id, %e, "Failed to mark activation confirmation delivered");
+        }
+        return;
+    }
     let direct_delivery = config
         .relay
         .smtp_server

@@ -66,6 +66,31 @@ impl Server {
         .await
     }
 
+    /// Seed `admin.domains` into `system_domains` under the bootstrap system.
+    /// Existing rows are never overwritten or deleted; this is a bootstrap
+    /// convenience layered on top of the runtime domain API.
+    pub async fn seed_config_domains(&self, system_id: &str) -> AppResult<usize> {
+        let mut inserted = 0usize;
+        for raw in &self.config.admin.domains {
+            let Some(domain) = aimail_base::core::api::activation::normalize_bare_domain(raw)
+            else {
+                continue;
+            };
+            // Config only carries the bare domain; id/webhook/ownership are
+            // managed through the runtime domain API after the first seed.
+            let id = format!("cfg-{domain}");
+            if self
+                .db
+                .seed_system_domain_if_absent(&id, system_id, &domain, None, None)
+                .await?
+            {
+                inserted += 1;
+                info!(domain = %domain, system_id = %system_id, "Config domain seeded");
+            }
+        }
+        Ok(inserted)
+    }
+
     /// At startup, seal the DB's historical plaintext credential material in place (idempotent).
     pub async fn reseal_credentials(&self) -> AppResult<(usize, usize)> {
         self.db.reseal_api_keys().await

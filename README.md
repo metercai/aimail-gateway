@@ -153,6 +153,7 @@ curl -sf http://127.0.0.1:8080/health
 | `timeout_secs` | `[webhook]` | Webhook push timeout (seconds) |
 | `max_attempts` | `[retry]` | Max delivery retry attempts |
 | `manager_default` | `[admin]` | Default manager (safety officer) for agent address registration when neither the request nor the system provides one; empty by default |
+| `domains` | `[admin]` | Bootstrap **bare domain** list (e.g. `["mail.example.com"]`). Each entry is seeded into `system_domains` at startup when absent; create/update/deactivate and every other attribute (webhook, ownership) go through the domain API. Removing an entry never deletes a row |
 | `encryption` | `[storage]` | SQLCipher page-level encryption, default `false`. Requires a binary built with `--features sqlcipher` (the default build has none and refuses `true`). Two-step: start once with `false` (the admin key is minted), then set `true` — the database migrates in place on the next start |
 
 ### Example config.toml
@@ -216,6 +217,7 @@ path = "./data"
 [admin]
 # email = "admin@yourdomain.com"
 # manager_default = "admin@yourdomain.com"
+# domains = ["mail.example.com"]          # bare domains only; seeded when absent
 
 [board]
 # heartbeat_stale_seconds = 14400

@@ -816,6 +816,43 @@ impl Database {
         Ok(record)
     }
 
+    /// Seed a config-provided bare domain only when absent. Never updates an
+    /// existing row: the runtime domain API remains authoritative.
+    pub async fn seed_system_domain_if_absent(
+        &self,
+        id: &str,
+        system_id: &str,
+        domain: &str,
+        webhook_url: Option<&str>,
+        webhook_secret: Option<&str>,
+    ) -> AppResult<bool> {
+        let (id, system_id, domain) = (id.to_string(), system_id.to_string(), domain.to_string());
+        let (webhook_url, webhook_secret) = (
+            webhook_url.map(String::from),
+            webhook_secret.map(String::from),
+        );
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let domain_for_cache = domain.clone();
+        let inserted = self
+            .call(move |conn| {
+                let n = conn.execute(
+                    "INSERT INTO system_domains
+                       (id, system_id, domain_addr, webhook_url, webhook_secret, is_active, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
+                     ON CONFLICT(domain_addr) DO NOTHING",
+                    params![id, system_id, domain, webhook_url, webhook_secret, now],
+                )?;
+                Ok(n > 0)
+            })
+            .await?;
+        if inserted {
+            if let Ok(mut cache) = self.domain_cache.write() {
+                cache.remove(&domain_for_cache);
+            }
+        }
+        Ok(inserted)
+    }
+
     pub async fn get_system_domain(&self, id: &str) -> AppResult<Option<SystemDomainRecord>> {
         let id = id.to_string();
         self.call(move |conn| {
@@ -3252,6 +3289,102 @@ mod tests {
     // born `readying` and the tick only ever reads `ready`, so the race is
     // structurally impossible. These tests pin each invariant down.
 
+    /// Activation-confirmation rows (the Cc copies that make reply-activation
+    /// work) are retained in `emails` past the normal NDR window and removed
+    /// only once the activation code itself expires — the cleanup batch reads
+    /// `x-aimail-activation-expires-at` in preference to `last_sent_at`.
+    #[tokio::test]
+    async fn delivered_expired_prefers_activation_expiry_header() {
+        let db = temp_db();
+        let confirm = |expires: &str| {
+            serde_json::json!({
+                "x-aimail-activation-confirm": "1",
+                "x-aimail-activation-expires-at": expires,
+            })
+            .to_string()
+        };
+        let future = confirm("2099-01-01T00:00:00.000Z");
+        let past = confirm("2000-01-01T00:00:00.000Z");
+        db.insert_email(
+            "exp-plain",
+            "sys1",
+            "inbound",
+            "a@x.com",
+            "{}",
+            "s",
+            "b",
+            None,
+            None,
+            None,
+            3,
+        )
+        .await
+        .unwrap();
+        db.insert_email(
+            "exp-live",
+            "sys1",
+            "inbound",
+            "no-reply@x.com",
+            "{}",
+            "s",
+            "b",
+            None,
+            None,
+            Some(&future),
+            3,
+        )
+        .await
+        .unwrap();
+        db.insert_email(
+            "exp-stale",
+            "sys1",
+            "inbound",
+            "no-reply@x.com",
+            "{}",
+            "s",
+            "b",
+            None,
+            None,
+            Some(&past),
+            3,
+        )
+        .await
+        .unwrap();
+        for id in ["exp-plain", "exp-live", "exp-stale"] {
+            db.update_email_delivered(id).await.unwrap();
+        }
+
+        // A cutoff one hour ahead expires the plain row (last_sent_at ≈ now)
+        // and the already-expired confirmation — but never the live one.
+        let cutoff = (chrono::Utc::now() + chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let expired: Vec<String> = db
+            .get_delivered_expired_before(&cutoff, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(expired.contains(&"exp-plain".to_string()), "{expired:?}");
+        assert!(expired.contains(&"exp-stale".to_string()), "{expired:?}");
+        assert!(
+            !expired.contains(&"exp-live".to_string()),
+            "a live activation confirmation must survive the NDR window: {expired:?}"
+        );
+
+        // Once the code expires, the same row is collected too.
+        let after = (chrono::Utc::now() + chrono::Duration::days(365 * 200))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let later: Vec<String> = db
+            .get_delivered_expired_before(&after, 50)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert!(later.contains(&"exp-live".to_string()), "{later:?}");
+    }
+
     #[tokio::test]
     async fn born_state_is_readying() {
         // Invariant 1: every insert lands in `readying`, never `ready`.
@@ -4044,5 +4177,30 @@ mod tests {
         assert_eq!(v.len(), 2, "50 notes of one key collapse to one entry");
         assert!(v.contains(&7) && v.contains(&8));
         assert!(t.drain().is_empty(), "drain clears the set");
+    }
+    #[tokio::test]
+    async fn config_domain_seed_is_insert_only() {
+        let db = temp_db();
+        assert!(db
+            .seed_system_domain_if_absent("cfg-a.example", "sys", "a.example", None, None)
+            .await
+            .unwrap());
+        // Second seed must not overwrite the existing row.
+        assert!(!db
+            .seed_system_domain_if_absent(
+                "cfg-a.example",
+                "sys",
+                "a.example",
+                Some("http://127.0.0.1/hook"),
+                None,
+            )
+            .await
+            .unwrap());
+        let rec = db
+            .get_system_domain_by_name("a.example")
+            .await
+            .unwrap()
+            .expect("seeded row");
+        assert_eq!(rec.webhook_url, None, "existing row must be untouched");
     }
 }

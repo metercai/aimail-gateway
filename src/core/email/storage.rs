@@ -688,7 +688,10 @@ impl Database {
         let (cutoff, limit) = (cutoff.to_string(), limit);
         self.call(move |conn| {
             let mut stmt = conn.prepare(
-                &format!("{} WHERE status = 'delivered' AND last_sent_at < ?1 ORDER BY last_sent_at ASC LIMIT ?2", EMAIL_SELECT),
+                &format!(
+                    "{} WHERE status = 'delivered' AND COALESCE(json_extract(headers, '$.x-aimail-activation-expires-at'), last_sent_at) < ?1 ORDER BY last_sent_at ASC LIMIT ?2",
+                    EMAIL_SELECT
+                ),
             )?;
             let rows = stmt.query_map(params![cutoff, limit], email_row)?;
             let mut results = Vec::new();

@@ -40,6 +40,31 @@ impl Header for ContentTransferEncodingRaw {
     }
 }
 
+/// Parse a single `user@domain` (optionally `Name <user@domain>`) into a
+/// lettre mailbox. Used for the record-level `reply-to` header: unlike the
+/// passthrough whitelist it is a real RFC 5322 field, so it goes through the
+/// typed builder rather than a raw header. Unparsable values are dropped by
+/// the caller (never a send failure).
+pub(crate) fn parse_mailbox(raw: &str) -> Option<lettre::message::Mailbox> {
+    let s = raw.trim();
+    let (name, addr) = match (s.find('<'), s.find('>')) {
+        (Some(a), Some(b)) if b > a + 1 => {
+            let n = s[..a].trim().trim_matches('"').trim();
+            (
+                Some(n.to_string()).filter(|n| !n.is_empty()),
+                s[a + 1..b].trim(),
+            )
+        }
+        _ => (None, s),
+    };
+    let (user, domain) = addr.split_once('@')?;
+    if user.is_empty() || !domain.contains('.') || addr.contains(char::is_whitespace) {
+        return None;
+    }
+    let address = Address::new(user, domain).ok()?;
+    Some(lettre::message::Mailbox::new(name, address))
+}
+
 /// Generic outbound passthrough header (X-AIMail-Agent,
 /// X-Board-Members, X-AIMail-AutoReply). Built from a header name +
 /// value pair; used by mx_deliverer and relay sender so custom headers
@@ -114,4 +139,37 @@ pub(crate) fn build_with_attachments(
 pub(crate) fn parse_address(addr: &str) -> AppResult<Address> {
     addr.parse::<Address>()
         .map_err(|e| AppError::Validation(format!("invalid email address '{}': {}", addr, e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_mailbox;
+
+    #[test]
+    fn bare_address_parses() {
+        let mb = parse_mailbox("activate@mail.example.com").expect("bare address");
+        assert_eq!(mb.email.to_string(), "activate@mail.example.com");
+        assert!(mb.name.is_none());
+    }
+
+    #[test]
+    fn name_form_parses() {
+        let mb = parse_mailbox("AIMail Activation <activate@mail.example.com>").unwrap();
+        assert_eq!(mb.email.to_string(), "activate@mail.example.com");
+        assert_eq!(mb.name.as_deref(), Some("AIMail Activation"));
+    }
+
+    #[test]
+    fn invalid_values_are_rejected() {
+        for bad in [
+            "",
+            "no-at-sign",
+            "user@",
+            "@domain.test",
+            "a b@c.test",
+            "<>",
+        ] {
+            assert!(parse_mailbox(bad).is_none(), "must reject {bad:?}");
+        }
+    }
 }

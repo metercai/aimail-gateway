@@ -373,6 +373,13 @@ pub struct AdminConfig {
     /// address without a manager row.
     #[serde(default)]
     pub manager_default: Option<String>,
+    /// Bootstrap domain list — bare domain names only (e.g. "mail.example.com").
+    /// Each entry is seeded into `system_domains` at startup when absent; the
+    /// runtime domain API remains authoritative for create/update/deactivate,
+    /// and every other domain attribute (webhook, ownership, …) is set through
+    /// that API. Removing an entry here never deletes a DB row.
+    #[serde(default)]
+    pub domains: Vec<String>,
 }
 
 // ── Load: Defaults → TOML → Env Override ─────────────────────────────
@@ -446,6 +453,21 @@ impl Config {
         }
         if self.api.signature_window_secs == 0 {
             errors.push("api.signature_window_secs must be > 0".to_string());
+        }
+
+        // ── Admin bootstrap domains ──────────────────────────────
+        let mut seen_domains = std::collections::HashSet::new();
+        for (i, raw) in self.admin.domains.iter().enumerate() {
+            match crate::core::api::activation::normalize_bare_domain(raw) {
+                Some(norm) => {
+                    if !seen_domains.insert(norm.clone()) {
+                        errors.push(format!("admin.domains[{i}] '{norm}' is duplicated"));
+                    }
+                }
+                None => errors.push(format!(
+                    "admin.domains[{i}] '{raw}' must be a bare domain (contains '.', no '@' or spaces)"
+                )),
+            }
         }
 
         // ── Required fields ──────────────────────────────────────
@@ -794,5 +816,51 @@ delivery_timeout_secs = 0
             ..SmtpConfig::default()
         };
         assert_eq!(c.parsed_bind().1, 25);
+    }
+    #[test]
+    fn admin_domains_parse_and_validate() {
+        let cfg: Config = toml::from_str(
+            r#"
+[storage]
+path = "/tmp/x.db"
+[smtp]
+hostname = "test.local"
+[admin]
+domains = ["Mail-A.Example.COM", "mail-b.example.com"]
+"#,
+        )
+        .expect("Config parse");
+        cfg.validate().expect("two distinct domains are valid");
+        assert_eq!(cfg.admin.domains.len(), 2);
+    }
+
+    #[test]
+    fn admin_domains_reject_duplicate_and_non_bare() {
+        let cfg: Config = toml::from_str(
+            r#"
+[storage]
+path = "/tmp/x.db"
+[smtp]
+hostname = "test.local"
+[admin]
+domains = ["a.example.com", "A.EXAMPLE.COM"]
+"#,
+        )
+        .expect("Config parse");
+        let err = cfg.validate().expect_err("duplicate must fail");
+        assert!(format!("{err}").contains("duplicated"));
+
+        let cfg2: Config = toml::from_str(
+            r#"
+[storage]
+path = "/tmp/x.db"
+[smtp]
+hostname = "test.local"
+[admin]
+domains = ["not-a-domain"]
+"#,
+        )
+        .expect("Config parse");
+        assert!(cfg2.validate().is_err());
     }
 }
