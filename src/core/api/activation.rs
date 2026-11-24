@@ -20,6 +20,28 @@ use crate::core::api::auth::require_scope_any;
 use crate::core::api::types::{ErrorResponse, HttpState};
 use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 
+/// Canonical activation prompt rendered into both base and advanced address
+/// activation emails. Keep this the single source of truth: advanced imports
+/// it instead of carrying a second copy of the wording.
+pub fn address_activation_prompt(address: &str, gateway_url: &str, code: &str) -> String {
+    format!(
+        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the `agent-aimail` plugin with the current runtime's package manager, then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
+    )
+}
+
+/// Generate agent key material shared by base and advanced activation paths.
+/// The stored hash goes through `seal::store_hash`, matching every other key
+/// creation path; verification accepts sealed and historical plaintext forms.
+pub fn generate_key_material() -> (String, String, String) {
+    use rand::Rng;
+    let raw_bytes: [u8; 32] = rand::thread_rng().gen();
+    let raw_key = hex::encode(raw_bytes);
+    let stored_hash =
+        crate::core::api::seal::store_hash(&crate::core::api::auth::sha256_hex(&raw_key));
+    let prefix = raw_key[..8].to_string();
+    (raw_key, stored_hash, prefix)
+}
+
 // ── Address activation helpers ──
 
 /// Generate address activation codes. Writes into activation_codes table.
@@ -89,15 +111,7 @@ pub async fn activate_address_code(
         ));
     }
 
-    let (raw_key, key_hash, key_prefix) = {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let raw_bytes: [u8; 32] = rng.gen();
-        let raw_key = hex::encode(raw_bytes);
-        let hash = crate::core::api::auth::sha256_hex(&raw_key);
-        let prefix = raw_key[..8].to_string();
-        (raw_key, hash, prefix)
-    };
+    let (raw_key, key_hash, key_prefix) = generate_key_material();
 
     // Address activation codes always produce an agent-scope key.
     let actual_scopes: Vec<String> = vec!["agent".to_string()];
@@ -638,15 +652,7 @@ pub async fn activate_system_handler(
         ));
     }
 
-    let (raw_key, key_hash, key_prefix) = {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let raw_bytes: [u8; 32] = rng.gen();
-        let raw_key = hex::encode(raw_bytes);
-        let hash = crate::core::api::auth::sha256_hex(&raw_key);
-        let prefix = raw_key[..8].to_string();
-        (raw_key, hash, prefix)
-    };
+    let (raw_key, key_hash, key_prefix) = generate_key_material();
     state
         .factories
         .email
@@ -1122,8 +1128,9 @@ fn address_activation_email(
     } else {
         format!("Hello {name},")
     };
+    let prompt = address_activation_prompt(address, gateway_url, code);
     format!(
-        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\nActivate and bind my AIMail mailbox address {address} with activation code {code} at gateway {gateway_url} using `aimail_address`. If `aimail_address` is unavailable or not registered, install the `agent-aimail` plugin SDK first: from PyPI via pip for Python, or from npm for Node.js. Then retry `aimail_address` with the same parameters.\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
+        "{greeting}\n\nAn AIMail mailbox is ready for your agent:\n\n  address: {address}\n\nPlease activate it within 24 hours.\n\nIf your agent does not have aimail_address, install or enable the AIMail plugin through your host's normal plugin/extension mechanism (not the aimail install CLI).\n\nCopy the message below into your agent's conversation and let the agent bind the address:\n\n{prompt}\n\nThis code is sent only once - please keep this email.\nPlease do not reply to this email - it is sent automatically.\n\nBest regards,\nAIMail Team\n"
     )
 }
 
@@ -1590,9 +1597,15 @@ mod activation_status_tests {
             "http://gw",
         );
         assert!(addr.contains("within 24 hours"));
-        assert!(addr.contains("Activate and bind my AIMail mailbox address alice@test.local"));
-        assert!(addr.contains("using `aimail_address`"));
-        assert!(addr.contains("`agent-aimail` plugin SDK"));
+        assert!(addr.contains(
+            "Use `aimail_address` to activate and bind the dedicated AIMail mailbox alice@test.local for this agent"
+        ));
+        assert!(addr
+            .contains("gateway: http://gw; activation code: addr-1111-2222-3333-4444-5555-6666"));
+        assert!(addr.contains(
+            "install the `agent-aimail` plugin with the current runtime's package manager"
+        ));
+        assert!(addr.contains("no reinstallation is needed"));
         assert!(!addr.contains("agent_aimail"));
         assert!(!addr.contains("My safety officer"));
         assert!(
