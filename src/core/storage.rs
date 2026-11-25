@@ -408,6 +408,17 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_domain_addr_meta_system ON domain_addr_meta(system_id);
 
+        -- Address ↔ anchor identifier (2026-11-25). The anchor is the AGENT-side binding anchor
+        -- (dsh: workspace path, pi: cwd, openclaw: agent workspace) and is therefore NOT part of the
+        -- address model: the client hashes it together with the address, registers the hash at
+        -- activation, and sends it on every pull. The gateway only stores/compares an opaque token,
+        -- so a new host type needs no gateway change — only its own anchor string.
+        CREATE TABLE IF NOT EXISTS address_anchor (
+            email_address TEXT PRIMARY KEY,
+            anchor_id     TEXT NOT NULL,
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS whitelists (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             system_id  TEXT NOT NULL,
@@ -1734,6 +1745,64 @@ impl Database {
             let mut stmt = conn.prepare(
                 "SELECT address, system_id FROM agent_system_addresses
                  WHERE agent_system_id = ?1 ORDER BY address",
+            )?;
+            let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+    /// Record the anchor identifier for one address (opaque client-side hash).
+    ///
+    /// Overwriting is intentional: a legitimate re-anchor (contract §13.3 move) is an explicit,
+    /// authenticated action by the key holder, and this call is how the gateway learns the new value.
+    pub async fn set_address_anchor(&self, email: &str, anchor_id: &str) -> AppResult<()> {
+        let email = email.to_lowercase();
+        let anchor_id = anchor_id.to_string();
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO address_anchor (email_address, anchor_id, updated_at)
+                 VALUES (?1, ?2, datetime('now'))
+                 ON CONFLICT(email_address) DO UPDATE SET
+                    anchor_id = excluded.anchor_id,
+                    updated_at = excluded.updated_at",
+                params![email, anchor_id],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// The anchor identifier recorded for one address (`None` = never registered).
+    pub async fn get_address_anchor(&self, email: &str) -> AppResult<Option<String>> {
+        let email = email.to_lowercase();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT anchor_id FROM address_anchor WHERE email_address = ?1",
+                params![email],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    /// Anchor identifiers for every address of an AgentSystemId (only the ones registered).
+    pub async fn list_agent_system_anchors(
+        &self,
+        agent_system_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        let id = agent_system_id.trim().to_string();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT a.address, m.anchor_id
+                 FROM agent_system_addresses a
+                 JOIN address_anchor m ON m.email_address = lower(a.address)
+                 WHERE a.agent_system_id = ?1 ORDER BY a.address",
             )?;
             let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
             let mut out = Vec::new();
@@ -4202,5 +4271,68 @@ mod tests {
             .unwrap()
             .expect("seeded row");
         assert_eq!(rec.webhook_url, None, "existing row must be untouched");
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    /// Unique scratch path under the OS temp dir (no dev-dependency needed).
+    fn temp_db() -> Database {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("aimail-gw-anchor-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let db = Database::open(dir.join("test.db"), 1, None).expect("open db");
+        let _ = dir; // kept for the process lifetime; the OS temp dir is cleaned by the CI runner
+        db
+    }
+
+    #[tokio::test]
+    async fn anchor_round_trip_per_address() {
+        let db = temp_db();
+        assert_eq!(db.get_address_anchor("A@Example.com").await.unwrap(), None);
+        let hash = "a".repeat(64);
+        db.set_address_anchor("A@Example.com", &hash).await.unwrap();
+        // case-insensitive address, exact hash
+        assert_eq!(
+            db.get_address_anchor("a@example.com").await.unwrap(),
+            Some(hash.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn re_anchor_overwrites_instead_of_duplicating() {
+        let db = temp_db();
+        db.set_address_anchor("a@example.com", &"1".repeat(64))
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"2".repeat(64))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_address_anchor("a@example.com").await.unwrap(),
+            Some("2".repeat(64))
+        );
+    }
+
+    #[tokio::test]
+    async fn list_for_agent_system_only_returns_registered_addresses() {
+        let db = temp_db();
+        db.bind_agent_system_address("asid_x", "a@example.com", "sys-1")
+            .await
+            .unwrap();
+        db.bind_agent_system_address("asid_x", "b@example.com", "sys-1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"a".repeat(64))
+            .await
+            .unwrap();
+        let got = db.list_agent_system_anchors("asid_x").await.unwrap();
+        assert_eq!(got.len(), 1, "only the address that registered an anchor: {got:?}");
+        assert_eq!(got[0].0, "a@example.com");
+        assert_eq!(got[0].1, "a".repeat(64));
     }
 }

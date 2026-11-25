@@ -3409,6 +3409,76 @@ async fn require_agent_system_owner(
     Ok(())
 }
 
+/// Parse the client's anchor claims from `X-Aimail-Anchor: <email>;<sha256>` headers.
+///
+/// The anchor itself is an AGENT-side concept (dsh: workspace path, pi: cwd, openclaw: agent
+/// workspace), so the gateway never learns or interprets it — it only compares the opaque hash the
+/// client computed at activation with the one the request presents now. Multiple addresses ride in
+/// multiple header values because one aggregate pull covers a whole AgentSystemId.
+fn parse_anchor_claims(headers: &axum::http::HeaderMap) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for value in headers.get_all("x-aimail-anchor").iter() {
+        let Ok(raw) = value.to_str() else { continue };
+        for part in raw.split(',') {
+            let mut it = part.splitn(2, ';');
+            let email = it.next().unwrap_or("").trim().to_lowercase();
+            let hash = it.next().unwrap_or("").trim().to_lowercase();
+            if email.contains('@') && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                out.insert(email, hash);
+            }
+        }
+    }
+    out
+}
+
+/// Contract §7.1 (anchor binding): every address of this AgentSystemId that has a recorded anchor
+/// MUST present the same anchor hash on every pull.
+///
+/// This is what makes "edit the local binding file and the mailbox moves" impossible: the anchor is
+/// registered at activation, so a client that re-points its address locally presents a different
+/// hash and is refused here — before any mail is handed out. Addresses without a recorded anchor
+/// (never registered, e.g. a rotated key from an older client) are not blocked, so the check can be
+/// rolled out per host without a flag day.
+async fn enforce_anchor_binding(
+    db: &crate::core::storage::Database,
+    agent_system_id: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let recorded = db
+        .list_agent_system_anchors(agent_system_id)
+        .await
+        .unwrap_or_default();
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    let claimed = parse_anchor_claims(headers);
+    let mut bad: Vec<String> = Vec::new();
+    for (address, want) in recorded {
+        let got = claimed
+            .get(&address.to_lowercase())
+            .map(|v| v.as_str())
+            .unwrap_or("");
+        if !got.eq_ignore_ascii_case(&want) {
+            bad.push(address);
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    bad.sort();
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "anchor_mismatch".to_string(),
+            detail: Some(format!(
+                "the anchor registered at activation does not match this request for: {}. \
+                 The anchor is fixed by activation — re-activate to move an address.",
+                bad.join(", ")
+            )),
+        }),
+    ))
+}
+
 async fn agent_system_stream(
     state: axum::extract::State<HttpState>,
     axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
@@ -3418,6 +3488,7 @@ async fn agent_system_stream(
     let agent_system_id = agent_system_id_from_headers(&headers)?;
     let db = &state.factories.email.env_factory.db;
     require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    enforce_anchor_binding(db, &agent_system_id, &headers).await?;
     sse_response_scoped(
         state,
         api_key,
@@ -3439,6 +3510,7 @@ async fn list_agent_system_pending(
     let agent_system_id = agent_system_id_from_headers(&headers)?;
     let db = &state.factories.email.env_factory.db;
     require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    enforce_anchor_binding(db, &agent_system_id, &headers).await?;
     // One consumer per (AgentSystemId, Gateway): the aggregate stream and the
     // aggregate long-poll share the same synthetic slot, so a second client
     // cannot double-deliver the same ASID mailbox.
@@ -3490,6 +3562,7 @@ async fn ack_agent_system_pending(
     let agent_system_id = agent_system_id_from_headers(&headers)?;
     let db = &state.factories.email.env_factory.db;
     require_agent_system_owner(db, &api_key, &agent_system_id).await?;
+    enforce_anchor_binding(db, &agent_system_id, &headers).await?;
     let count = db
         .ack_pending_for_agent_system(&agent_system_id, &req.ids)
         .await
@@ -5869,5 +5942,56 @@ mod tests {
             "409 arm must have synced the manager whitelist, got {:?}",
             wl
         );
+    }
+}
+
+#[cfg(test)]
+mod anchor_header_tests {
+    use super::parse_anchor_claims;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn hash(c: char) -> String {
+        std::iter::repeat(c).take(64).collect()
+    }
+
+    #[test]
+    fn parses_one_claim_per_header_value() {
+        let mut h = HeaderMap::new();
+        h.append(
+            "x-aimail-anchor",
+            HeaderValue::from_str(&format!("a@example.com;{}", hash('a'))).unwrap(),
+        );
+        h.append(
+            "x-aimail-anchor",
+            HeaderValue::from_str(&format!("B@Example.com;{}", hash('b'))).unwrap(),
+        );
+        let got = parse_anchor_claims(&h);
+        assert_eq!(got.get("a@example.com"), Some(&hash('a')));
+        assert_eq!(got.get("b@example.com"), Some(&hash('b')), "address is normalized");
+    }
+
+    #[test]
+    fn parses_comma_separated_claims_in_one_value() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-aimail-anchor",
+            HeaderValue::from_str(&format!(
+                "a@example.com;{},b@example.com;{}",
+                hash('a'),
+                hash('b')
+            ))
+            .unwrap(),
+        );
+        let got = parse_anchor_claims(&h);
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn junk_is_ignored_not_trusted() {
+        let mut h = HeaderMap::new();
+        h.append("x-aimail-anchor", HeaderValue::from_static("nonsense"));
+        h.append("x-aimail-anchor", HeaderValue::from_static("a@example.com;short"));
+        h.append("x-aimail-anchor", HeaderValue::from_static("not-an-address;")); // no hash
+        assert!(parse_anchor_claims(&h).is_empty());
     }
 }

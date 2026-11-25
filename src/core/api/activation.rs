@@ -843,6 +843,25 @@ pub async fn activate_address_code_compat_handler(
         .unwrap_or("")
         .trim()
         .to_lowercase();
+    // Anchor identifier (2026-11-25): the client hashes its OWN binding anchor together with the
+    // address (dsh: workspace path, pi: cwd, openclaw: agent workspace) and registers that opaque
+    // token here. Every pull must present it again, so re-pointing a mailbox by editing local
+    // config stops working — the gateway keeps the anchor the activation was made against.
+    let anchor_id = body
+        .get("anchor_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    if !anchor_id.is_empty()
+        && (anchor_id.len() != 64 || !anchor_id.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(activation_error(
+            StatusCode::BAD_REQUEST,
+            "anchor_id must be a 64-char hex sha256",
+            None,
+        ));
+    }
     if code.is_empty() || !email.contains('@') {
         return Err(activation_error(
             StatusCode::BAD_REQUEST,
@@ -934,6 +953,22 @@ pub async fn activate_address_code_compat_handler(
         .flatten()
         .map(|r| r.manager_address)
         .unwrap_or_default();
+    if !anchor_id.is_empty() {
+        state
+            .factories
+            .email
+            .env_factory
+            .db
+            .set_address_anchor(&email, &anchor_id)
+            .await
+            .map_err(|e| {
+                activation_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "database error",
+                    Some(e.to_string()),
+                )
+            })?;
+    }
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({
@@ -946,6 +981,9 @@ pub async fn activate_address_code_compat_handler(
             "expires_at": expires_at,
             "agent_system_id": agent_system_id,
             "manager_address": manager_address,
+            // Echo what the gateway now holds, so a client can confirm the registration instead of
+            // assuming it (and so a re-anchor is observable in the response).
+            "anchor_id": anchor_id,
         })),
     ))
 }
