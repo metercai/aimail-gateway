@@ -3415,7 +3415,9 @@ async fn require_agent_system_owner(
 /// workspace), so the gateway never learns or interprets it — it only compares the opaque hash the
 /// client computed at activation with the one the request presents now. Multiple addresses ride in
 /// multiple header values because one aggregate pull covers a whole AgentSystemId.
-fn parse_anchor_claims(headers: &axum::http::HeaderMap) -> std::collections::HashMap<String, String> {
+fn parse_anchor_claims(
+    headers: &axum::http::HeaderMap,
+) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     for value in headers.get_all("x-aimail-anchor").iter() {
         let Ok(raw) = value.to_str() else { continue };
@@ -3423,7 +3425,10 @@ fn parse_anchor_claims(headers: &axum::http::HeaderMap) -> std::collections::Has
             let mut it = part.splitn(2, ';');
             let email = it.next().unwrap_or("").trim().to_lowercase();
             let hash = it.next().unwrap_or("").trim().to_lowercase();
-            if email.contains('@') && hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            if email.contains('@')
+                && hash.len() == 64
+                && hash.chars().all(|c| c.is_ascii_hexdigit())
+            {
                 out.insert(email, hash);
             }
         }
@@ -5967,7 +5972,11 @@ mod anchor_header_tests {
         );
         let got = parse_anchor_claims(&h);
         assert_eq!(got.get("a@example.com"), Some(&hash('a')));
-        assert_eq!(got.get("b@example.com"), Some(&hash('b')), "address is normalized");
+        assert_eq!(
+            got.get("b@example.com"),
+            Some(&hash('b')),
+            "address is normalized"
+        );
     }
 
     #[test]
@@ -5990,8 +5999,14 @@ mod anchor_header_tests {
     fn junk_is_ignored_not_trusted() {
         let mut h = HeaderMap::new();
         h.append("x-aimail-anchor", HeaderValue::from_static("nonsense"));
-        h.append("x-aimail-anchor", HeaderValue::from_static("a@example.com;short"));
-        h.append("x-aimail-anchor", HeaderValue::from_static("not-an-address;")); // no hash
+        h.append(
+            "x-aimail-anchor",
+            HeaderValue::from_static("a@example.com;short"),
+        );
+        h.append(
+            "x-aimail-anchor",
+            HeaderValue::from_static("not-an-address;"),
+        ); // no hash
         assert!(parse_anchor_claims(&h).is_empty());
     }
 }

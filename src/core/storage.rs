@@ -4283,7 +4283,8 @@ mod anchor_tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("aimail-gw-anchor-{}-{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("aimail-gw-anchor-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let db = Database::open(dir.join("test.db"), 1, None).expect("open db");
         let _ = dir; // kept for the process lifetime; the OS temp dir is cleaned by the CI runner
@@ -4331,7 +4332,11 @@ mod anchor_tests {
             .await
             .unwrap();
         let got = db.list_agent_system_anchors("asid_x").await.unwrap();
-        assert_eq!(got.len(), 1, "only the address that registered an anchor: {got:?}");
+        assert_eq!(
+            got.len(),
+            1,
+            "only the address that registered an anchor: {got:?}"
+        );
         assert_eq!(got[0].0, "a@example.com");
         assert_eq!(got[0].1, "a".repeat(64));
     }
