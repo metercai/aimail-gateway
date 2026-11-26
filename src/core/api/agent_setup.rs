@@ -553,10 +553,18 @@ SEEN=''
 say() { printf '%s\n' "$*" >&2; }
 note() { printf 'aimail-bootstrap: %s\n' "$*" >&2; }
 fail() {
+  record fail "-" "code=$1"
   printf 'AIMAIL_BOOTSTRAP fail host=%s code=%s detail=%s\n' "${HOST:-unknown}" "$1" "$2"
   exit 1
 }
+# A durable trace: some hosts swallow a tool's stdout, so "the script ran" must be provable
+# without parsing the agent's words. This line is the evidence (also handy in production).
+record() {
+  _line="status=$1 host=$HOST kind=${KIND:-unknown} version=$2 tool=${3:--} at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo -)"
+  printf '%s\n' "$_line" >> "${AIMAIL_BOOTSTRAP_LOG:-$HOME/.aimail/bootstrap.log}" 2>/dev/null || true
+}
 ok() {
+  record ok "$1" "${2:--}"
   printf 'AIMAIL_BOOTSTRAP ok host=%s kind=%s version=%s tool=%s\n' \
     "$HOST" "${KIND:-unknown}" "$1" "${2:--}"
 }
@@ -728,6 +736,12 @@ $Host_   = if ($env:AIMAIL_HOST) { $env:AIMAIL_HOST } else { '@@HOST@@' }
 $SdkUrl  = $env:AIMAIL_SDK_URL
 
 function Note($m) { Write-Host "aimail-bootstrap: $m" }
+function Record($status, $ver, $tool) {
+  $dir = if ($env:AIMAIL_BOOTSTRAP_LOG) { Split-Path -Parent $env:AIMAIL_BOOTSTRAP_LOG } else { Join-Path $HOME '.aimail' }
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $f = if ($env:AIMAIL_BOOTSTRAP_LOG) { $env:AIMAIL_BOOTSTRAP_LOG } else { Join-Path $dir 'bootstrap.log' }
+  "status=$status host=$Host_ kind=$Kind version=$ver tool=$tool at=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))" | Add-Content -Path $f
+}
 function Fail($code, $detail) {
   Write-Output "AIMAIL_BOOTSTRAP fail host=$($Host_) code=$code detail=$detail"
   exit 1
@@ -768,6 +782,7 @@ if ($Kind -eq 'node') {
   }
   if (-not (Test-Path $pkgJson)) { Fail 'verify_failed' "package not found under $root" }
   $ver = (Get-Content $pkgJson -Raw | ConvertFrom-Json).version
+  Record 'ok' $ver "$root/agent-aimail"
   Write-Output "AIMAIL_BOOTSTRAP ok host=$Host_ kind=node version=$ver tool=$root/agent-aimail"
   exit 0
 }
@@ -790,6 +805,7 @@ if ($LASTEXITCODE -ne 0) { Fail 'install_failed' "pip install $Spec failed" }
 
 $ver = (& $pyExe @pyArgs -c 'import importlib.metadata as m; print(m.version("agent-aimail"))') 2>$null
 if (-not $ver) { Fail 'verify_failed' "agent-aimail is not importable from $pyExe" }
+Record 'ok' $ver $pyExe
 Write-Output "AIMAIL_BOOTSTRAP ok host=$Host_ kind=python version=$ver tool=$pyExe"
 exit 0
 "#;
@@ -949,6 +965,7 @@ mod tests {
             "AIMAIL_SDK_URL",    // offline artifact
             "importlib.metadata", // fresh-process verification
             "AIMAIL_BOOTSTRAP ok", "AIMAIL_BOOTSTRAP fail",
+            "aimail/bootstrap.log", // durable trace: stdout is not always captured
         ] {
             assert!(sh.contains(line), "posix script must contain {line:?}");
         }
