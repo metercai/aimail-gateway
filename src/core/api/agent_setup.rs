@@ -99,6 +99,10 @@ const ALIASES: &[(&str, &str)] = &[
     ("deer-flow", "deerflow"),
 ];
 
+/// The one command that tells the agent which branch it is on, without it having to know anything:
+/// a POSIX shell prints the token, everything else fails.
+const PROBE: &str = "sh -c 'echo sh-ok'";
+
 const RECIPES: &[Recipe] = &[
     Recipe {
         host: "dsh",
@@ -218,12 +222,16 @@ fn render(recipe: &Recipe, gateway: &str) -> Value {
         "host_specific_install": recipe.install,
         "bootstrap_url": bootstrap,
         "bootstrap": format!("curl -fsSL '{bootstrap}' | sh"),
+        "bootstrap_wget": format!("wget -qO- '{bootstrap}' | sh"),
         "bootstrap_ps1": format!("iwr -useb '{bootstrap}?shell=ps1' | iex"),
         "bootstrap_python": format!(
             "python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh"
         ),
+        // Probe, then branch -- never "choose the platform yourself": an agent cannot know whether
+        // its shell is POSIX or Windows, but it can run one command and read the exit status.
+        "probe": PROBE,
         "instruction": format!(
-            "Install the AIMail SDK with `curl -fsSL '{bootstrap}' | sh` (POSIX; no curl available: `python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh`; Windows: `iwr -useb '{bootstrap}?shell=ps1' | iex`), then retry activation. If it is still unavailable afterwards, {}.",
+            "Install the AIMail SDK - do not guess the platform, probe it: run `{PROBE}`. If it prints sh-ok you have a POSIX shell, so run `curl -fsSL '{bootstrap}' | sh` (no curl: `wget -qO- '{bootstrap}' | sh`; neither: `python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh`). If the probe fails you have no POSIX shell, so run `powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -useb '{bootstrap}?shell=ps1' | iex\"`. Then retry activation; if it is still unavailable afterwards, {}.",
             recipe.restart
         ),
     })
