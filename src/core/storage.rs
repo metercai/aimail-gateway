@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -21,6 +22,27 @@ use crate::core::whitelist::{is_whitelisted_wildcard, WhitelistCache};
 /// Cached domain lookups: `domain -> (fetched_at, record)`.
 pub type DomainCacheMap = Arc<RwLock<HashMap<String, (Instant, Option<SystemDomainRecord>)>>>;
 
+/// One AgentSystemId's anchor witnesses: `(address, Some(anchor_id) | None)`.
+pub type AnchorWitnesses = Arc<Vec<(String, Option<String>)>>;
+
+/// Per-AgentSystemId anchor witnesses: `(insertion seq, witnesses)`.
+///
+/// `enforce_anchor_binding` runs on EVERY aggregate pull — SSE connect, every long-poll round and
+/// every ack — and the pull loop is the gateway's steady-state traffic. The witness set only changes
+/// when a writer touches `address_anchor` or `agent_system_addresses` (activation / re-anchoring /
+/// unbinding), and those writers PATCH the cached entry in place instead of dropping it, so an
+/// activation costs no re-read at all.
+///
+/// Bounded: a gateway that served many AgentSystemIds over its lifetime must not keep growing, so the
+/// map is capped and the oldest INSERTION is evicted on overflow. The hot path never takes the write
+/// lock (no hit-refresh), so eviction is approximate-LRU; a miss costs one indexed statement.
+pub type AnchorCacheMap = Arc<RwLock<HashMap<String, (u64, AnchorWitnesses)>>>;
+
+/// Upper bound on cached witness sets (see [`AnchorCacheMap`]). One entry per AgentSystemId that has
+/// actually pulled; a 3-address group is ~200 B, so the cap is well under 1 MiB even for a gateway
+/// that has rotated through thousands of agents.
+pub const ANCHOR_CACHE_MAX: usize = 4096;
+
 /// Thread-safe, cloneable database handle backed by an `r2d2_sqlite` connection pool.
 #[derive(Clone)]
 pub struct Database {
@@ -31,6 +53,10 @@ pub struct Database {
     pub whitelist_cache: Arc<WhitelistCache>,
     /// Domain lookup cache.
     pub domain_cache: DomainCacheMap,
+    /// Anchor witnesses per AgentSystemId (see [`AnchorCacheMap`]).
+    pub anchor_cache: AnchorCacheMap,
+    /// Monotonic insertion counter for the approximate-LRU eviction of `anchor_cache`.
+    anchor_cache_seq: Arc<AtomicU64>,
 }
 
 /// Fail closed when encryption is requested but the binary has no SQLCipher.
@@ -207,6 +233,8 @@ impl Database {
                             db_file: path_ref.to_path_buf(),
                             whitelist_cache: Arc::new(WhitelistCache::new()),
                             domain_cache: Arc::new(RwLock::new(HashMap::new())),
+                            anchor_cache: Arc::new(RwLock::new(HashMap::new())),
+                            anchor_cache_seq: Arc::new(AtomicU64::new(0)),
                         });
                     }
                     return Err(e);
@@ -222,6 +250,8 @@ impl Database {
             pool,
             whitelist_cache: Arc::new(WhitelistCache::new()),
             domain_cache: Arc::new(RwLock::new(HashMap::new())),
+            anchor_cache: Arc::new(RwLock::new(HashMap::new())),
+            anchor_cache_seq: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1692,20 +1722,44 @@ impl Database {
         system_id: &str,
     ) -> AppResult<()> {
         let id = agent_system_id.trim().to_string();
+        let cache_key = id.clone(); // survives the closure move; the group we patch
         let addr = address.trim().to_lowercase();
+        let bind_addr = addr.clone();
         let sid = system_id.trim().to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO agent_system_addresses (address, agent_system_id, system_id)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(address) DO UPDATE SET
-                   agent_system_id = excluded.agent_system_id,
-                   system_id = excluded.system_id",
-                params![addr, id, sid],
-            )?;
-            Ok(())
-        })
-        .await
+        // The address may be TRANSFERRED from another AgentSystemId (upsert on the address PK), in
+        // which case both groups' witness sets change.
+        let previous_owner: Option<String> = self
+            .call(move |conn| {
+                let id_for_write = id.clone();
+                let addr_for_read = addr.clone();
+                let previous = conn
+                    .query_row(
+                        "SELECT agent_system_id FROM agent_system_addresses WHERE address = ?1",
+                        params![addr_for_read],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                conn.execute(
+                    "INSERT INTO agent_system_addresses (address, agent_system_id, system_id)
+                     VALUES (?1, ?2, ?3)
+                     ON CONFLICT(address) DO UPDATE SET
+                       agent_system_id = excluded.agent_system_id,
+                       system_id = excluded.system_id",
+                    params![addr, id_for_write, sid],
+                )?;
+                Ok(previous)
+            })
+            .await?;
+        if let Some(prev) = previous_owner.as_deref() {
+            if prev != cache_key {
+                self.anchor_cache_remove_address(prev, &bind_addr);
+            }
+        }
+        // Patch, not invalidate: a first-time activation of this group has no cached entry (nothing to
+        // do), and adding an address to a warm group keeps it warm — the strict rule still sees the
+        // new address as "bound but unanchored" until `set_address_anchor` runs.
+        self.anchor_cache_add_address(&cache_key, &bind_addr);
+        Ok(())
     }
 
     /// Remove the ASID ownership row for an address once its LAST active
@@ -1719,20 +1773,35 @@ impl Database {
     ) -> AppResult<bool> {
         let sid = system_id.trim().to_string();
         let addr = address.trim().to_lowercase();
-        self.call(move |conn| {
-            let n = conn.execute(
-                "DELETE FROM agent_system_addresses
-                 WHERE system_id = ?1 AND address = ?2
-                   AND NOT EXISTS (
-                     SELECT 1 FROM api_keys
-                     WHERE system_id = ?1 AND domain_addr = ?2
-                       AND category = 'agent' AND is_active = 1
-                   )",
-                params![sid, addr],
-            )?;
-            Ok(n > 0)
-        })
-        .await
+        let removed_owner: Option<String> = self
+            .call(move |conn| {
+                let owner = conn
+                    .query_row(
+                        "SELECT agent_system_id FROM agent_system_addresses
+                         WHERE system_id = ?1 AND address = ?2",
+                        params![&sid, &addr],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                let n = conn.execute(
+                    "DELETE FROM agent_system_addresses
+                     WHERE system_id = ?1 AND address = ?2
+                       AND NOT EXISTS (
+                         SELECT 1 FROM api_keys
+                         WHERE system_id = ?1 AND domain_addr = ?2
+                           AND category = 'agent' AND is_active = 1
+                       )",
+                    params![sid, addr],
+                )?;
+                Ok(if n > 0 { owner } else { None })
+            })
+            .await?;
+        if let Some(asid) = removed_owner.as_ref() {
+            // The group's witness set shrank: patch that one group so its next pull stops demanding
+            // an anchor for an address that is gone — without a re-read.
+            self.anchor_cache_remove_address(asid, address);
+        }
+        Ok(removed_owner.is_some())
     }
 
     /// Addresses owned by one AgentSystemId on this gateway.
@@ -1762,18 +1831,40 @@ impl Database {
     pub async fn set_address_anchor(&self, email: &str, anchor_id: &str) -> AppResult<()> {
         let email = email.to_lowercase();
         let anchor_id = anchor_id.to_string();
-        self.call(move |conn| {
-            conn.execute(
-                "INSERT INTO address_anchor (email_address, anchor_id, updated_at)
-                 VALUES (?1, ?2, datetime('now'))
-                 ON CONFLICT(email_address) DO UPDATE SET
-                    anchor_id = excluded.anchor_id,
-                    updated_at = excluded.updated_at",
-                params![email, anchor_id],
-            )?;
-            Ok(())
-        })
-        .await
+        // Re-anchoring must take effect on the VERY next pull: this row is the witness the pull is
+        // compared against, so a stale cache would accept a moved address — the exact defect §7.1
+        // exists to prevent. The owner of the address is resolved in the SAME connection as the
+        // write, so the cache patch costs one primary-key lookup and touches only that group.
+        let email_for_cache = email.clone();
+        let anchor_for_cache = anchor_id.clone();
+        let owner: Option<String> = self
+            .call(move |conn| {
+                conn.execute(
+                    "INSERT INTO address_anchor (email_address, anchor_id, updated_at)
+                     VALUES (?1, ?2, datetime('now'))
+                     ON CONFLICT(email_address) DO UPDATE SET
+                        anchor_id = excluded.anchor_id,
+                        updated_at = excluded.updated_at",
+                    params![&email, &anchor_id],
+                )?;
+                // Not bound yet (activation order) ⇒ nothing cached for it; the bind patches.
+                let asid = conn
+                    .query_row(
+                        "SELECT agent_system_id FROM agent_system_addresses WHERE address = ?1",
+                        params![email],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?;
+                Ok(asid)
+            })
+            .await?;
+        if let Some(asid) = owner {
+            // Patch the single slot instead of dropping the entry: an activation must not cost the
+            // group a re-read (and it is exactly the moment a re-read is most likely, since the host
+            // re-arms right after activation).
+            self.anchor_cache_set_anchor(&asid, &email_for_cache, &anchor_for_cache);
+        }
+        Ok(())
     }
 
     /// The anchor identifier recorded for one address (`None` = never registered).
@@ -1791,17 +1882,121 @@ impl Database {
         .await
     }
 
-    /// Anchor identifiers for every address of an AgentSystemId (only the ones registered).
-    pub async fn list_agent_system_anchors(
+    /// Cached view of [`Self::list_agent_system_address_anchors`] — the hot path's accessor.
+    ///
+    /// A hit costs one `RwLock` read + an `Arc` clone (no pool, no query); a miss costs one indexed
+    /// statement on the blocking pool and stores the result.
+    pub async fn agent_system_address_anchors_cached(
         &self,
         agent_system_id: &str,
-    ) -> AppResult<Vec<(String, String)>> {
+    ) -> AppResult<AnchorWitnesses> {
+        let key = agent_system_id.trim().to_string();
+        if let Ok(cache) = self.anchor_cache.read() {
+            if let Some((_, hit)) = cache.get(&key) {
+                return Ok(hit.clone());
+            }
+        }
+        let rows = Arc::new(self.list_agent_system_address_anchors(&key).await?);
+        self.anchor_cache_store(key, rows.clone());
+        Ok(rows)
+    }
+
+    /// Store one group's witnesses, evicting the OLDEST insertion when the map is at capacity.
+    fn anchor_cache_store(&self, key: String, rows: AnchorWitnesses) {
+        let seq = self.anchor_cache_seq.fetch_add(1, Ordering::Relaxed);
+        let Ok(mut cache) = self.anchor_cache.write() else {
+            return;
+        };
+        if cache.len() >= ANCHOR_CACHE_MAX && !cache.contains_key(&key) {
+            let oldest = cache
+                .iter()
+                .min_by_key(|(_, (seq, _))| *seq)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (seq, rows));
+    }
+
+    /// Add an address to a cached group's witness set (`None` = bound, not yet anchored).
+    ///
+    /// A brand-new address in an EXISTING group does change what that group must prove (the strict
+    /// rule demands an anchor for every bound address), so the entry is patched rather than ignored —
+    /// patching keeps it correct without the 30 µs re-read an invalidation would cause.
+    fn anchor_cache_add_address(&self, agent_system_id: &str, address: &str) {
+        let Ok(mut cache) = self.anchor_cache.write() else {
+            return;
+        };
+        let Some((_, entry)) = cache.get_mut(agent_system_id.trim()) else {
+            return; // not cached ⇒ the next pull reads the truth
+        };
+        let rows = Arc::make_mut(entry);
+        let addr = address.trim().to_lowercase();
+        if rows.iter().any(|(a, _)| a == &addr) {
+            return; // re-bind of a known address does not change the witness set
+        }
+        rows.push((addr, None));
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// Set one address's registered anchor inside a cached group (creates the slot if absent).
+    ///
+    /// When the entry does not know the address at all, the cache and the DB have drifted apart —
+    /// drop the entry (one re-read) rather than guess.
+    fn anchor_cache_set_anchor(&self, agent_system_id: &str, address: &str, anchor: &str) {
+        let Ok(mut cache) = self.anchor_cache.write() else {
+            return;
+        };
+        let key = agent_system_id.trim();
+        let Some((_, entry)) = cache.get_mut(key) else {
+            return;
+        };
+        let rows = Arc::make_mut(entry);
+        let addr = address.trim().to_lowercase();
+        match rows.iter_mut().find(|(a, _)| a == &addr) {
+            Some(slot) => slot.1 = Some(anchor.to_string()),
+            None => {
+                cache.remove(key);
+            }
+        }
+    }
+
+    /// Remove one address from a cached group (unbind). Entry without it ⇒ drop it (drift).
+    fn anchor_cache_remove_address(&self, agent_system_id: &str, address: &str) {
+        let Ok(mut cache) = self.anchor_cache.write() else {
+            return;
+        };
+        let key = agent_system_id.trim();
+        let Some((_, entry)) = cache.get_mut(key) else {
+            return;
+        };
+        let rows = Arc::make_mut(entry);
+        let addr = address.trim().to_lowercase();
+        let before = rows.len();
+        rows.retain(|(a, _)| a != &addr);
+        if rows.len() == before && before > 0 {
+            // The cached group claims an address set that does not include this one: re-read next time.
+            cache.remove(key);
+        }
+    }
+
+    /// Every address of an AgentSystemId WITH its registered anchor (`None` = never registered).
+    ///
+    /// ONE statement on purpose: this feeds the per-pull anchor enforcement (§7.1), which runs on
+    /// every SSE connect, every long-poll and every ack — a second round-trip here would double the
+    /// hot path's DB cost. Both sides are indexed: the `agent_system_addresses(agent_system_id)`
+    /// index bounds the scan, and `address_anchor.email_address` is the primary key of the join.
+    pub async fn list_agent_system_address_anchors(
+        &self,
+        agent_system_id: &str,
+    ) -> AppResult<Vec<(String, Option<String>)>> {
         let id = agent_system_id.trim().to_string();
         self.call(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT a.address, m.anchor_id
                  FROM agent_system_addresses a
-                 JOIN address_anchor m ON m.email_address = lower(a.address)
+                 LEFT JOIN address_anchor m ON m.email_address = lower(a.address)
                  WHERE a.agent_system_id = ?1 ORDER BY a.address",
             )?;
             let rows = stmt.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1812,6 +2007,23 @@ impl Database {
             Ok(out)
         })
         .await
+    }
+
+    /// Anchor identifiers for every address of an AgentSystemId (only the ones registered).
+    ///
+    /// Thin filter over [`Self::list_agent_system_address_anchors`] so there is exactly one SQL
+    /// statement for this shape (no drift between the two views of the same rows).
+    pub async fn list_agent_system_anchors(
+        &self,
+        agent_system_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        let rows = self
+            .list_agent_system_address_anchors(agent_system_id)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(address, anchor)| anchor.map(|a| (address, a)))
+            .collect())
     }
 }
 
@@ -4301,6 +4513,220 @@ mod anchor_tests {
         assert_eq!(
             db.get_address_anchor("a@example.com").await.unwrap(),
             Some(hash.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_patches_a_warm_group_instead_of_dropping_it() {
+        // Owner question 2026-11-25: a NEW address must not cold-start the group it joins. The entry
+        // stays cached and is patched; what changes is only its content (the new address appears as
+        // "bound, unanchored" until `set_address_anchor` runs, which the strict rule must see).
+        let db = temp_db();
+        db.bind_agent_system_address("as-a", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"1".repeat(64))
+            .await
+            .unwrap();
+        let before = db
+            .agent_system_address_anchors_cached("as-a")
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 1);
+
+        // Second address on the SAME group (activation order: bind, then anchor).
+        db.bind_agent_system_address("as-a", "b@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        let mid = db
+            .agent_system_address_anchors_cached("as-a")
+            .await
+            .unwrap();
+        assert_eq!(mid.len(), 2, "the warm entry gained the new address");
+        assert_eq!(mid[1].1, None, "bound but not yet anchored");
+        assert_eq!(mid[0].1.as_deref(), Some("1".repeat(64).as_str()));
+
+        db.set_address_anchor("b@example.com", &"2".repeat(64))
+            .await
+            .unwrap();
+        let after = db
+            .agent_system_address_anchors_cached("as-a")
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 2);
+        assert_eq!(after[1].1.as_deref(), Some("2".repeat(64).as_str()));
+        // The cache and the DB agree (what the pull will actually be checked against).
+        let truth = db.list_agent_system_address_anchors("as-a").await.unwrap();
+        assert_eq!(&*after, &truth);
+    }
+
+    #[tokio::test]
+    async fn anchor_cache_is_bounded_and_evicts_the_oldest_entry() {
+        // A gateway that rotates through agents must not grow without bound: the cache is capped and
+        // the oldest insertion goes first (the hot path never takes the write lock, so eviction is
+        // approximate — a miss costs one indexed statement, ~30 µs).
+        let db = temp_db();
+        {
+            let mut cache = db.anchor_cache.write().unwrap();
+            for i in 0..ANCHOR_CACHE_MAX {
+                cache.insert(format!("as-{i}"), (i as u64, Arc::new(Vec::new())));
+            }
+        }
+        // One more group is served ⇒ capacity is exceeded ⇒ the oldest insertion is evicted.
+        let _ = db
+            .agent_system_address_anchors_cached("as-new")
+            .await
+            .unwrap();
+        let cache = db.anchor_cache.read().unwrap();
+        assert_eq!(
+            cache.len(),
+            ANCHOR_CACHE_MAX,
+            "the cache stays within its bound"
+        );
+        assert!(
+            cache.contains_key("as-new"),
+            "the freshly served group is cached"
+        );
+        assert!(
+            !cache.contains_key("as-0"),
+            "the oldest insertion was evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_witnesses_are_invalidated_by_re_anchoring() {
+        // The cache is what makes the hot path cheap; a stale entry would accept a MOVED address,
+        // so the write path must drop it every time (no TTL to hide behind).
+        let db = temp_db();
+        db.bind_agent_system_address("asid_x", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"1".repeat(64))
+            .await
+            .unwrap();
+        let first = db
+            .agent_system_address_anchors_cached("asid_x")
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1.as_deref(), Some("1".repeat(64).as_str()));
+
+        db.set_address_anchor("a@example.com", &"2".repeat(64))
+            .await
+            .unwrap();
+        let second = db
+            .agent_system_address_anchors_cached("asid_x")
+            .await
+            .unwrap();
+        assert_eq!(
+            second[0].1.as_deref(),
+            Some("2".repeat(64).as_str()),
+            "a re-anchored address must not be served from a stale cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidation_is_scoped_to_the_affected_agent_system() {
+        // Owner question 2026-11-25: an activation must not cold-start EVERY other group. One address
+        // belongs to exactly one AgentSystemId, so the blast radius is that group — pinned here by
+        // comparing the cached Arc identity (same Arc ⇒ no re-read happened).
+        let db = temp_db();
+        db.bind_agent_system_address("as-a", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"1".repeat(64))
+            .await
+            .unwrap();
+        db.bind_agent_system_address("as-b", "b@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("b@example.com", &"2".repeat(64))
+            .await
+            .unwrap();
+
+        let a1 = db
+            .agent_system_address_anchors_cached("as-a")
+            .await
+            .unwrap();
+        let b1 = db
+            .agent_system_address_anchors_cached("as-b")
+            .await
+            .unwrap();
+
+        // A re-anchors (activation-shaped write).
+        db.set_address_anchor("a@example.com", &"9".repeat(64))
+            .await
+            .unwrap();
+        let a2 = db
+            .agent_system_address_anchors_cached("as-a")
+            .await
+            .unwrap();
+        let b2 = db
+            .agent_system_address_anchors_cached("as-b")
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&a1, &a2), "the affected group must re-read");
+        assert!(Arc::ptr_eq(&b1, &b2), "an unrelated group must stay warm");
+
+        // A gains an address; B still keeps its entry.
+        db.bind_agent_system_address("as-a", "a2@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        let b3 = db
+            .agent_system_address_anchors_cached("as-b")
+            .await
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&b1, &b3),
+            "an unrelated group must survive a bind elsewhere"
+        );
+        assert_eq!(
+            db.agent_system_address_anchors_cached("as-a")
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn cached_witnesses_are_invalidated_by_binding_and_unbinding() {
+        let db = temp_db();
+        db.bind_agent_system_address("asid_x", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &"a".repeat(64))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.agent_system_address_anchors_cached("asid_x")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A newly bound address joins the group unanchored ⇒ the group's set must grow.
+        db.bind_agent_system_address("asid_x", "b@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        let grown = db
+            .agent_system_address_anchors_cached("asid_x")
+            .await
+            .unwrap();
+        assert_eq!(grown.len(), 2);
+        assert_eq!(grown[1].1, None, "new address has no anchor yet");
+
+        // Unbinding (no active agent key) shrinks it again.
+        db.remove_agent_system_address_if_unowned("shared_addr_1", "b@example.com")
+            .await
+            .unwrap();
+        assert_eq!(
+            db.agent_system_address_anchors_cached("asid_x")
+                .await
+                .unwrap()
+                .len(),
+            1
         );
     }
 

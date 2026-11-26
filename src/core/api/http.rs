@@ -3436,52 +3436,114 @@ fn parse_anchor_claims(
     out
 }
 
-/// Contract §7.1 (anchor binding): every address of this AgentSystemId that has a recorded anchor
-/// MUST present the same anchor hash on every pull.
+/// Contract §7.1 (anchor binding) — STRICT: a pull that cannot prove its anchors is refused.
+///
+/// Owner ruling 2026-11-25: there is no production deployment yet, so there is no legitimate
+/// anchor-less client to stay compatible with — the lenient rollout ("no record ⇒ allow") is gone.
+/// A pull is accepted only when:
+///
+/// 1. the request carries `X-Aimail-Anchor` claims at all (`anchor_required`);
+/// 2. every address this AgentSystemId owns has a registered anchor (`anchor_unregistered`);
+/// 3. every claim equals the hash registered at activation (`anchor_mismatch`).
 ///
 /// This is what makes "edit the local binding file and the mailbox moves" impossible: the anchor is
 /// registered at activation, so a client that re-points its address locally presents a different
-/// hash and is refused here — before any mail is handed out. Addresses without a recorded anchor
-/// (never registered, e.g. a rotated key from an older client) are not blocked, so the check can be
-/// rolled out per host without a flag day.
+/// hash and is refused here — before any mail is handed out.
 async fn enforce_anchor_binding(
     db: &crate::core::storage::Database,
     agent_system_id: &str,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let recorded = db
-        .list_agent_system_anchors(agent_system_id)
+    let claimed = parse_anchor_claims(headers);
+    if claimed.is_empty() {
+        return Err(anchor_refusal(
+            "anchor_required",
+            "this pull carries no X-Aimail-Anchor claim. Every aggregate pull MUST present \
+             `email;sha256(anchor)` for each address of the AgentSystemId (contract §7.1); \
+             the client hashes the agent's own stable anchor (dsh/openclaw: the workspace, \
+             pi: ~/.pi/agent)."
+                .to_string(),
+        ));
+    }
+    // ONE query for the whole decision (addresses + their registered anchor): this runs on every
+    // SSE connect, every long-poll and every ack, so it must cost the same as the lenient version
+    // that preceded it (one indexed statement) — not two.
+    let rows = db
+        .agent_system_address_anchors_cached(agent_system_id)
         .await
-        .unwrap_or_default();
-    if recorded.is_empty() {
+        .map_err(|e| {
+            // Fail CLOSED, not open: if the witness cannot be read, the anchor cannot be proven, and
+            // "cannot prove" must never turn into "let it through" (v2.5 makes this a hard rule).
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(format!("cannot verify the anchor binding: {e}")),
+                }),
+            )
+        })?;
+    if rows.is_empty() {
+        // No address is bound to this AgentSystemId ⇒ no mail can be handed out. Nothing to verify.
         return Ok(());
     }
-    let claimed = parse_anchor_claims(headers);
+    // 2) every address of the group must have an anchor: an activation that did not register one
+    //    leaves the address movable by editing the binding file, which is exactly what §7.1 forbids.
+    // 3) the claims must match what activation registered (including "this address is missing").
+    let mut unregistered: Vec<String> = Vec::new();
     let mut bad: Vec<String> = Vec::new();
-    for (address, want) in recorded {
-        let got = claimed
-            .get(&address.to_lowercase())
-            .map(|v| v.as_str())
-            .unwrap_or("");
-        if !got.eq_ignore_ascii_case(&want) {
-            bad.push(address);
+    // One scratch buffer, reused: `parse_anchor_claims` already lowercased the keys, so a per-row
+    // `to_lowercase()` would allocate twice per address for nothing. This loop is O(addresses) and
+    // runs on every pull; keep it allocation-free apart from the (rare) refusal lists.
+    let mut key = String::new();
+    for (address, registered) in rows.iter() {
+        match registered {
+            None => unregistered.push(address.clone()),
+            Some(want) => {
+                key.clear();
+                key.push_str(address);
+                key.make_ascii_lowercase();
+                let got = claimed.get(&key).map(|v| v.as_str()).unwrap_or("");
+                if !got.eq_ignore_ascii_case(want) {
+                    bad.push(address.clone());
+                }
+            }
         }
+    }
+    if !unregistered.is_empty() {
+        unregistered.sort();
+        return Err(anchor_refusal(
+            "anchor_unregistered",
+            format!(
+                "no anchor is registered for: {}. The address must be (re-)activated with an \
+                 anchor before it can be pulled — an unanchored address could be moved by editing \
+                 the local binding file (contract §7.1).",
+                unregistered.join(", ")
+            ),
+        ));
     }
     if bad.is_empty() {
         return Ok(());
     }
     bad.sort();
-    Err((
+    Err(anchor_refusal(
+        "anchor_mismatch",
+        format!(
+            "the anchor registered at activation does not match this request for: {}. \
+             The anchor is fixed by activation — re-activate to move an address.",
+            bad.join(", ")
+        ),
+    ))
+}
+
+/// One 403 shape for every anchor refusal (the client must be able to tell the three apart).
+fn anchor_refusal(error: &str, detail: String) -> (StatusCode, Json<ErrorResponse>) {
+    (
         StatusCode::FORBIDDEN,
         Json(ErrorResponse {
-            error: "anchor_mismatch".to_string(),
-            detail: Some(format!(
-                "the anchor registered at activation does not match this request for: {}. \
-                 The anchor is fixed by activation — re-activate to move an address.",
-                bad.join(", ")
-            )),
+            error: error.to_string(),
+            detail: Some(detail),
         }),
-    ))
+    )
 }
 
 async fn agent_system_stream(
@@ -6008,5 +6070,152 @@ mod anchor_header_tests {
             HeaderValue::from_static("not-an-address;"),
         ); // no hash
         assert!(parse_anchor_claims(&h).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod anchor_enforcement_tests {
+    //! Owner ruling 2026-11-25: the lenient rollout ("no recorded anchor ⇒ allow") is gone. A pull
+    //! is refused unless it presents claims, every address of the group is anchored, and every claim
+    //! matches. These cases pin all three refusals plus the one acceptance path.
+    use super::enforce_anchor_binding;
+    use crate::core::storage::Database;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn temp_db() -> Database {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("aimail-gw-enforce-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        Database::open(dir.join("test.db"), 1, None).expect("open db")
+    }
+
+    fn hash(c: char) -> String {
+        std::iter::repeat_n(c, 64).collect()
+    }
+
+    fn claims(pairs: &[(&str, String)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (address, value) in pairs {
+            h.append(
+                "x-aimail-anchor",
+                HeaderValue::from_str(&format!("{address};{value}")).unwrap(),
+            );
+        }
+        h
+    }
+
+    async fn seed(db: &Database) {
+        db.bind_agent_system_address("as-1", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@example.com", &hash('a'))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn refuses_a_pull_that_carries_no_claim() {
+        let db = temp_db();
+        seed(&db).await;
+        let err = enforce_anchor_binding(&db, "as-1", &HeaderMap::new())
+            .await
+            .expect_err("an anchor-less pull must be refused");
+        assert_eq!(err.1.error, "anchor_required");
+    }
+
+    #[tokio::test]
+    async fn refuses_an_address_whose_activation_registered_no_anchor() {
+        let db = temp_db();
+        db.bind_agent_system_address("as-1", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        // No set_address_anchor: the address could be moved by editing the binding file.
+        let err = enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('a'))]))
+            .await
+            .expect_err("an unanchored address must be refused");
+        assert_eq!(err.1.error, "anchor_unregistered");
+        assert!(err
+            .1
+            .detail
+            .clone()
+            .unwrap_or_default()
+            .contains("a@example.com"));
+    }
+
+    #[tokio::test]
+    async fn refuses_a_claim_that_does_not_match_the_registration() {
+        let db = temp_db();
+        seed(&db).await;
+        let err = enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('b'))]))
+            .await
+            .expect_err("a moved anchor must be refused");
+        assert_eq!(err.1.error, "anchor_mismatch");
+    }
+
+    #[tokio::test]
+    async fn refuses_when_one_address_of_the_group_is_missing_from_the_claims() {
+        let db = temp_db();
+        seed(&db).await;
+        db.bind_agent_system_address("as-1", "b@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("b@example.com", &hash('b'))
+            .await
+            .unwrap();
+        let err = enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('a'))]))
+            .await
+            .expect_err("a partial claim list must be refused");
+        assert_eq!(err.1.error, "anchor_mismatch");
+        assert!(err
+            .1
+            .detail
+            .clone()
+            .unwrap_or_default()
+            .contains("b@example.com"));
+    }
+
+    #[tokio::test]
+    async fn a_re_anchored_address_is_refused_on_the_next_pull() {
+        // Cache correctness at the enforcement level: the second call must see the new witness and
+        // refuse the OLD claim. A cache that outlived its writer would be an enforcement bypass.
+        let db = temp_db();
+        seed(&db).await;
+        enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('a'))]))
+            .await
+            .expect("the registered anchor is accepted");
+
+        db.set_address_anchor("a@example.com", &hash('b'))
+            .await
+            .unwrap();
+        let err = enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('a'))]))
+            .await
+            .expect_err("the stale claim must be refused right away");
+        assert_eq!(err.1.error, "anchor_mismatch");
+
+        enforce_anchor_binding(&db, "as-1", &claims(&[("a@example.com", hash('b'))]))
+            .await
+            .expect("the new claim is accepted");
+    }
+
+    #[tokio::test]
+    async fn accepts_a_pull_that_proves_every_anchor() {
+        let db = temp_db();
+        seed(&db).await;
+        db.bind_agent_system_address("as-1", "b@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        db.set_address_anchor("b@example.com", &hash('b'))
+            .await
+            .unwrap();
+        enforce_anchor_binding(
+            &db,
+            "as-1",
+            &claims(&[("a@example.com", hash('a')), ("b@example.com", hash('b'))]),
+        )
+        .await
+        .expect("a fully proven pull is allowed");
     }
 }
