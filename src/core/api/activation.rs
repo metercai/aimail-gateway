@@ -25,7 +25,7 @@ use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 /// it instead of carrying a second copy of the wording.
 pub fn address_activation_prompt(address: &str, gateway_url: &str, code: &str) -> String {
     format!(
-        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the AIMail SDK - and do not guess the platform, probe it: run `sh -c 'echo sh-ok'`. If it prints sh-ok you have a POSIX shell, so run `curl -fsSL '{gateway_url}/api/v1/agent-setup/bootstrap' | sh` (no curl: `wget -qO- '{gateway_url}/api/v1/agent-setup/bootstrap' | sh`; neither: `python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{gateway_url}/api/v1/agent-setup/bootstrap').read())\" && sh /tmp/aimail-bootstrap.sh`). If the probe fails you have no POSIX shell, so run `powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -useb '{gateway_url}/api/v1/agent-setup/bootstrap?shell=ps1' | iex\"`. Then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
+        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the AIMail SDK: if `uname -s` can be executed in the current shell, run `curl -fsSL '{gateway_url}/api/v1/agent-setup/bootstrap?shell=sh' | sh`; otherwise run `powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -Uri '{gateway_url}/api/v1/agent-setup/bootstrap?shell=ps1' -UseBasicParsing | iex\"`. Then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
     )
 }
 
@@ -1804,16 +1804,24 @@ mod activation_status_tests {
             "the prompt must not send the agent to a per-host recipe: {addr}"
         );
         assert!(
-            addr.contains("sh -c 'echo sh-ok'"),
+            addr.contains("`uname -s` can be executed"),
             "the agent must be told to PROBE its shell, not to guess the platform: {addr}"
+        );
+        assert!(
+            addr.contains("bootstrap?shell=sh"),
+            "the POSIX branch must ask the gateway for the sh variant explicitly: {addr}"
+        );
+        assert!(
+            addr.contains("-UseBasicParsing"),
+            "the Windows branch must use a form that works in PowerShell 5.1 too: {addr}"
         );
         assert!(
             !addr.contains('\\'),
             "escaped quotes must not leak into the prompt text: {addr}"
         );
         assert!(
-            addr.contains("\"iwr -useb"),
-            "the no-POSIX branch must carry a runnable PowerShell command: {addr}"
+            addr.contains("\"iwr -Uri") && addr.contains("-UseBasicParsing"),
+            "the no-POSIX branch must carry a runnable PowerShell 5.1 command: {addr}"
         );
         assert!(addr.contains("no reinstallation is needed"));
         assert!(!addr.contains("agent_aimail"));

@@ -99,9 +99,9 @@ const ALIASES: &[(&str, &str)] = &[
     ("deer-flow", "deerflow"),
 ];
 
-/// The one command that tells the agent which branch it is on, without it having to know anything:
-/// a POSIX shell prints the token, everything else fails.
-const PROBE: &str = "sh -c 'echo sh-ok'";
+/// The probe: `uname -s` exists in any POSIX shell and nowhere else, so "can I run it" IS the
+/// platform question -- no comparison, no output parsing, nothing for the agent to interpret.
+const PROBE: &str = "uname -s";
 
 const RECIPES: &[Recipe] = &[
     Recipe {
@@ -221,17 +221,19 @@ fn render(recipe: &Recipe, gateway: &str) -> Value {
         // For a human reading the recipe table; NOT what the agent runs.
         "host_specific_install": recipe.install,
         "bootstrap_url": bootstrap,
-        "bootstrap": format!("curl -fsSL '{bootstrap}' | sh"),
-        "bootstrap_wget": format!("wget -qO- '{bootstrap}' | sh"),
-        "bootstrap_ps1": format!("iwr -useb '{bootstrap}?shell=ps1' | iex"),
+        "bootstrap": format!("curl -fsSL '{bootstrap}?shell=sh' | sh"),
+        "bootstrap_wget": format!("wget -qO- '{bootstrap}?shell=sh' | sh"),
+        "bootstrap_ps1": format!(
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -Uri '{bootstrap}?shell=ps1' -UseBasicParsing | iex\""
+        ),
         "bootstrap_python": format!(
-            "python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh"
+            "python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}?shell=sh').read())\" && sh /tmp/aimail-bootstrap.sh"
         ),
         // Probe, then branch -- never "choose the platform yourself": an agent cannot know whether
         // its shell is POSIX or Windows, but it can run one command and read the exit status.
         "probe": PROBE,
         "instruction": format!(
-            "Install the AIMail SDK - do not guess the platform, probe it: run `{PROBE}`. If it prints sh-ok you have a POSIX shell, so run `curl -fsSL '{bootstrap}' | sh` (no curl: `wget -qO- '{bootstrap}' | sh`; neither: `python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh`). If the probe fails you have no POSIX shell, so run `powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -useb '{bootstrap}?shell=ps1' | iex\"`. Then retry activation; if it is still unavailable afterwards, {}.",
+            "Install the AIMail SDK: if `{PROBE}` can be executed in the current shell, run `curl -fsSL '{bootstrap}?shell=sh' | sh`; otherwise run `powershell -NoProfile -ExecutionPolicy Bypass -Command \"iwr -Uri '{bootstrap}?shell=ps1' -UseBasicParsing | iex\"`. Then retry activation; if it is still unavailable afterwards, {}.",
             recipe.restart
         ),
     })
@@ -902,7 +904,7 @@ mod tests {
         );
         let instruction = body["instruction"].as_str().unwrap_or_default();
         assert!(
-            instruction.contains("curl -fsSL 'http://gw.test/api/v1/agent-setup/bootstrap' | sh"),
+            instruction.contains("curl -fsSL 'http://gw.test/api/v1/agent-setup/bootstrap?shell=sh' | sh"),
             "{instruction}"
         );
         assert!(
@@ -910,12 +912,23 @@ mod tests {
             "the prompt-side instruction must never mention a host parameter: {instruction}"
         );
         assert!(
-            instruction.contains("iwr -useb"),
-            "Windows has no sh, so the payload must offer the PowerShell way: {instruction}"
+            instruction.contains("`uname -s` can be executed"),
+            "the branch condition must be a probe the agent can run: {instruction}"
         );
         assert!(
-            instruction.contains("urllib.request"),
-            "a minimal image can lack curl (deerflow has neither curl nor wget): {instruction}"
+            instruction.contains("?shell=sh") && instruction.contains("?shell=ps1"),
+            "each branch must ask for its own twin explicitly: {instruction}"
+        );
+        assert!(
+            instruction.contains("-UseBasicParsing"),
+            "Windows PowerShell 5.1 has no iwr -useb-only path here: {instruction}"
+        );
+        assert!(
+            body["bootstrap_python"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("urllib.request"),
+            "a minimal image can lack curl (deerflow has neither curl nor wget), so the payload keeps an alternate"
         );
         assert!(
             !instruction.contains("works out the platform"),
