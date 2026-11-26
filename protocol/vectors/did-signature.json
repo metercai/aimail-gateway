@@ -1,0 +1,353 @@
+{
+  "about": "DID-Signature / DID-Auth-Results 的字节向量（唯一事实源）。生成脚本 protocol/vectors/gen_did_vectors.py。任何字段布局变更必须同时改 protocol/DID-SIGNATURE-PROTOCOL.md。",
+  "constants": {
+    "header_name": "DID-Signature",
+    "results_header_name": "DID-Auth-Results",
+    "system_mail_header": "X-AIMail-System",
+    "protocol_version": "1",
+    "signing_tag": "DID-Signature-v1",
+    "content_tag": "Content-v1",
+    "email_binding_tag": "EmailBinding-v1",
+    "domain_control_tag": "DomainControl-v1",
+    "body_hash_prefix": "sha256:",
+    "anchor_hash_prefix": "blake2b:",
+    "anchor_ref_prefix": "chain:",
+    "attachment_separator": "\t",
+    "errors": [
+      "did_absent",
+      "did_unsupported",
+      "signature_invalid",
+      "body_hash_mismatch",
+      "rcpt_hash_mismatch",
+      "timestamp_out_of_window",
+      "anchor_not_found",
+      "anchor_type_mismatch",
+      "anchor_hash_mismatch",
+      "anchor_revoked",
+      "anchor_expired",
+      "chain_unavailable",
+      "attachment_fetch_failed",
+      "not_verifiable"
+    ]
+  },
+  "content_v1": [
+    {
+      "case": "plain-no-attachment",
+      "subject": "Q3 report",
+      "body": "Hello Alice,\r\n\r\n    this is   a test.  \r\n\r\n\r\n",
+      "attachments": [],
+      "body_hash": "sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7",
+      "bytes_hex": "436f6e74656e742d76310a5133207265706f72740a7368613235363a653062613861386466316334646262323261316265636565333334653835633630333562343530613638656431616639393632313433336234626361613663370a300a"
+    },
+    {
+      "case": "two-attachments",
+      "subject": "Q3 report",
+      "body": "Hello Alice,\r\n\r\n    this is   a test.  \r\n\r\n\r\n",
+      "attachments": [
+        {
+          "name": "q3.pdf",
+          "bytes_hex": "255044462d312e342068656c6c6f"
+        },
+        {
+          "name": "notes.txt",
+          "bytes_hex": "6c696e65310a6c696e65320a"
+        }
+      ],
+      "body_hash": "sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7",
+      "bytes_hex": "436f6e74656e742d76310a5133207265706f72740a7368613235363a653062613861386466316334646262323261316265636565333334653835633630333562343530613638656431616639393632313433336234626361613663370a320a31097368613235363a65366438646431393761663835353765393530656163656462343232336639386463323166656133386139653962346364343964323031323866366231643062097368613235363a663331636465653062346434666461653036333838373266366262376430653665653034313338366139303535643565363463323564396433356463383864310a32097368613235363a65333935333865376632376137626635373963643962383561313033633066306238366236306237383835333432393535333864303330316139633564636536097368613235363a323735316133613266333033616432313735323033383038356532623863356639386563666636316132653465626264343335303661393431373235626538300a"
+    },
+    {
+      "case": "hostile-filename",
+      "subject": "t",
+      "body": "x",
+      "attachments": [
+        {
+          "name": "a\u0000b\nc.txt",
+          "bytes_hex": "78"
+        }
+      ],
+      "body_hash": "sha256:73cb3858a687a8494ca3323053016282f3dad39d42cf62ca4e79dda2aac7d9ac",
+      "bytes_hex": "436f6e74656e742d76310a740a7368613235363a373363623338353861363837613834393463613333323330353330313632383266336461643339643432636636326361346537396464613261616337643961630a310a31097368613235363a64633639653364333433336138313334323066623762616162313764326265663866656139613861333161613839356432653035623765636430336335376636097368613235363a326437313136343262373236623034343031363237636139666261633332663563383533306662313930336363346462303232353837313739323161343838310a"
+    },
+    {
+      "case": "empty-body",
+      "subject": "",
+      "body": "",
+      "attachments": [],
+      "body_hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes_hex": "436f6e74656e742d76310a0a7368613235363a653362306334343239386663316331343961666266346338393936666239323432376165343165343634396239333463613439353939316237383532623835350a300a"
+    },
+    {
+      "case": "trailing-space-and-crlf",
+      "subject": "  padded subject  ",
+      "body": "a\t\r\nb   \r\n\r\n",
+      "attachments": [],
+      "body_hash": "sha256:911169ddaaf146aff539f58c26c489af3b892dff0fe283c1c264c65ae5aa59a2",
+      "bytes_hex": "436f6e74656e742d76310a2020706164646564207375626a6563740a7368613235363a393131313639646461616631343661666635333966353863323663343839616633623839326466663066653238336331633236346336356165356161353961320a300a"
+    }
+  ],
+  "rcpt_hash": [
+    {
+      "case": "header-main-set",
+      "rcpts": [
+        "Bob <Bob@Example.com>",
+        "alice@example.com"
+      ],
+      "hex": "sha256:f246ef5fb8908a996bc6635aab1ce76abc612816bfa714aae6769ea2d573fb50"
+    },
+    {
+      "case": "single",
+      "rcpts": [
+        "alice@example.com"
+      ],
+      "hex": "sha256:ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+    },
+    {
+      "case": "sorted-not-input-order",
+      "rcpts": [
+        "zoe@x.com",
+        "amy@x.com",
+        "Bob <bob@x.com>"
+      ],
+      "hex": "sha256:903553c23c5b570dfc28d749a226929c0656e477912667aaea84c993ca2b43f9"
+    },
+    {
+      "case": "display-name-and-comment",
+      "rcpts": [
+        "Bob <Bob@X.com> (work)"
+      ],
+      "hex": "sha256:581d5f1930c81e73906dfbae2d46df90e4a1221064763a4e55ee85dab8312938"
+    },
+    {
+      "case": "mixed-case-dedup-not-applied",
+      "rcpts": [
+        "A@X.com",
+        "a@x.com"
+      ],
+      "hex": "sha256:f83dfd0f874adf52eea8c72da675f2637b88a216de24bea2e59a2d1af9370f3c"
+    },
+    {
+      "case": "empty",
+      "rcpts": [],
+      "hex": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "signing_input": [
+    {
+      "case": "main",
+      "did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+      "from": "alice@example.com",
+      "t": 1765144656,
+      "vc": "chain:anchor-abc123",
+      "bh": "sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7",
+      "rh": "sha256:f246ef5fb8908a996bc6635aab1ce76abc612816bfa714aae6769ea2d573fb50",
+      "bytes_hex": "4449442d5369676e61747572652d76310a6469643a6b65793a7a364d6b656852676637794a62676147665973646f41734b6442504533646a324359686f775164636a71534a677656640a616c696365406578616d706c652e636f6d0a313736353134343635360a636861696e3a616e63686f722d6162633132330a7368613235363a653062613861386466316334646262323261316265636565333334653835633630333562343530613638656431616639393632313433336234626361613663370a7368613235363a663234366566356662383930386139393662633636333561616231636537366162633631323831366266613731346161653637363965613264353733666235300a"
+    },
+    {
+      "case": "minimal",
+      "did": "did:key:z6MkExample",
+      "from": "a@b.c",
+      "t": 1,
+      "vc": "chain:x",
+      "bh": "sha256:00",
+      "rh": "sha256:00",
+      "bytes_hex": "4449442d5369676e61747572652d76310a6469643a6b65793a7a364d6b4578616d706c650a6140622e630a310a636861696e3a780a7368613235363a30300a7368613235363a30300a"
+    }
+  ],
+  "header": [
+    {
+      "case": "main",
+      "fields": {
+        "v": "1",
+        "did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+        "t": "1765144656",
+        "s": "oD2OxxLrmy-knJxuBB0XDz6-X00yAJ75_AggXe_HLweRYVoJJH1tgH65emPIY1Xkd5s28PoPRVj2wR2gNc3KAA",
+        "vc": "chain:anchor-abc123",
+        "bh": "sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7",
+        "rh": "sha256:f246ef5fb8908a996bc6635aab1ce76abc612816bfa714aae6769ea2d573fb50"
+      },
+      "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+      "sig_hex": "a03d8ec712eb9b2fa49c9c6e041d170f3ebe5f4d32009ef9fc08205defc72f0791615a09247d6d807eb97a63c86355e4779b36f0fa0f4558f6c11da035cdca00",
+      "header": "v=1; did=\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\"; t=1765144656; s=oD2OxxLrmy-knJxuBB0XDz6-X00yAJ75_AggXe_HLweRYVoJJH1tgH65emPIY1Xkd5s28PoPRVj2wR2gNc3KAA; vc=\"chain:anchor-abc123\"; bh=\"sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7\"; rh=\"sha256:f246ef5fb8908a996bc6635aab1ce76abc612816bfa714aae6769ea2d573fb50\"",
+      "unfolded_len": 353
+    }
+  ],
+  "payload_hash": [
+    {
+      "case": "main",
+      "did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+      "email": "alice@example.com",
+      "issuer_did": "did:web:issuer.example.com",
+      "hex": "blake2b:9ac90d160570a324c1b17a02362b257be4f8675cbb63ecef36cf53d501240d17"
+    },
+    {
+      "case": "different-issuer-changes-hash",
+      "did": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+      "email": "alice@example.com",
+      "issuer_did": "did:web:other.example.com",
+      "hex": "blake2b:0f438b0d77677046645f664dde10695900a34de29b481674a54cf16d0b24ee10"
+    }
+  ],
+  "domain_control": [
+    {
+      "case": "main",
+      "domain": "example.com",
+      "issuer_did": "did:web:issuer.example.com",
+      "hex": "blake2b:659112291802ed4168375b434670b997e24e47b47dc2ed246b50340de2b73f84"
+    },
+    {
+      "case": "uppercase-domain-normalized",
+      "domain": "example.com",
+      "issuer_did": "did:web:issuer.example.com",
+      "hex": "blake2b:659112291802ed4168375b434670b997e24e47b47dc2ed246b50340de2b73f84"
+    },
+    {
+      "case": "different-domain-changes-hash",
+      "domain": "other.example.com",
+      "issuer_did": "did:web:issuer.example.com",
+      "hex": "blake2b:e42581498b8ca28cf69de466899aa02aee7667abbc5283ca2aa497b48c190881"
+    }
+  ],
+  "auth_results": [
+    {
+      "case": "verified",
+      "header": "result=verified; integrity=pass; address=verified; did-id=\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\""
+    },
+    {
+      "case": "failed-integrity",
+      "header": "result=failed; integrity=fail; address=unknown; reason=body_hash_mismatch"
+    },
+    {
+      "case": "failed-address",
+      "header": "result=failed; integrity=pass; address=failed; reason=anchor_revoked"
+    },
+    {
+      "case": "absent",
+      "header": "result=failed; integrity=fail; address=unknown; reason=did_absent"
+    }
+  ],
+  "verdict": [
+    {
+      "case": "no-did-object",
+      "did": null,
+      "own_verify": "did_absent",
+      "policy": "enforce",
+      "expect": {
+        "action": "accept",
+        "reason": "did_absent"
+      }
+    },
+    {
+      "case": "all-pass",
+      "did": {
+        "integrity": "pass"
+      },
+      "own_verify": "ok",
+      "policy": "enforce",
+      "expect": {
+        "action": "accept",
+        "reason": ""
+      }
+    },
+    {
+      "case": "integrity-fail",
+      "did": {
+        "integrity": "fail"
+      },
+      "own_verify": "body_hash_mismatch",
+      "policy": "enforce",
+      "expect": {
+        "action": "reject",
+        "reason": "body_hash_mismatch"
+      }
+    },
+    {
+      "case": "chain-unavailable",
+      "did": {
+        "integrity": "pass",
+        "address": "failed",
+        "reason": "chain_unavailable"
+      },
+      "own_verify": "ok",
+      "policy": "enforce",
+      "expect": {
+        "action": "accept_flagged",
+        "reason": "chain_unavailable"
+      }
+    },
+    {
+      "case": "anchor-revoked",
+      "did": {
+        "integrity": "pass",
+        "address": "failed",
+        "reason": "anchor_revoked"
+      },
+      "own_verify": "ok",
+      "policy": "enforce",
+      "expect": {
+        "action": "reject",
+        "reason": "anchor_revoked"
+      }
+    },
+    {
+      "case": "attachment-fetch-failed",
+      "did": {
+        "integrity": "pass"
+      },
+      "own_verify": "attachment_fetch_failed",
+      "policy": "enforce",
+      "expect": {
+        "action": "accept_flagged",
+        "reason": "attachment_fetch_failed"
+      }
+    },
+    {
+      "case": "missing-body-signed",
+      "did": {
+        "integrity": "pass"
+      },
+      "own_verify": "not_verifiable",
+      "policy": "enforce",
+      "expect": {
+        "action": "accept_flagged",
+        "reason": "not_verifiable"
+      }
+    },
+    {
+      "case": "record-only-never-rejects",
+      "did": {
+        "integrity": "fail"
+      },
+      "own_verify": "signature_invalid",
+      "policy": "record",
+      "expect": {
+        "action": "accept",
+        "reason": "signature_invalid"
+      }
+    }
+  ],
+  "payload": [
+    {
+      "case": "did-record",
+      "has_did": true,
+      "record_headers": {
+        "did-signature": "v=1; did=\"did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd\"; t=1765144656; s=oD2OxxLrmy-knJxuBB0XDz6-X00yAJ75_AggXe_HLweRYVoJJH1tgH65emPIY1Xkd5s28PoPRVj2wR2gNc3KAA; vc=\"chain:anchor-abc123\"; bh=\"sha256:e0ba8a8df1c4dbb22a1becee334e85c6035b450a68ed1af99621433b4bcaa6c7\"; rh=\"sha256:f246ef5fb8908a996bc6635aab1ce76abc612816bfa714aae6769ea2d573fb50\""
+      },
+      "expect_did_keys": [
+        "signature",
+        "body_signed",
+        "rcpt_to_raw",
+        "rcpt_cc_raw",
+        "attachments",
+        "gateway_time",
+        "results"
+      ],
+      "expect_absent_keys": [
+        "sha256",
+        "file_hash",
+        "bh",
+        "rh"
+      ]
+    }
+  ]
+}

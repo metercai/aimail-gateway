@@ -15,3 +15,9 @@ data/
 config.toml
 .hermes
 docs/
+
+# ── crates/ 的集成测试需要入库 ───────────────────────────────────────────────
+# 上面的 `tests/` 规则针对 gateway 自身的本地测试套件（不入库）；
+# mail-anchor 是独立 crate，它的向量驱动测试必须随 crate 一起版本化。
+!crates/mail-anchor/tests/
+!crates/mail-anchor/tests/**

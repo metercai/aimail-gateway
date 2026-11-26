@@ -21,6 +21,10 @@ path = "src/lib.rs"
 
 [features]
 default = []
+# DID 邮件增强（DID-Signature 收发）。P0 只有骨架；P2 起追加
+#   did-mail = ["dep:chain-sdk", "dep:did-sdk"]
+# 默认关闭：不带该 feature 的构建行为与本改动之前完全一致。
+did-mail = []
 # Opt-in database-at-rest encryption (SQLCipher). It pulls a vendored OpenSSL
 # into the build, which the default musl/static release deliberately avoids:
 #
@@ -113,3 +117,11 @@ opt-level = 3
 lto = true
 strip = true
 
+# ── Workspace ────────────────────────────────────────────────────────────────
+# 锚点层（EmailBinding / DomainControl 的 preimage、生命周期、VC 组装端口）独立成 crate：
+# 它既不能放进 did-sdk（规范级约束 R1：不做链查询），也不能放进 chain-sdk（声明不含
+# VC/治理语义），埋在 gateway 里又不可复用、难单测。见 docs/DID-SIGNATURE-PROTOCOL.md。
+[workspace]
+members = [".", "crates/mail-anchor"]
+exclude = ["vendor"]
+resolver = "2"
