@@ -29,7 +29,7 @@ use crate::core::api::keys::{
 use crate::core::api::monitor::health_check;
 use crate::core::api::send::send_email;
 use crate::core::api::types::*;
-use crate::core::api::types::{PULL_HOLD_MAX_MS, SSE_HEARTBEAT_SECS, SSE_MAX_LIFE_SECS};
+use crate::core::api::types::{SSE_HEARTBEAT_SECS, SSE_MAX_LIFE_SECS};
 use crate::core::api::welcome::send_welcome;
 use crate::core::api::whoami::whoami;
 use crate::core::pending_notifier::{NotifyKey, PendingNotifier, WaitOutcome};
@@ -136,9 +136,22 @@ pub fn create_router(
         .route("/api/v1/whitelists", delete(delete_whitelist_by_params))
         .route("/api/v1/whitelists", put(update_whitelist_by_params))
         // Admin: pending deliveries (pull-mode for aimail-bridge)
-        .route("/api/v1/admin/pending", post(list_pending_deliveries))
-        .route("/api/v1/admin/pending/stream", get(pending_stream))
-        .route("/api/v1/admin/pending/ack", post(ack_pending_deliveries))
+        // Retired pull scopes (owner ruling 2026-11-26): one pull transport remains, the
+        // AgentSystemId aggregate below. These three stay ROUTED so an old client gets a precise
+        // 410 instead of a 404 that looks like a typo. Webhook PUSH never used them and is
+        // unaffected.
+        .route(
+            "/api/v1/admin/pending",
+            post(retired_pull_scope).get(retired_pull_scope),
+        )
+        .route(
+            "/api/v1/admin/pending/stream",
+            get(retired_pull_scope).post(retired_pull_scope),
+        )
+        .route(
+            "/api/v1/admin/pending/ack",
+            post(retired_pull_scope).get(retired_pull_scope),
+        )
         // AgentSystemId aggregation (one client identity, many addresses)
         .route(
             "/api/v1/agent-system/pending",
@@ -3121,17 +3134,9 @@ fn merge_profile_json(old: &str, new: &str) -> String {
 
 #[derive(Deserialize, Clone)]
 struct PendingPollRequest {
-    #[serde(default = "default_limit")]
+    /// Max rows to hand out. The scope is fixed by the endpoint (one AgentSystemId); the retired
+    /// per-address/system variants were the only users of `emails` / `filter` / `timeout_ms`.
     limit: i64,
-    #[serde(default)]
-    emails: Vec<String>,
-    #[serde(default)]
-    filter: Vec<String>,
-    /// Long-pull hold (ms). 0 = return immediately (current behavior,
-    /// byte-identical); >0 = when the query is empty, wait up to this long
-    /// (clamped to `PULL_HOLD_MAX_MS`) for new mail before returning.
-    #[serde(default)]
-    timeout_ms: i64,
 }
 fn default_limit() -> i64 {
     20
@@ -3184,177 +3189,6 @@ fn group_pending_batches(
     }).collect();
 
     serde_json::json!({ "batches": batches })
-}
-
-/// Isolation key for pull waiters — mirrors the storage filters of
-/// [`pending_records_for`] exactly (single source of truth: that function
-/// calls this one). agent ⇒ its own (system_id, lowercased email), or
-/// `None` when the key has no bound address (handler 403s); system/bridge
-/// ⇒ the system key.
-fn pending_notify_key(key: &ApiKeyRecord) -> Option<NotifyKey> {
-    if is_agent_scope(key) {
-        if key.email_address.is_empty() {
-            return None;
-        }
-        return Some(NotifyKey::Email {
-            system_id: key.system_id.clone(),
-            email: key.email_address.to_lowercase(),
-        });
-    }
-    Some(NotifyKey::System(key.system_id.clone()))
-}
-
-/// Resolve the pending rows the calling key may see, per scope.
-/// Agent keys see ONLY their own address (`(system_id, lowercased email)`);
-/// `emails`/`filter` are accepted and ignored — scope IS the range (§2.5).
-/// System/bridge keys see system-wide rows with the existing domain filter.
-/// Returns the matching notifier key so hold/SSE can wait on the same key
-/// the query filtered by.
-async fn pending_records_for(
-    db: &Database,
-    key: &ApiKeyRecord,
-    req: &PendingPollRequest,
-) -> Result<
-    (NotifyKey, Vec<crate::core::storage::PendingDeliveryRecord>),
-    (StatusCode, Json<ErrorResponse>),
-> {
-    let nkey = pending_notify_key(key).ok_or_else(|| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "No bound address".to_string(),
-                detail: Some(
-                    "agent-scope key has no bound address; pull requires a bound address"
-                        .to_string(),
-                ),
-            }),
-        )
-    })?;
-
-    match &nkey {
-        NotifyKey::Email { system_id, email } => {
-            let records = db
-                .list_pending_by_email(system_id, email, req.limit)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                            detail: Some(e.to_string()),
-                        }),
-                    )
-                })?;
-            Ok((nkey, records))
-        }
-        // Aggregate scope reached through the shared helper (the SSE handler resolves its own
-        // rows, but the key must stay exhaustively handled and consistent if reused).
-        NotifyKey::AgentSystem(agent_system_id) => {
-            let records = db
-                .list_pending_for_agent_system(agent_system_id, req.limit)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                            detail: Some(e.to_string()),
-                        }),
-                    )
-                })?;
-            Ok((nkey, records))
-        }
-        NotifyKey::System(system_id) => {
-            require_scope_any(key, &["system", "bridge"])?;
-            let use_filter = !req.filter.is_empty();
-            let effective_filter: Vec<String> = if use_filter {
-                preprocess_pending_filter(&req.filter)
-            } else if !req.emails.is_empty() {
-                let mut domains: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for email in &req.emails {
-                    if let Some(domain) = email.rsplit('@').next() {
-                        domains.insert(domain.to_string());
-                    }
-                }
-                domains.into_iter().collect()
-            } else {
-                Vec::new()
-            };
-            let use_domains: Option<Vec<String>> = if effective_filter.is_empty() {
-                None
-            } else {
-                Some(effective_filter)
-            };
-            let records = db
-                .list_pending_deliveries(system_id, req.limit, use_domains.as_deref())
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "Database error".to_string(),
-                            detail: Some(e.to_string()),
-                        }),
-                    )
-                })?;
-            Ok((nkey, records))
-        }
-    }
-}
-
-async fn list_pending_deliveries(
-    state: axum::extract::State<HttpState>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    client_id: ClientId,
-    Json(req): Json<PendingPollRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    // Single-slot claim: long-poll holds the same slot as the stream path.
-    // The lease auto-expires (SLOT_POLL_LEASE_SECS) if the holder dies —
-    // no explicit release; a request is stateless.
-    if !state.delivery_slot.try_acquire(
-        api_key.id,
-        client_id_of(&client_id),
-        std::time::Duration::from_secs(SLOT_POLL_LEASE_SECS),
-    ) {
-        return Err(occupied_error(
-            "another client holds the mailbox for this key; retry later".to_string(),
-        ));
-    }
-    let db = &state.factories.email.env_factory.db;
-    let notifier = PendingNotifier::global();
-    let hold =
-        std::time::Duration::from_millis(req.timeout_ms.clamp(0, PULL_HOLD_MAX_MS as i64) as u64);
-
-    // Snapshot BEFORE the query: a notify after this point is either visible
-    // in the query (row committed first) or observed via the wake-up. A notify
-    // before the snapshot has its row visible to the query.
-    let nkey = pending_notify_key(&api_key).ok_or_else(|| {
-        (
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "No bound address".to_string(),
-                detail: Some(
-                    "agent-scope key has no bound address; pull requires a bound address"
-                        .to_string(),
-                ),
-            }),
-        )
-    })?;
-    let since = notifier.snapshot(&nkey);
-
-    let (_key, mut records) = pending_records_for(db, &api_key, &req).await?;
-
-    if records.is_empty() && !hold.is_zero() {
-        match notifier.wait_since(&nkey, since, hold).await {
-            WaitOutcome::Woke => {
-                records = pending_records_for(db, &api_key, &req).await?.1;
-            }
-            WaitOutcome::Timeout => {}
-        }
-    }
-
-    Ok(Json(group_pending_batches(&records)))
 }
 
 fn agent_system_id_from_headers(
@@ -3579,7 +3413,7 @@ async fn agent_system_stream(
         std::time::Duration::from_secs(SSE_HEARTBEAT_SECS),
         std::time::Duration::from_secs(SSE_MAX_LIFE_SECS),
         client_id.0,
-        Some(agent_system_id),
+        agent_system_id,
     )
     .await
 }
@@ -3662,60 +3496,6 @@ async fn ack_agent_system_pending(
     Ok(Json(serde_json::json!({ "acked": count })))
 }
 
-async fn ack_pending_deliveries(
-    state: axum::extract::State<HttpState>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    Json(req): Json<AckRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    const MAX_ACK: usize = 500;
-    if req.ids.len() > MAX_ACK {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "too many ids".to_string(),
-                detail: Some(format!("max {} ids per ACK", MAX_ACK)),
-            }),
-        ));
-    }
-
-    let db = &state.factories.email.env_factory.db;
-    // Scope fork: an agent-scope key may ack ONLY its own address (same
-    // ownership check as the list path, §2.5); its scope guard is the bound
-    // email itself. system/bridge keys are restricted to their own system —
-    // the identity comes from the authenticated key, never from the request
-    // body, so cross-system ids affect 0 rows.
-    let count = if is_agent_scope(&api_key) {
-        if api_key.email_address.is_empty() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "No bound address".to_string(),
-                    detail: Some(
-                        "agent-scope key has no bound address; ack requires a bound address"
-                            .to_string(),
-                    ),
-                }),
-            ));
-        }
-        let email = api_key.email_address.to_lowercase();
-        db.ack_pending_by_email(&api_key.system_id, &email, &req.ids)
-            .await
-    } else {
-        require_scope_any(&api_key, &["system", "bridge"])?;
-        db.ack_deliveries(&api_key.system_id, &req.ids).await
-    }
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Database error".to_string(),
-                detail: Some(e.to_string()),
-            }),
-        )
-    })?;
-    Ok(Json(serde_json::json!({ "acked": count })))
-}
-
 // ── Probe Webhook ───────────────────────────────────────────────
 
 // Probe network reachability to a host:port from the relay.
@@ -3757,7 +3537,6 @@ async fn ack_pending_deliveries(
 
 struct SseStreamState {
     db: std::sync::Arc<crate::core::storage::Database>,
-    api_key: crate::core::storage::ApiKeyRecord,
     nkey: NotifyKey,
     req: PendingPollRequest,
     /// Max delivery id already emitted on this connection. 0 = nothing yet.
@@ -3909,51 +3688,26 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
             st.guard.release_on_rotation();
             return None;
         }
-        if let Some(agent_system_id) = st.agent_system_id.as_deref() {
-            // Event-driven first: ingest calls `notify_agent_system` right after the pending row
-            // commits, so new mail is pushed in ~one DB query instead of waiting out the heartbeat.
-            // The heartbeat stays as the TIMEOUT — keep-alive, lost-notify fallback and the only
-            // clock when nothing is happening.
-            let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
-            st.since = notifier.snapshot(&st.nkey);
-            if matches!(outcome, WaitOutcome::Timeout) {
-                // Nothing was delivered this window: keep the connection obviously alive. No query
-                // on this path any more (it used to re-read the queue every heartbeat).
-                return Some((Ok(": ping\n\n".to_string()), st));
-            }
-            match st
-                .db
-                .list_pending_for_agent_system_budgeted(
-                    agent_system_id,
-                    st.req.limit,
-                    st.snapshot_bytes,
-                )
-                .await
-            {
-                Ok(records) => {
-                    for rec in records {
-                        if rec.id > st.watermark {
-                            st.queue.push_back(rec);
-                        }
-                    }
-                    if !st.queue.is_empty() {
-                        let batch = drain_frame_batch(&mut st.queue, st.snapshot_bytes);
-                        st.watermark = batch.iter().map(|r| r.id).max().unwrap_or(st.watermark);
-                        return Some((sse_mail_frame(&group_pending_batches(&batch)), st));
-                    }
-                }
-                Err(_) => { /* next tick re-queries */ }
-            }
+        let agent_system_id = st.agent_system_id.clone().unwrap_or_default();
+        // Event-driven first: ingest calls `notify_agent_system` right after the pending row
+        // commits, so new mail is pushed in ~one DB query instead of waiting out the heartbeat.
+        // The heartbeat is the TIMEOUT: keep-alive, lost-notify fallback and the only clock when
+        // nothing is happening (its timeout path does NOT query the store).
+        let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
+        st.since = notifier.snapshot(&st.nkey);
+        if matches!(outcome, WaitOutcome::Timeout) {
             return Some((Ok(": ping\n\n".to_string()), st));
         }
-        let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
-        // Snapshot AFTER the wait: a notify between the wait and this point
-        // has gen > snapshot ⇒ caught by the NEXT wait; one before has
-        // its row committed ⇒ seen by the re-query below.
-        st.since = notifier.snapshot(&st.nkey);
-
-        match pending_records_for(&st.db, &st.api_key, &st.req).await {
-            Ok((_k, records)) => {
+        match st
+            .db
+            .list_pending_for_agent_system_budgeted(
+                &agent_system_id,
+                st.req.limit,
+                st.snapshot_bytes,
+            )
+            .await
+        {
+            Ok(records) => {
                 for rec in records {
                     if rec.id > st.watermark {
                         st.queue.push_back(rec);
@@ -3965,13 +3719,7 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
                     return Some((sse_mail_frame(&group_pending_batches(&batch)), st));
                 }
             }
-            Err(_) => {
-                // Transient storage error: keep the stream alive; the next
-                // wake-up re-queries.
-            }
-        }
-        if matches!(outcome, WaitOutcome::Timeout) {
-            return Some((Ok(": ping\n\n".to_string()), st));
+            Err(_) => { /* next wake re-queries */ }
         }
         // Woke (or storage error) with nothing new: keep waiting.
     }
@@ -3980,13 +3728,33 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
 /// Build the SSE response for the given caller. `heartbeat`/`life` are
 /// parameters so tests can inject short periods; the public handler passes
 /// the contract constants.
+/// Retired pull scopes (owner ruling 2026-11-26): per-address and system/domain pull are gone;
+/// the ONLY pull transport is the AgentSystemId aggregate (`/api/v1/agent-system/pending*`).
+///
+/// Kept as a route (not a 404) so an outdated client is told exactly what to do. Webhook PUSH is
+/// untouched — it never went through these paths.
+async fn retired_pull_scope() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::GONE,
+        Json(ErrorResponse {
+            error: "pull_scope_retired".to_string(),
+            detail: Some(
+                "the per-address / system-scope pull endpoints were retired: pull via \
+                 POST /api/v1/agent-system/pending (stream/ack siblings) with an agent-scope key \
+                 plus X-Agent-System-Id and X-Aimail-Anchor. Webhook push is unaffected."
+                    .to_string(),
+            ),
+        }),
+    )
+}
+
 async fn sse_response_scoped(
     state: State<HttpState>,
-    api_key: crate::core::storage::ApiKeyRecord,
+    _api_key: crate::core::storage::ApiKeyRecord,
     heartbeat: std::time::Duration,
     life: std::time::Duration,
     client_id: String,
-    agent_system_id: Option<String>,
+    agent_system_id: String,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // Capacity FIRST: a reconnect storm must be refused cheaply (503) before it allocates the
     // slot, the snapshot or the stream state. The permit rides in the stream state, so an abrupt
@@ -3996,10 +3764,7 @@ async fn sse_response_scoped(
     // different client is 409 without building a stream. Same client
     // (reconnect / rotation) re-acquires and refreshes. Aggregate streams use
     // a synthetic ASID slot (the representative key is not the identity).
-    let slot_key = agent_system_id
-        .as_deref()
-        .map(agent_system_slot_id)
-        .unwrap_or(api_key.id);
+    let slot_key = agent_system_slot_id(&agent_system_id);
     if !state.delivery_slot.try_acquire(
         slot_key,
         client_id.as_str(),
@@ -4022,45 +3787,34 @@ async fn sse_response_scoped(
     // No filter on the stream: the scope fork IS the range (§2.5).
     let req = PendingPollRequest {
         limit: default_limit(),
-        emails: Vec::new(),
-        filter: Vec::new(),
-        timeout_ms: 0,
     };
-    let (nkey, initial) = if let Some(ref agent_system_id) = agent_system_id {
-        // Budgeted: the connect snapshot is the only place where "20 rows" can mean hundreds of
-        // MB (20 x up to smtp.max_message_size). The rest stays pending and arrives next tick.
-        let records = db
-            .list_pending_for_agent_system_budgeted(
-                agent_system_id,
-                req.limit,
-                state.config.http.connect_snapshot_bytes,
-            )
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: "Database error".to_string(),
-                        detail: Some(e.to_string()),
-                    }),
-                )
-            })?;
-        // Aggregate streams wait on the AgentSystem key (pushed on ingest), not on the
-        // representative address' key: mail for a non-representative member would never wake it.
-        (
-            crate::core::pending_notifier::NotifyKey::AgentSystem(agent_system_id.clone()),
-            records,
+    // Budgeted: the connect snapshot is the only place where "20 rows" can mean hundreds of MB
+    // (20 x up to smtp.max_message_size). The rest stays pending and arrives on a later frame.
+    let initial = db
+        .list_pending_for_agent_system_budgeted(
+            &agent_system_id,
+            req.limit,
+            state.config.http.connect_snapshot_bytes,
         )
-    } else {
-        pending_records_for(db, &api_key, &req).await?
-    };
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Database error".to_string(),
+                    detail: Some(e.to_string()),
+                }),
+            )
+        })?;
+    // Aggregate streams wait on the AgentSystem key (pushed on ingest), not on the representative
+    // address' key: mail for a non-representative member would never wake it.
+    let nkey = crate::core::pending_notifier::NotifyKey::AgentSystem(agent_system_id.clone());
     // Snapshot AFTER the connect query: rows already emitted cannot be
     // double-emitted by their own notify.
     let since = notifier.snapshot(&nkey);
 
     let st = SseStreamState {
         db: db.clone(),
-        api_key: api_key.clone(),
         nkey,
         req,
         watermark: 0,
@@ -4071,7 +3825,7 @@ async fn sse_response_scoped(
         queue: initial.into_iter().collect(),
         snapshot_bytes: state.config.http.connect_snapshot_bytes,
         _permit: Some(permit),
-        agent_system_id,
+        agent_system_id: Some(agent_system_id),
         guard: SlotGuard::new(state.delivery_slot.clone(), slot_key, client_id.as_str()),
     };
     let stream = unfold(st, |st| async move { sse_stream_step(st).await });
@@ -4094,31 +3848,6 @@ async fn sse_response_scoped(
             }),
         )),
     }
-}
-
-async fn sse_response(
-    state: State<HttpState>,
-    api_key: crate::core::storage::ApiKeyRecord,
-    heartbeat: std::time::Duration,
-    life: std::time::Duration,
-    client_id: String,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    sse_response_scoped(state, api_key, heartbeat, life, client_id, None).await
-}
-
-async fn pending_stream(
-    state: State<HttpState>,
-    axum::extract::Extension(api_key): axum::extract::Extension<ApiKeyRecord>,
-    client_id: ClientId,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    sse_response(
-        state,
-        api_key,
-        std::time::Duration::from_secs(SSE_HEARTBEAT_SECS),
-        std::time::Duration::from_secs(SSE_MAX_LIFE_SECS),
-        client_id.0,
-    )
-    .await
 }
 
 /// Run one probe and classify the outcome. Pure classifier (2026-10-13):
@@ -4179,43 +3908,6 @@ async fn probe_webhook(
 
 // ── Public config ─────────────────────────────────────────────────
 
-/// Preprocess pending poll filter: domains absorb exact emails and regex.
-/// Bare domains (no '@') wrap all entries under them.
-fn preprocess_pending_filter(raw: &[String]) -> Vec<String> {
-    let mut domains: Vec<String> = Vec::new();
-    let mut remaining: Vec<String> = Vec::new();
-
-    for entry in raw {
-        let entry = entry.trim();
-        if entry.is_empty() {
-            continue;
-        }
-        if !entry.contains('@') {
-            // Bare domain — highest priority, absorbs everything under it
-            if !domains.contains(&entry.to_string()) {
-                domains.push(entry.to_string());
-            }
-        } else {
-            remaining.push(entry.to_string());
-        }
-    }
-
-    if domains.is_empty() {
-        return remaining; // no domains to absorb, return as-is
-    }
-
-    // Filter remaining entries: keep only those whose domain isn't covered
-    let mut result: Vec<String> = domains;
-    for entry in &remaining {
-        if let Some(entry_domain) = entry.rsplit('@').next() {
-            if !result.contains(&entry_domain.to_string()) {
-                result.push(entry.clone());
-            }
-        }
-    }
-    result
-}
-
 // ── Email address validation ──────────────────────────────────────────
 
 /// RFC 5321 `atext` characters excluding '.' (dot).
@@ -4233,20 +3925,6 @@ fn is_atext_no_dot(b: u8) -> bool {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-
-    #[test]
-    fn test_domain_absorbs_exact() {
-        let r = preprocess_pending_filter(&["x.com".into(), "alice@x.com".into()]);
-        assert_eq!(r, vec!["x.com"]);
-    }
-
-    #[test]
-    fn test_unmatched_preserved() {
-        let r = preprocess_pending_filter(&["x.com".into(), "bob@y.com".into()]);
-        assert_eq!(r.len(), 2);
-        assert!(r.contains(&"x.com".to_string()));
-        assert!(r.contains(&"bob@y.com".to_string()));
-    }
 
     // ─── P3-8: domain response meta enrichment ───
 
@@ -4367,6 +4045,193 @@ mod tests {
 
     // ── Peak shaving (2026-11-26): byte budget, budgeted frames, concurrent-stream cap ──
 
+    // ── Retired scopes (2026-11-26) + the single remaining pull transport ──────────────────
+
+    /// Drain up to `want` SSE frames (`event:` … `\n\n`) from a response body.
+    async fn read_sse_events(
+        body: axum::body::Body,
+        want: usize,
+        timeout: std::time::Duration,
+    ) -> Vec<String> {
+        use futures_util::StreamExt;
+        let mut stream = body.into_data_stream();
+        let mut out: Vec<String> = Vec::new();
+        let mut buf = String::new();
+        let deadline = tokio::time::Instant::now() + timeout;
+        while out.len() < want {
+            match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(Ok(bytes))) => {
+                    buf.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(idx) = buf.find("\n\n") {
+                        let frame: String = buf.drain(..idx + 2).collect();
+                        let frame = frame.trim_end().to_string();
+                        if !frame.is_empty() {
+                            out.push(frame);
+                        }
+                        if out.len() >= want {
+                            break;
+                        }
+                    }
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+
+    fn anchor_header(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (email, hash) in pairs {
+            h.append(
+                "x-aimail-anchor",
+                format!("{email};{hash}").parse().unwrap(),
+            );
+        }
+        h
+    }
+
+    #[tokio::test]
+    async fn retired_pull_scopes_answer_410_with_the_new_transport() {
+        let (code, body) = super::retired_pull_scope().await;
+        assert_eq!(code, axum::http::StatusCode::GONE);
+        assert_eq!(body.0.error, "pull_scope_retired");
+        assert!(
+            body.0
+                .detail
+                .unwrap_or_default()
+                .contains("/api/v1/agent-system/pending"),
+            "the refusal must point at the surviving transport"
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_stream_serves_the_whole_group_and_takes_one_slot() {
+        use axum::extract::State;
+        let (db, state, _rx, dir) = probe_fixture("agg-stream").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        db.bind_agent_system_address("as-agg", "a@x.com", "sys1")
+            .await
+            .unwrap();
+        db.bind_agent_system_address("as-agg", "b@x.com", "sys1")
+            .await
+            .unwrap();
+        db.set_address_anchor("a@x.com", &"a".repeat(64))
+            .await
+            .unwrap();
+        seed_key(&db, "sys1", "a@x.com", &["agent"], "aggkey-1").await;
+        seed_pending(&db, "sys1", "a@x.com", "a@x.com", "hello-a").await;
+        seed_pending(&db, "sys1", "b@x.com", "b@x.com", "hello-b").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        let resp = super::sse_response_scoped(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            "agg-1".to_string(),
+            "as-agg".to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+
+        // A different client on the same AgentSystemId is refused while the stream is HELD
+        // (single consumer). Asked before consuming the body, because dropping the stream
+        // releases the slot.
+        let err = super::sse_response_scoped(
+            State(state.clone()),
+            key.clone(),
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+            "agg-stranger".to_string(),
+            "as-agg".to_string(),
+        )
+        .await
+        .expect_err("second consumer must be refused");
+        assert_eq!(err.0, axum::http::StatusCode::CONFLICT);
+
+        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(3)).await;
+        assert_eq!(events.len(), 1, "expected the connect snapshot frame");
+        let data = events[0]
+            .trim_start_matches("event: mail\ndata: ")
+            .to_string();
+        let parsed: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(
+            batch_delivery_emails(&parsed),
+            vec!["a@x.com".to_string(), "b@x.com".to_string()],
+            "one frame carries the whole group"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn aggregate_pending_and_ack_stay_inside_the_agent_system() {
+        use axum::extract::{Extension, State};
+        let (db, state, _rx, dir) = probe_fixture("agg-pending").await;
+        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
+            .await
+            .unwrap();
+        for (asid, email) in [("as-agg", "a@x.com"), ("as-other", "z@x.com")] {
+            db.bind_agent_system_address(asid, email, "sys1")
+                .await
+                .unwrap();
+            db.set_address_anchor(email, &"a".repeat(64)).await.unwrap();
+        }
+        seed_key(&db, "sys1", "a@x.com", &["agent"], "aggkey-2").await;
+        seed_pending(&db, "sys1", "a@x.com", "a@x.com", "mine").await;
+        seed_pending(&db, "sys1", "z@x.com", "z@x.com", "theirs").await;
+        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
+
+        let mut headers = anchor_header(&[("a@x.com", &"a".repeat(64))]);
+        headers.insert("x-agent-system-id", "as-agg".parse().unwrap());
+        let req = super::PendingPollRequest { limit: 20 };
+        let listed = super::list_agent_system_pending(
+            State(state.clone()),
+            Extension(key.clone()),
+            headers.clone(),
+            super::ClientId("agg-p".to_string()),
+            axum::Json(req),
+        )
+        .await
+        .expect("aggregate pending");
+        let body = listed.0;
+        assert_eq!(batch_delivery_emails(&body), vec!["a@x.com".to_string()]);
+        let ids: Vec<i64> = body["batches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|b| b["deliveries"].as_array().unwrap().clone())
+            .map(|d| d["id"].as_i64().unwrap())
+            .collect();
+        let _acked = super::ack_agent_system_pending(
+            State(state.clone()),
+            Extension(key),
+            headers,
+            axum::Json(super::AckRequest { ids }),
+        )
+        .await
+        .expect("ack");
+        assert!(db
+            .list_pending_for_agent_system("as-agg", 20)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.list_pending_for_agent_system("as-other", 20)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "another AgentSystemId keeps its mail"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[tokio::test]
     async fn aggregate_stream_is_woken_by_ingest_not_by_the_clock() {
         // The whole point of the AgentSystem notify key: a stream sitting on a 30 s heartbeat must
@@ -4385,29 +4250,8 @@ mod tests {
 
         let st = SseStreamState {
             db: db.clone(),
-            api_key: crate::core::storage::ApiKeyRecord {
-                id: -1,
-                system_id: "shared_addr_1".to_string(),
-                email_address: "w@test.local".to_string(),
-                key_hash: String::new(),
-                key_prefix: String::new(),
-                scopes: vec!["agent".to_string()],
-                is_active: true,
-                created_at: String::new(),
-                expires_at: None,
-                last_used_at: None,
-                category: "agent".to_string(),
-                activation_code_hash: None,
-                activation_expires_at: None,
-                claimed_at: None,
-            },
             nkey: key.clone(),
-            req: super::PendingPollRequest {
-                limit: 20,
-                emails: Vec::new(),
-                filter: Vec::new(),
-                timeout_ms: 0,
-            },
+            req: super::PendingPollRequest { limit: 20 },
             watermark: 0,
             since,
             heartbeat: std::time::Duration::from_secs(30),
@@ -5321,819 +5165,6 @@ mod tests {
         }
         out.sort();
         out
-    }
-
-    /// Baseline golden: system-scope pull sees every pending row of its
-    /// system, grouped by identical payload.
-    #[tokio::test]
-    async fn pull_system_scope_sees_all_rows_grouped_by_body() {
-        let (db, state, _rx, _dir) = probe_fixture("pull-sys").await;
-        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sys1", "", &["system"], "syskey01").await;
-        seed_pending(&db, "sys1", "x.com", "a@x.com", "hello").await;
-        seed_pending(&db, "sys1", "x.com", "b@x.com", "hello").await;
-        seed_pending(&db, "sys1", "y.com", "c@y.com", "world").await;
-
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "syskey01",
-            "sys1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        // Two distinct payloads ⇒ exactly two batches (grouping preserved).
-        assert_eq!(
-            resp["batches"].as_array().unwrap().len(),
-            2,
-            "body was {resp}"
-        );
-        assert_eq!(
-            batch_delivery_emails(&resp),
-            vec!["a@x.com", "b@x.com", "c@y.com"],
-            "body was {resp}"
-        );
-    }
-
-    /// Baseline golden: agent-scope pull sees ONLY its own address, even
-    /// when other addresses in the same system have mail.
-    #[tokio::test]
-    async fn pull_agent_scope_returns_only_own_address() {
-        let (db, state, _rx, _dir) = probe_fixture("pull-agent").await;
-        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey03").await;
-        seed_pending(&db, "sys1", "x.com", "a@x.com", "mine").await;
-        seed_pending(&db, "sys1", "x.com", "b@x.com", "notmine").await;
-
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "agentkey03",
-            "sys1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        let batches = resp["batches"].as_array().unwrap();
-        assert_eq!(batches.len(), 1, "body was {resp}");
-        assert_eq!(
-            batch_delivery_emails(&resp),
-            vec!["a@x.com"],
-            "body was {resp}"
-        );
-    }
-
-    /// Agent key without a bound address: pull is 403 (no isolation key).
-    #[tokio::test]
-    async fn pull_agent_unbound_address_rejected() {
-        let (db, state, _rx, _dir) = probe_fixture("pull-agent-nobound").await;
-        seed_key(&db, "sys1", "", &["agent"], "agentkey04").await;
-
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "agentkey04",
-            "sys1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "body was {resp}");
-    }
-
-    /// Long-pull: an empty hold returns the mail that arrives during the
-    /// hold (woken by the writer's notify), without waiting the full hold.
-    #[tokio::test]
-    async fn pull_agent_hold_wakes_on_new_mail() {
-        let (db, state, _rx, _dir) = probe_fixture("pull-agent-hold").await;
-        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey05").await;
-
-        let started = std::time::Instant::now();
-        let router = probe_router(&state);
-        let db2 = db.clone();
-        // Simulate the writer's contract (C5 wires this into the webhook):
-        // insert the row, then notify the agent key.
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            seed_pending(&db2, "sys1", "x.com", "a@x.com", "late").await;
-            crate::core::pending_notifier::PendingNotifier::global()
-                .notify_email("sys1", "a@x.com");
-        });
-        let (status, resp) = signed_post(
-            router,
-            "agentkey05",
-            "sys1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20, "timeout_ms": 3000 }),
-        )
-        .await;
-        writer.await.unwrap();
-        let elapsed = started.elapsed();
-
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(
-            batch_delivery_emails(&resp),
-            vec!["a@x.com"],
-            "body was {resp}"
-        );
-        // Woken by the writer, not by the 3s timeout.
-        assert!(
-            elapsed < Duration::from_millis(2500),
-            "hold was not woken, took {elapsed:?}"
-        );
-    }
-
-    /// Long-pull timeout: no mail arrives ⇒ 200 + empty batches after the
-    /// hold elapses (clients treat it as an ordinary empty round).
-    ///
-    /// Uses a UNIQUE system_id so the process-global notifier key is
-    /// isolated from the sibling `..._wakes_on_new_mail` test (they share
-    /// the same `PendingNotifier::global()` instance, so a same-key notify
-    /// from the other test would otherwise wake this waiter early).
-    #[tokio::test]
-    async fn pull_agent_hold_timeout_returns_empty() {
-        let (db, state, _rx, _dir) = probe_fixture("pull-agent-hold-to").await;
-        db.insert_system_domain("d1", "holdto1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "holdto1", "a@x.com", &["agent"], "agentkey06").await;
-
-        let started = std::time::Instant::now();
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "agentkey06",
-            "holdto1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20, "timeout_ms": 800 }),
-        )
-        .await;
-        let elapsed = started.elapsed();
-
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(resp["batches"], serde_json::json!([]), "body was {resp}");
-        assert!(
-            elapsed >= Duration::from_millis(750),
-            "returned before the hold elapsed: {elapsed:?}"
-        );
-    }
-
-    /// Cross-system ack is a no-op (the identity filter is the calling key's
-    /// own system_id — an existing row of another system survives).
-    #[tokio::test]
-    async fn ack_system_key_cannot_ack_other_system_rows() {
-        let (db, state, _rx, _dir) = probe_fixture("ack-xsys").await;
-        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sys1", "", &["system"], "syskey02").await;
-        seed_key(&db, "sys2", "", &["system"], "syskey03").await;
-        let id = seed_pending(&db, "sys1", "x.com", "a@x.com", "x").await;
-
-        // sys2's key tries to ack sys1's row.
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "syskey03",
-            "sys2",
-            "/api/v1/admin/pending/ack",
-            &serde_json::json!({ "ids": [id] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(resp["acked"], serde_json::json!(0), "body was {resp}");
-        // Row is still there for its owner.
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "syskey02",
-            "sys1",
-            "/api/v1/admin/pending",
-            &serde_json::json!({ "limit": 20 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(
-            batch_delivery_emails(&resp),
-            vec!["a@x.com"],
-            "body was {resp}"
-        );
-    }
-
-    /// Agent ack: cross-address is a no-op, own address is acked.
-    #[tokio::test]
-    async fn ack_agent_key_only_acks_own_address() {
-        let (db, state, _rx, _dir) = probe_fixture("ack-agent").await;
-        db.insert_system_domain("d1", "sys1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sys1", "a@x.com", &["agent"], "agentkey07").await;
-        let own = seed_pending(&db, "sys1", "x.com", "a@x.com", "mine").await;
-        let other = seed_pending(&db, "sys1", "x.com", "b@x.com", "theirs").await;
-
-        // Try to ack the other address's row: no-op.
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "agentkey07",
-            "sys1",
-            "/api/v1/admin/pending/ack",
-            &serde_json::json!({ "ids": [other] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(resp["acked"], serde_json::json!(0), "body was {resp}");
-
-        // Own row: acked.
-        let (status, resp) = signed_post(
-            probe_router(&state),
-            "agentkey07",
-            "sys1",
-            "/api/v1/admin/pending/ack",
-            &serde_json::json!({ "ids": [own] }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "body was {resp}");
-        assert_eq!(resp["acked"], serde_json::json!(1), "body was {resp}");
-    }
-
-    // ── SSE stream tests (Phase 1.5) ──────────────────────────────
-    // Each test uses a UNIQUE system_id: `PendingNotifier::global()` is
-    // a process-wide static, so a sibling test's notify on the same key
-    // would otherwise wake this test's stream early.
-
-    /// Read up to `want` complete SSE events (frames end with a blank
-    /// line) from a response body, bounded by `timeout`.
-    async fn read_sse_events(body: Body, want: usize, timeout: std::time::Duration) -> Vec<String> {
-        use futures_util::StreamExt;
-        let mut stream = body.into_data_stream();
-        let mut buf = String::new();
-        let mut events = Vec::new();
-        let deadline = std::time::Instant::now() + timeout;
-        loop {
-            if events.len() >= want {
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let chunk = tokio::time::timeout(remaining, stream.next()).await;
-            match chunk {
-                Ok(Some(Ok(bytes))) => {
-                    buf.push_str(&String::from_utf8_lossy(&bytes));
-                    while let Some(pos) = buf.find("\n\n") {
-                        events.push(buf[..pos].to_string());
-                        buf.drain(..=pos + 1);
-                    }
-                }
-                Ok(Some(Err(e))) => {
-                    events.push(format!("#ERR {e}"));
-                    break;
-                }
-                Ok(None) => break, // stream ended
-                Err(_) => break,   // timeout
-            }
-        }
-        events
-    }
-
-    /// Headers per contract + first frame == the POST response shape for
-    /// the same rows (byte-identical `group_pending_batches` output), and
-    /// the agent sees ONLY its own address.
-    #[tokio::test]
-    async fn sse_stream_headers_shape_and_agent_isolation() {
-        let (db, state, _rx, _dir) = probe_fixture("sse-1").await;
-        db.insert_system_domain("d1", "sse1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sse1", "a@x.com", &["agent"], "ssek1key").await;
-        // Two rows, same payload ⇒ one batch; a second address (other key)
-        // must NOT appear.
-        seed_pending(&db, "sse1", "a@x.com", "a@x.com", "hello-1").await;
-        seed_pending(&db, "sse1", "b@x.com", "b@x.com", "hello-1").await;
-
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-        let resp = sse_response(
-            State(state),
-            key,
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            "test-sse-1".to_string(),
-        )
-        .await
-        .unwrap();
-
-        // Header contract.
-        assert_eq!(
-            resp.headers().get("content-type").unwrap(),
-            "text/event-stream"
-        );
-        assert_eq!(resp.headers().get("cache-control").unwrap(), "no-cache");
-        assert_eq!(resp.headers().get("x-accel-buffering").unwrap(), "no");
-        assert_eq!(resp.headers().get("connection").unwrap(), "keep-alive");
-
-        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(3)).await;
-        assert_eq!(events.len(), 1, "expected one mail frame, got {events:?}");
-        assert!(
-            events[0].starts_with("event: mail\ndata: "),
-            "{:?}",
-            events[0]
-        );
-
-        // data payload == POST response shape for the agent's own rows.
-        let records = db
-            .list_pending_by_email("sse1", "a@x.com", 200)
-            .await
-            .unwrap();
-        let expected = group_pending_batches(&records).to_string();
-        assert_eq!(events[0][18..], expected, "shape must equal POST output");
-        // Isolation: only a@x.com present.
-        assert!(expected.contains("a@x.com"));
-        assert!(!expected.contains("b@x.com"));
-    }
-
-    /// system-scope stream sees the whole system (all addresses, all
-    /// distinct payloads).
-    #[tokio::test]
-    async fn sse_stream_system_scope_sees_all() {
-        let (db, state, _rx, _dir) = probe_fixture("sse-2").await;
-        db.insert_system_domain("d1", "sse2", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sse2", "sys@x.com", &["system"], "ssek2key").await;
-        seed_pending(&db, "sse2", "a@x.com", "a@x.com", "p1").await;
-        seed_pending(&db, "sse2", "b@x.com", "b@x.com", "p2").await;
-
-        let key = db.get_api_key_by_email("sys@x.com").await.unwrap().unwrap();
-        let resp = sse_response(
-            State(state),
-            key,
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            "test-sse-2".to_string(),
-        )
-        .await
-        .unwrap();
-        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(3)).await;
-        assert_eq!(events.len(), 1, "got {events:?}");
-        let v: serde_json::Value = serde_json::from_str(&events[0][18..]).unwrap();
-        assert_eq!(v["batches"].as_array().unwrap().len(), 2);
-        let all: String = v.to_string();
-        assert!(all.contains("a@x.com") && all.contains("b@x.com"));
-    }
-
-    /// Empty connect + writer wake-up ⇒ mail frame arrives quickly
-    /// (at-least-once: the wake-up re-queries and emits new rows).
-    #[tokio::test]
-    async fn sse_stream_wakes_on_new_mail() {
-        let (db, state, _rx, _dir) = probe_fixture("sse-3").await;
-        db.insert_system_domain("d1", "sse3", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sse3", "a@x.com", &["agent"], "ssek3key").await;
-
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-        let resp = sse_response(
-            State(state),
-            key,
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-            "test-sse-3".to_string(),
-        )
-        .await
-        .unwrap();
-
-        // Writer simulation: insert AFTER connect, then notify (exactly
-        // what webhook.rs does post-commit).
-        let db2 = db.clone();
-        let writer = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            seed_pending(&db2, "sse3", "x.com", "a@x.com", "late").await;
-            crate::core::pending_notifier::PendingNotifier::global()
-                .notify_email("sse3", "a@x.com");
-            crate::core::pending_notifier::PendingNotifier::global().notify_system("sse3");
-        });
-
-        let started = std::time::Instant::now();
-        let events = read_sse_events(resp.into_body(), 1, Duration::from_secs(4)).await;
-        let elapsed = started.elapsed();
-        writer.await.unwrap();
-
-        assert_eq!(events.len(), 1, "got {events:?}");
-        assert!(events[0].starts_with("event: mail"), "{:?}", events[0]);
-        assert!(events[0].contains("late"));
-        assert!(
-            elapsed < Duration::from_secs(2),
-            "wake-up took too long: {elapsed:?}"
-        );
-    }
-
-    /// at-least-once: rows sent on connection 1 but NOT acked are
-    /// re-sent on connection 2 (watermark resets per connection).
-    #[tokio::test]
-    async fn sse_stream_reconnect_resends_unacked() {
-        let (db, state, _rx, _dir) = probe_fixture("sse-4").await;
-        db.insert_system_domain("d1", "sse4", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sse4", "a@x.com", &["agent"], "ssek4key").await;
-        seed_pending(&db, "sse4", "a@x.com", "a@x.com", "persist").await;
-
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        // Connection 1: sees the row (and we deliberately do NOT ack).
-        let resp1 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_secs(5),
-            Duration::from_secs(2),
-            "test-sse-4".to_string(),
-        )
-        .await
-        .unwrap();
-        let ev1 = read_sse_events(resp1.into_body(), 1, Duration::from_secs(3)).await;
-        assert_eq!(ev1.len(), 1, "conn1 got {ev1:?}");
-        assert!(ev1[0].contains("persist"));
-
-        // Connection 2: the unacked row is re-sent.
-        let resp2 = sse_response(
-            State(state),
-            key,
-            Duration::from_secs(5),
-            Duration::from_secs(2),
-            "test-sse-4".to_string(),
-        )
-        .await
-        .unwrap();
-        let ev2 = read_sse_events(resp2.into_body(), 1, Duration::from_secs(3)).await;
-        assert_eq!(ev2.len(), 1, "conn2 got {ev2:?}");
-        assert!(ev2[0].contains("persist"), "unacked row must be re-sent");
-    }
-
-    /// Heartbeat (injected 100ms) pings while idle; the stream ends at
-    /// the injected max life.
-    #[tokio::test]
-    async fn sse_stream_heartbeat_and_max_life() {
-        let (db, state, _rx, _dir) = probe_fixture("sse-5").await;
-        db.insert_system_domain("d1", "sse5", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "sse5", "a@x.com", &["agent"], "ssek5key").await;
-
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-        let resp = sse_response(
-            State(state),
-            key,
-            Duration::from_millis(100),
-            Duration::from_millis(900),
-            "test-sse-5".to_string(),
-        )
-        .await
-        .unwrap();
-        // 900ms life @ 100ms heartbeat ⇒ ≥5 pings, then the stream ends.
-        let events = read_sse_events(resp.into_body(), 5, Duration::from_secs(3)).await;
-        assert!(events.len() >= 5, "expected ≥5 pings, got {events:?}");
-        assert!(events.iter().all(|e| e == ": ping"), "{events:?}");
-    }
-
-    // ─── Single-slot mailbox lock (one client per key) ─────────────
-
-    /// Poll the pending endpoint as `client` (returns status + error body).
-    async fn poll_as(
-        state: &HttpState,
-        key: &crate::core::storage::ApiKeyRecord,
-        client: &str,
-    ) -> (StatusCode, Option<String>) {
-        let req = Json(PendingPollRequest {
-            limit: 10,
-            emails: Vec::new(),
-            filter: Vec::new(),
-            timeout_ms: 0,
-        });
-        let r = list_pending_deliveries(
-            State(state.clone()),
-            axum::extract::Extension(key.clone()),
-            ClientId(client.to_string()),
-            req,
-        )
-        .await;
-        match r {
-            Ok(_) => (StatusCode::OK, None),
-            Err((s, Json(e))) => (s, Some(e.error)),
-        }
-    }
-
-    /// First connection wins; a different client is 409 without building a
-    /// stream; the same client re-acquires (reconnect / rotation).
-    #[tokio::test]
-    async fn slot_stream_first_wins_and_same_client_reacquires() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-1").await;
-        db.insert_system_domain("d1", "slot1", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot1", "a@x.com", &["agent"], "slotk1key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        let r1 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "c1".to_string(),
-        )
-        .await;
-        assert!(r1.is_ok(), "first connection must win");
-        let r2 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "c2".to_string(),
-        )
-        .await;
-        assert_eq!(
-            r2.as_ref().unwrap_err().0,
-            StatusCode::CONFLICT,
-            "a different client must be 409 while c1 holds the slot"
-        );
-        let r3 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "c1".to_string(),
-        )
-        .await;
-        assert!(r3.is_ok(), "the same client re-acquires (reconnect)");
-        // Legacy clients (no header ⇒ id "") are just another client.
-        let r4 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            String::new(),
-        )
-        .await;
-        assert_eq!(r4.as_ref().unwrap_err().0, StatusCode::CONFLICT);
-    }
-
-    /// The 409 "occupied" detail must name the HOLDER, not the rejected
-    /// requester (regression: the detail used to print the requester's own
-    /// client id, mislabeling it as the holder).
-    #[tokio::test]
-    async fn slot_stream_409_detail_names_holder_not_requester() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-6").await;
-        db.insert_system_domain("d1", "slot6", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot6", "a@x.com", &["agent"], "slotk6key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        // c1 takes the slot and holds it (a short-lived stream is enough —
-        // we only need the slot claimed while c2 is rejected).
-        let r1 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "holder-c1".to_string(),
-        )
-        .await;
-        assert!(r1.is_ok(), "first connection must win");
-        let r2 = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "requester-c2".to_string(),
-        )
-        .await;
-        let (status, Json(e)) = r2.unwrap_err();
-        assert_eq!(status, StatusCode::CONFLICT);
-        let detail = e.detail.as_deref().unwrap_or("");
-        assert!(
-            detail.contains("holder-c1"),
-            "detail must name the holder, got: {detail:?}"
-        );
-        assert!(
-            !detail.contains("requester-c2"),
-            "detail must not name the rejected requester, got: {detail:?}"
-        );
-    }
-
-    /// The slot is per API KEY, not per client id: one process (one
-    /// client id) holding two different agents' keys must get both
-    /// streams — same id on a *different* key is a different slot, so
-    /// it can never 409-occupy or be occupied by the other connection.
-    #[tokio::test]
-    async fn slot_is_per_key_same_client_id_multiple_agents() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-7").await;
-        db.insert_system_domain("d1", "slot7", "a@x.com", None, None)
-            .await
-            .unwrap();
-        db.insert_system_domain("d2", "slot7b", "b@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot7", "a@x.com", &["agent"], "slotk7keya").await;
-        seed_key(&db, "slot7b", "b@x.com", &["agent"], "slotk7keyb").await;
-        let key_a = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-        let key_b = db.get_api_key_by_email("b@x.com").await.unwrap().unwrap();
-
-        // One client id, two keys: both streams must succeed while both
-        // are open (the second must NOT see the first's slot).
-        let r1 = sse_response(
-            State(state.clone()),
-            key_a.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "shared-c1".to_string(),
-        )
-        .await;
-        assert!(r1.is_ok(), "agent A's stream must win its own slot");
-        let r2 = sse_response(
-            State(state.clone()),
-            key_b.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "shared-c1".to_string(),
-        )
-        .await;
-        assert!(
-            r2.is_ok(),
-            "same client id on a DIFFERENT key must not 409 (slot is per key)"
-        );
-        // Cross-check: a genuinely different client on key A is still
-        // blocked — per-key isolation did not weaken the per-key lock.
-        let r3 = sse_response(
-            State(state.clone()),
-            key_a.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "other-c2".to_string(),
-        )
-        .await;
-        assert_eq!(
-            r3.as_ref().unwrap_err().0,
-            StatusCode::CONFLICT,
-            "a different client on the same key must still 409"
-        );
-    }
-
-    /// A stranger is 409 while a stream holder is ACTIVE and stays 409
-    /// after the holder's max-life rotation (grace window); the holder's
-    /// own client is never blocked.
-    #[tokio::test]
-    async fn slot_stream_holder_active_and_rotation_grace() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-2").await;
-        db.insert_system_domain("d1", "slot2", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot2", "a@x.com", &["agent"], "slotk2key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        // Holder consumes the stream to its max life (200ms) ⇒ the
-        // rotation path releases the slot WITH the grace window.
-        let holder = tokio::spawn({
-            let st = state.clone();
-            let k = key.clone();
-            async move {
-                let r = sse_response(
-                    State(st),
-                    k,
-                    Duration::from_millis(50),
-                    Duration::from_millis(200),
-                    "holder-1".to_string(),
-                )
-                .await;
-                if let Ok(resp) = r {
-                    read_sse_events(resp.into_body(), 100, Duration::from_millis(800)).await;
-                }
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        // Stranger blocked while the holder is active.
-        let (s, _) = poll_as(&state, &key, "stranger-1").await;
-        assert_eq!(s, StatusCode::CONFLICT, "stranger 409 while holder active");
-        // The holder's own client is never blocked (refresh).
-        let (s2, _) = poll_as(&state, &key, "holder-1").await;
-        assert_eq!(s2, StatusCode::OK);
-        holder.await.unwrap();
-        // After the rotation, the stranger is still blocked (grace window).
-        let (s3, _) = poll_as(&state, &key, "stranger-2").await;
-        assert_eq!(
-            s3,
-            StatusCode::CONFLICT,
-            "stranger stays 409 during the post-rotation grace window"
-        );
-        // The owner still gets through the grace (reconnect).
-        let (s4, _) = poll_as(&state, &key, "holder-1").await;
-        assert_eq!(s4, StatusCode::OK);
-    }
-
-    /// Abrupt disconnect (the reader stops ⇒ the stream drops) releases the
-    /// slot with ZERO grace: a stranger takes over at once.
-    #[tokio::test]
-    async fn slot_stream_abrupt_drop_zero_grace() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-3").await;
-        db.insert_system_domain("d1", "slot3", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot3", "a@x.com", &["agent"], "slotk3key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        let resp = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "h3".to_string(),
-        )
-        .await
-        .unwrap();
-        // Read one frame, then stop: the body drops ⇒ guard drop (zero grace).
-        let _ev = read_sse_events(resp.into_body(), 1, Duration::from_millis(300)).await;
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let (s, _) = poll_as(&state, &key, "stranger-3").await;
-        assert_eq!(
-            s,
-            StatusCode::OK,
-            "a stranger takes over immediately after an abrupt disconnect"
-        );
-    }
-
-    /// Long-poll lease: while a holder's lease is live the stranger is 409;
-    /// after expiry the stranger takes over (no explicit release exists —
-    /// a dead holder's lease simply expires). The same-client refresh path
-    /// is covered by the types unit tests + slot_poll_blocked_by_stream_holder.
-    #[tokio::test]
-    async fn slot_poll_lease_expiry_takeover() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-4").await;
-        db.insert_system_domain("d1", "slot4", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot4", "a@x.com", &["agent"], "slotk4key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        // Simulate a poll holder with a short lease via the public API.
-        assert!(state
-            .delivery_slot
-            .try_acquire(key.id, "poll-holder", Duration::from_millis(120)));
-        let (s, _) = poll_as(&state, &key, "other-1").await;
-        assert_eq!(s, StatusCode::CONFLICT, "lease live ⇒ stranger 409");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        let (s3, _) = poll_as(&state, &key, "other-2").await;
-        assert_eq!(
-            s3,
-            StatusCode::OK,
-            "after lease expiry the stranger takes over"
-        );
-    }
-
-    /// The poll path is the SAME slot as the stream path: a live stream
-    /// holder blocks a stranger's poll (not just a stranger's stream).
-    #[tokio::test]
-    async fn slot_poll_blocked_by_stream_holder() {
-        let (db, state, _rx, _dir) = probe_fixture("slot-5").await;
-        db.insert_system_domain("d1", "slot5", "a@x.com", None, None)
-            .await
-            .unwrap();
-        seed_key(&db, "slot5", "a@x.com", &["agent"], "slotk5key").await;
-        let key = db.get_api_key_by_email("a@x.com").await.unwrap().unwrap();
-
-        let resp = sse_response(
-            State(state.clone()),
-            key.clone(),
-            Duration::from_millis(50),
-            Duration::from_secs(10),
-            "stream-holder".to_string(),
-        )
-        .await
-        .unwrap();
-        // Keep the stream alive (actively polled) so the slot stays held.
-        let keeper = tokio::spawn({
-            async move {
-                read_sse_events(resp.into_body(), 100, Duration::from_millis(500)).await;
-            }
-        });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let (s, detail) = poll_as(&state, &key, "poller-x").await;
-        assert_eq!(
-            s,
-            StatusCode::CONFLICT,
-            "a stranger's poll is 409 while the stream holds"
-        );
-        assert!(
-            detail.as_deref().is_some_and(|d| d.contains("occupied")),
-            "{detail:?}"
-        );
-        // The holder's own client can still poll.
-        let (s2, _) = poll_as(&state, &key, "stream-holder").await;
-        assert_eq!(s2, StatusCode::OK);
-        keeper.await.unwrap();
     }
 
     // ─── effective manager resolution (registration defaults) ───
