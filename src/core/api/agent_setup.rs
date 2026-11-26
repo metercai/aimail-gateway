@@ -204,6 +204,11 @@ fn render(recipe: &Recipe, gateway: &str) -> Value {
     // "run this to install the SDK". Host detection, OS detection and the interpreter live in the
     // script (GET …/agent-setup/bootstrap), which is why this URL carries no parameters.
     let bootstrap = format!("{base}/api/v1/agent-setup/bootstrap");
+    // There is no single fetching command that works everywhere: Windows has no `sh` outside a
+    // POSIX shim (and Windows PowerShell aliases `curl` to Invoke-WebRequest, where `-fsSL` is not
+    // a flag), while a minimal Linux image can ship neither curl nor wget (the deerflow host image
+    // has neither). So the URL stays one; the way to fetch it is offered per capability, and the
+    // agent picks the one its own environment supports.
     json!({
         "host": recipe.host,
         "kind": recipe.kind.as_str(),
@@ -211,10 +216,14 @@ fn render(recipe: &Recipe, gateway: &str) -> Value {
         "restart": recipe.restart,
         // For a human reading the recipe table; NOT what the agent runs.
         "host_specific_install": recipe.install,
-        "bootstrap": format!("curl -fsSL '{bootstrap}' | sh"),
         "bootstrap_url": bootstrap,
+        "bootstrap": format!("curl -fsSL '{bootstrap}' | sh"),
+        "bootstrap_ps1": format!("iwr -useb '{bootstrap}?shell=ps1' | iex"),
+        "bootstrap_python": format!(
+            "python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh"
+        ),
         "instruction": format!(
-            "Run `curl -fsSL '{bootstrap}' | sh` to install the AIMail SDK. The script works out the platform, the runtime and the host's own install command by itself; its last line says ok or fail. If `aimail_address` is still unavailable afterwards, {} and retry activation.",
+            "Install the AIMail SDK with `curl -fsSL '{bootstrap}' | sh` (POSIX; no curl available: `python3 -c \"import urllib.request as u;open('/tmp/aimail-bootstrap.sh','wb').write(u.urlopen('{bootstrap}').read())\" && sh /tmp/aimail-bootstrap.sh`; Windows: `iwr -useb '{bootstrap}?shell=ps1' | iex`), then retry activation. If it is still unavailable afterwards, {}.",
             recipe.restart
         ),
     })
@@ -892,7 +901,18 @@ mod tests {
             !instruction.contains("host="),
             "the prompt-side instruction must never mention a host parameter: {instruction}"
         );
-        assert!(instruction.contains("works out the platform"), "{instruction}");
+        assert!(
+            instruction.contains("iwr -useb"),
+            "Windows has no sh, so the payload must offer the PowerShell way: {instruction}"
+        );
+        assert!(
+            instruction.contains("urllib.request"),
+            "a minimal image can lack curl (deerflow has neither curl nor wget): {instruction}"
+        );
+        assert!(
+            !instruction.contains("works out the platform"),
+            "the meta-explanation is noise for the agent; the script prints its own verdict: {instruction}"
+        );
         assert!(instruction.contains("retry activation"), "{instruction}");
     }
 

@@ -25,7 +25,7 @@ use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 /// it instead of carrying a second copy of the wording.
 pub fn address_activation_prompt(address: &str, gateway_url: &str, code: &str) -> String {
     format!(
-        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, run `curl -fsSL '{gateway_url}/api/v1/agent-setup/bootstrap' | sh` to install the AIMail SDK (the script works out the platform, the runtime and the host's own install command by itself, and its last line says ok or fail), then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
+        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the AIMail SDK with `curl -fsSL '{gateway_url}/api/v1/agent-setup/bootstrap' | sh` (POSIX; on Windows use `iwr -useb '{gateway_url}/api/v1/agent-setup/bootstrap?shell=ps1' | iex`), then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
     )
 }
 
