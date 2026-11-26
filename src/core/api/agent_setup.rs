@@ -71,8 +71,18 @@ struct Recipe {
     pythons: &'static [&'static str],
     /// Command the host CLI needs for plugin registration, run only when that CLI exists.
     register: &'static str,
-    /// Env vars / PATH names that identify this host when the agent did not say who it is.
+    /// Env vars that mean "this host is configured here" (strongest evidence).
     markers: &'static [&'static str],
+    /// The host's own CLI on PATH (second strongest).
+    cli: &'static str,
+    /// Substrings that mean "the process I run inside is this host" (chosen to be unambiguous).
+    proc_tokens: &'static [&'static str],
+    /// Global npm package that only exists when this host is installed.
+    npm_pkgs: &'static [&'static str],
+    /// Home/config directories that only exist inside this host.
+    dirs: &'static [&'static str],
+    /// Python modules only this host ships.
+    py_mods: &'static [&'static str],
 }
 
 /// Aliases an agent may use for itself (its product name), all folded onto one row.
@@ -98,6 +108,11 @@ const RECIPES: &[Recipe] = &[
         pythons: &[],
         register: "dsh plugin --profile web add agent-aimail",
         markers: &["DSH_HOME"],
+        cli: "dsh",
+        proc_tokens: &["@deepseek-ai/dsh", "/dsh"],
+        npm_pkgs: &["@deepseek-ai/dsh"],
+        dirs: &["$HOME/.dsh"],
+        py_mods: &[],
     },
     Recipe {
         host: "pi",
@@ -107,6 +122,11 @@ const RECIPES: &[Recipe] = &[
         pythons: &[],
         register: "pi install npm:agent-aimail",
         markers: &["PI_HOME"],
+        cli: "pi",
+        proc_tokens: &["pi-coding-agent", "earendil-works/pi"],
+        npm_pkgs: &["@earendil-works/pi-coding-agent"],
+        dirs: &["$HOME/.pi"],
+        py_mods: &[],
     },
     Recipe {
         host: "openclaw",
@@ -116,6 +136,11 @@ const RECIPES: &[Recipe] = &[
         pythons: &[],
         register: "openclaw plugins install agent-aimail --force --accept-capabilities",
         markers: &["OPENCLAW_HOME"],
+        cli: "openclaw",
+        proc_tokens: &["openclaw"],
+        npm_pkgs: &["openclaw"],
+        dirs: &["$HOME/.openclaw", "/app/.openclaw"],
+        py_mods: &[],
     },
     Recipe {
         host: "hermes",
@@ -127,19 +152,37 @@ const RECIPES: &[Recipe] = &[
         // one that ends up holding the distribution is the one reported back.
         pythons: &[
             "/opt/hermes/.venv/bin/python3",
-            "/opt/hermes/tools/python/bin/python3",
+            "/opt/hermes/tools/python-*/bin/python3",
         ],
         register: "",
         markers: &["HERMES_HOME"],
+        cli: "hermes",
+        proc_tokens: &["/opt/hermes", " hermes "],
+        npm_pkgs: &[],
+        dirs: &["/opt/hermes", "$HOME/.hermes"],
+        py_mods: &["hermes_agent"],
     },
     Recipe {
         host: "deerflow",
         install: "pip install agent-aimail",
         restart: "restart the deerflow host so the extension registry reloads",
         kind: Kind::Python,
-        pythons: &["/opt/deerflow/.venv/bin/python3"],
+        pythons: &[
+            "/app/backend/.venv/bin/python3",
+            "/app/backend/.venv/bin/python",
+        ],
         register: "",
         markers: &["DEERFLOW_HOME", "DEER_FLOW_HOME"],
+        cli: "",
+        proc_tokens: &["deerflow"],
+        npm_pkgs: &[],
+        dirs: &[
+            "/app/backend/langgraph.json",
+            "/app/backend",
+            "/src-backend",
+            "$HOME/.deerflow",
+        ],
+        py_mods: &["deerflow"],
     },
 ];
 
@@ -157,21 +200,21 @@ fn resolve(host: &str) -> Option<&'static Recipe> {
 
 fn render(recipe: &Recipe, gateway: &str) -> Value {
     let base = gateway.trim_end_matches('/');
-    let bootstrap = format!("{base}/api/v1/agent-setup/bootstrap?host={}", recipe.host);
+    // One command for every host, every OS. The agent is TOLD nothing about hosts: it is only told
+    // "run this to install the SDK". Host detection, OS detection and the interpreter live in the
+    // script (GET …/agent-setup/bootstrap), which is why this URL carries no parameters.
+    let bootstrap = format!("{base}/api/v1/agent-setup/bootstrap");
     json!({
         "host": recipe.host,
         "kind": recipe.kind.as_str(),
         "install": recipe.install,
         "restart": recipe.restart,
-        // The field to act on: ONE url, whatever the OS. The script decides shell dialect,
-        // interpreter and installer at run time, so the agent never has to guess.
+        // For a human reading the recipe table; NOT what the agent runs.
+        "host_specific_install": recipe.install,
         "bootstrap": format!("curl -fsSL '{bootstrap}' | sh"),
         "bootstrap_url": bootstrap,
-        "bootstrap_windows": format!("{bootstrap}&shell=ps1"),
-        // One sentence an agent can act on without interpreting: run `install`, then re-check the
-        // tool; if it is still missing, ask the user to restart the host and retry activation.
         "instruction": format!(
-            "Run `curl -fsSL '{bootstrap}' | sh` now (it adapts to this OS and runtime itself; the last line says ok or fail). If `aimail_address` is still unavailable afterwards, {} and retry activation.",
+            "Run `curl -fsSL '{bootstrap}' | sh` to install the AIMail SDK. The script works out the platform, the runtime and the host's own install command by itself; its last line says ok or fail. If `aimail_address` is still unavailable afterwards, {} and retry activation.",
             recipe.restart
         ),
     })
@@ -298,7 +341,7 @@ pub async fn agent_setup_index() -> Json<Value> {
         "install_url": "/api/v1/agent-setup/install?host=<host>",
         "bootstrap_url": "/api/v1/agent-setup/bootstrap?host=<host>",
         "hosts": RECIPES.iter().map(|r| r.host).collect::<Vec<_>>(),
-        "note": "Ask this endpoint for the install recipe for YOUR host; then run its `bootstrap` command. That single command adapts to the OS, the interpreter and the installer by itself — do not pick a Windows or POSIX variant yourself.",
+        "note": "Run the `bootstrap` command: it is the SDK installer. It detects the OS, the runtime and the host's own install command by itself and prints `AIMAIL_BOOTSTRAP ok|fail …`. `install`/`host` are the human-readable recipe; an agent does not need them.",
     }))
 }
 
@@ -327,9 +370,14 @@ fn per_host_cases() -> String {
     out
 }
 
-/// Detection lines for the POSIX twin, generated from `markers` so the table stays the only truth.
-fn per_host_detect() -> String {
+/// The whole detection section, generated from the recipe table so the evidence classes below and
+/// the hosts they prove can never drift apart. Order == strength: a configured host beats a binary
+/// on PATH, which beats an installed package, which beats a leftover directory.
+fn detect_block() -> String {
     let mut out = String::new();
+
+    // (1) runtime markers: a host that is configured here exported its home.
+    out.push_str("if [ -z \"$HOST\" ]; then\n  case \"1\" in\n");
     for r in RECIPES {
         let cond = r
             .markers
@@ -337,13 +385,120 @@ fn per_host_detect() -> String {
             .map(|m| format!("[ -n \"${{{m}:-}}\" ]"))
             .collect::<Vec<_>>()
             .join(" || ");
+        if cond.is_empty() {
+            continue;
+        }
         out.push_str(&format!(
-            "      {host}) {cond} && HOST={host} ;;\n",
-            host = r.host,
-            cond = if cond.is_empty() { "false" } else { &cond },
+            "    {host}) {cond} && HOST={host} ;;\n",
+            host = r.host
         ));
     }
+    out.push_str("  esac\n");
+    out.push_str("  [ -n \"$HOST\" ] && seen \"$HOST\" marker\nfi\n");
+
+    // (2) the process I am running inside (works when nothing is exported).
+    out.push_str("if [ -z \"$HOST\" ]; then\n  _anc=\" $(ancestors) \"\n");
+    for r in RECIPES {
+        for tok in r.proc_tokens {
+            out.push_str(&format!(
+                "  case \"$_anc\" in *\"{tok}\"*) [ -z \"$HOST\" ] && {{ HOST={host}; seen \"$HOST\" proc:{tok}\"; }} ;; esac\n",
+                tok = tok,
+                host = r.host
+            ));
+        }
+    }
+    out.push_str("fi\n");
+
+    // (3) the host CLI itself on PATH.
+    for r in RECIPES.iter().filter(|r| !r.cli.is_empty()) {
+        out.push_str(&format!(
+            "if [ -z \"$HOST\" ] && command -v {cli} >/dev/null 2>&1; then HOST={host}; seen \"$HOST\" path:{cli}; fi\n",
+            cli = r.cli,
+            host = r.host
+        ));
+    }
+
+    // (4) an installed global npm package (node hosts).
+    for r in RECIPES {
+        for pkg in r.npm_pkgs {
+            out.push_str(&format!(
+                "if [ -z \"$HOST\" ] && npm_has '{pkg}'; then HOST={host}; seen \"$HOST\" npm:{pkg}; fi\n",
+                pkg = pkg,
+                host = r.host
+            ));
+        }
+    }
+
+    // (5) the host's own home/config directory.
+    for r in RECIPES {
+        for d in r.dirs {
+            out.push_str(&format!(
+                "if [ -z \"$HOST\" ] && [ -e \"{d}\" ]; then HOST={host}; seen \"$HOST\" path-exists:{d}; fi\n",
+                d = d,
+                host = r.host
+            ));
+        }
+    }
+
+    // (6) a python module only that host ships (last resort, costs an interpreter start).
+    for r in RECIPES {
+        for m in r.py_mods {
+            out.push_str(&format!(
+                "if [ -z \"$HOST\" ]; then for _py in {pys} python3 python; do if py_has \"$_py\" {m}; then HOST={host}; seen \"$HOST\" mod:{m}; break; fi; done; fi\n",
+                pys = all_pythons(),
+                m = m,
+                host = r.host
+            ));
+        }
+    }
     out
+}
+
+/// The PowerShell twin of the evidence chain (same table, same order).
+fn ps_detect_block() -> String {
+    let mut out = String::new();
+    for r in RECIPES {
+        let conds = r
+            .markers
+            .iter()
+            .map(|m| format!("$env:{m}"))
+            .collect::<Vec<_>>()
+            .join(" -or ");
+        if !conds.is_empty() {
+            out.push_str(&format!(
+                "  if (-not $Host_ -and ({conds})) {{ $Host_ = '{host}'; $Seen += '{host}(marker)' }}\n",
+                conds = conds,
+                host = r.host
+            ));
+        }
+    }
+    for r in RECIPES.iter().filter(|r| !r.cli.is_empty()) {
+        out.push_str(&format!(
+            "  if (-not $Host_ -and (Get-Command {cli} -ErrorAction SilentlyContinue)) {{ $Host_ = '{host}'; $Seen += '{host}(path){{' }}\n",
+            cli = r.cli,
+            host = r.host
+        ));
+    }
+    for r in RECIPES {
+        for d in r.dirs {
+            let d = d.replace("$HOME", "$env:USERPROFILE");
+            out.push_str(&format!(
+                "  if (-not $Host_ -and (Test-Path \"{d}\")) {{ $Host_ = '{host}'; $Seen += '{host}(dir)' }}\n",
+                d = d,
+                host = r.host
+            ));
+        }
+    }
+    out
+}
+
+/// Every interpreter the table mentions, for the "which python has the host module" probe.
+fn all_pythons() -> String {
+    RECIPES
+        .iter()
+        .flat_map(|r| r.pythons.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn host_list() -> String {
@@ -374,6 +529,7 @@ PYS="${AIMAIL_PYTHON:-}"
 KIND=''
 REGISTER=''
 HOST_MATCH=0
+SEEN=''
 
 say() { printf '%s\n' "$*" >&2; }
 note() { printf 'aimail-bootstrap: %s\n' "$*" >&2; }
@@ -410,17 +566,25 @@ case "$OS" in
 esac
 
 # ---------------------------------------------------------------- step 0: which host is this
-if [ -z "$HOST" ]; then
-  case "1" in
-@@DETECT@@
-  esac
-fi
-if [ -z "$HOST" ]; then
-  for cand in @@HOSTLIST@@; do
-    if command -v "$cand" >/dev/null 2>&1; then HOST=$cand; break; fi
+# The activation email never names a host: the agent only knows "install the SDK". So the evidence
+# is gathered here, strongest first, and every attempt is recorded so a failure can say what it saw.
+seen() { SEEN="${SEEN:-} $1($2)"; }
+ancestors() {          # cmdlines of me and up to 4 parents (which process am I running inside?)
+  _out=''; _pid=$$; _i=0
+  while [ "$_i" -lt 5 ] && [ -r "/proc/$_pid/status" ]; do
+    _out="$_out $(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)"
+    _pid="$(awk '/^PPid:/{print $2}' "/proc/$_pid/status" 2>/dev/null)"
+    { [ -n "$_pid" ] && [ "$_pid" != 0 ]; } || break
+    _i=$((_i+1))
   done
-fi
-[ -n "$HOST" ] || fail unknown_host "cannot tell which host this is; re-run with AIMAIL_HOST=<@@HOSTLIST@@>"
+  printf '%s' "$_out"
+}
+npm_has() { _r="$(npm root -g 2>/dev/null)"; [ -n "$_r" ] && [ -d "$_r/$1" ]; }
+py_has() { eval "$1 -c 'import $2' >/dev/null 2>&1"; }
+
+@@DETECT@@
+
+[ -n "$HOST" ] || fail unknown_host "cannot tell which host this is; saw:${SEEN:- nothing}; re-run with AIMAIL_HOST=<@@HOSTLIST@@>"
 
 case "$HOST" in
 @@CASES@@
@@ -550,14 +714,12 @@ function Fail($code, $detail) {
   exit 1
 }
 
+$Seen = @()
 if (-not $Host_) {
-  if ($env:DSH_HOME) { $Host_ = 'dsh' }
-  elseif ($env:PI_HOME) { $Host_ = 'pi' }
-  elseif ($env:OPENCLAW_HOME) { $Host_ = 'openclaw' }
-  elseif ($env:HERMES_HOME) { $Host_ = 'hermes' }
-  elseif ($env:DEERFLOW_HOME -or $env:DEER_FLOW_HOME) { $Host_ = 'deerflow' }
+  # same evidence order as the POSIX twin: markers, process, PATH, npm package, home directory
+@@PSDETECT@@
 }
-if (-not $Host_) { Fail 'unknown_host' "cannot tell which host this is; re-run with AIMAIL_HOST=<@@HOSTLIST@@>" }
+if (-not $Host_) { Fail 'unknown_host' "cannot tell which host this is; saw: $($Seen -join ', '); re-run with AIMAIL_HOST=<@@HOSTLIST@@>" }
 
 $Kind = @{ @@KINDS@@ }[$Host_]
 if (-not $Kind) { Fail 'unknown_host' "no recipe for '$Host_'; known: @@HOSTLIST@@" }
@@ -619,7 +781,7 @@ fn render_posix(recipe: Option<&Recipe>, gateway: &str) -> String {
         .replace("@@HOST@@", recipe.map(|r| r.host).unwrap_or(""))
         .replace("@@HOSTLIST@@", &host_list())
         .replace("@@CASES@@", per_host_cases().trim_end())
-        .replace("@@DETECT@@", per_host_detect().trim_end())
+        .replace("@@DETECT@@", detect_block().trim_end())
         .replace("@@PKG@@", "agent-aimail")
 }
 
@@ -634,6 +796,7 @@ fn render_powershell(recipe: Option<&Recipe>, gateway: &str) -> String {
         .replace("@@HOST@@", recipe.map(|r| r.host).unwrap_or(""))
         .replace("@@HOSTLIST@@", &host_list())
         .replace("@@KINDS@@", &kinds)
+        .replace("@@PSDETECT@@", &ps_detect_block().trim_end())
         .replace("@@PKG@@", "agent-aimail")
 }
 
@@ -717,15 +880,19 @@ mod tests {
         assert_eq!(body["host"], "hermes");
         assert_eq!(body["kind"], "python");
         assert_eq!(
-            body["bootstrap_url"],
-            "http://gw.test/api/v1/agent-setup/bootstrap?host=hermes"
+            body["bootstrap_url"], "http://gw.test/api/v1/agent-setup/bootstrap",
+            "the command the agent runs must carry no parameters at all: it is told to install the SDK, not to describe itself"
         );
         let instruction = body["instruction"].as_str().unwrap_or_default();
         assert!(
-            instruction.contains("curl -fsSL 'http://gw.test/api/v1/agent-setup/bootstrap?host=hermes' | sh"),
+            instruction.contains("curl -fsSL 'http://gw.test/api/v1/agent-setup/bootstrap' | sh"),
             "{instruction}"
         );
-        assert!(instruction.contains("adapts to this OS"), "{instruction}");
+        assert!(
+            !instruction.contains("host="),
+            "the prompt-side instruction must never mention a host parameter: {instruction}"
+        );
+        assert!(instruction.contains("works out the platform"), "{instruction}");
         assert!(instruction.contains("retry activation"), "{instruction}");
     }
 
