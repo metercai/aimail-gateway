@@ -25,7 +25,7 @@ use crate::core::storage::{ApiKeyParams, ApiKeyRecord};
 /// it instead of carrying a second copy of the wording.
 pub fn address_activation_prompt(address: &str, gateway_url: &str, code: &str) -> String {
     format!(
-        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, install the `agent-aimail` plugin using your platform's plugin install command, then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
+        "Use `aimail_address` to activate and bind the dedicated AIMail mailbox {address} for this agent (gateway: {gateway_url}; activation code: {code}). If `aimail_address` is unavailable or unregistered, GET {gateway_url}/api/v1/agent-setup/install?host=<the host you are running in> and run the `bootstrap` command it returns (it adapts to this OS and runtime itself, and its last line says ok or fail), then try `aimail_address` again for activation and binding. If it is still unavailable, stop and tell the user to restart the agent runtime to load the plugin and retry activation and binding afterward; no reinstallation is needed."
     )
 }
 
@@ -1793,9 +1793,9 @@ mod activation_status_tests {
         ));
         assert!(addr
             .contains("gateway: http://gw; activation code: addr-1111-2222-3333-4444-5555-6666"));
-        assert!(addr.contains(
-            "install the `agent-aimail` plugin using your platform's plugin install command"
-        ));
+        // The prompt must NOT list per-host commands (it would grow with every new host): it points
+        // the agent at the lookup endpoint, and the agent supplies its own host id there.
+        assert!(addr.contains("/api/v1/agent-setup/install?host="));
         assert!(addr.contains("no reinstallation is needed"));
         assert!(!addr.contains("agent_aimail"));
         assert!(!addr.contains("My safety officer"));

@@ -184,6 +184,22 @@ pub fn create_router(
         .merge(api)
         // Activation: address code redemption (no auth — code IS the credential)
         .route("/api/v1/activate-address", post(activate_address_handler))
+        // Agent setup: per-host install instructions, no auth (documentation-shaped; needed before
+        // the agent owns any key). The activation prompt points here instead of listing commands.
+        .route(
+            "/api/v1/agent-setup/install",
+            get(crate::core::api::agent_setup::agent_setup_install),
+        )
+        // The self-adapting installer: ONE url per host, whatever the OS. Served as plain text so
+        // `curl ... | sh` and `iwr ... | iex` work directly, no OS guessing by the agent.
+        .route(
+            "/api/v1/agent-setup/bootstrap",
+            get(crate::core::api::agent_setup::agent_setup_bootstrap),
+        )
+        .route(
+            "/api/v1/agent-setup",
+            get(crate::core::api::agent_setup::agent_setup_index),
+        )
         .with_state(state.clone());
 
     let router = router_hook.mount(base_router);

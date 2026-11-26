@@ -1,4 +1,5 @@
 pub mod activation;
+pub mod agent_setup;
 pub mod auth;
 pub mod dedup;
 pub mod email_verify;
