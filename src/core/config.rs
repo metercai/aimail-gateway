@@ -63,6 +63,22 @@ pub struct HttpConfig {
     /// Used by api_endpoint_url() for display and logging.
     #[serde(default)]
     pub hostname: Option<String>,
+    /// Hard cap on CONCURRENT SSE streams. `0` = unlimited (not recommended).
+    ///
+    /// Peak defence: every stream owns its buffers (measured ~43 KB each at 4096 streams), so an
+    /// unbounded count turns a reconnect storm into unbounded memory. Beyond the cap the gateway
+    /// answers 503 `sse_capacity` and the client backs off (the SDKs already do).
+    #[serde(default = "default_max_sse_connections")]
+    pub max_sse_connections: usize,
+    /// Byte budget for the pending snapshot ONE stream materialises when it (re)connects.
+    /// `0` = count-only (20 rows whatever their size — the pre-2026-11-26 behaviour).
+    ///
+    /// At connect the gateway hands the client the queued mail first, so those bytes are live in
+    /// RAM; with 20 rows of up to `smtp.max_message_size` that is unbounded per stream. Whatever
+    /// does not fit stays pending and arrives on the next tick, so this is a pacing knob, never a
+    /// delivery loss.
+    #[serde(default = "default_connect_snapshot_bytes")]
+    pub connect_snapshot_bytes: usize,
 }
 
 impl Default for HttpConfig {
@@ -70,6 +86,8 @@ impl Default for HttpConfig {
         Self {
             bind: default_http_listen_addr(),
             hostname: None,
+            max_sse_connections: default_max_sse_connections(),
+            connect_snapshot_bytes: default_connect_snapshot_bytes(),
         }
     }
 }
@@ -527,6 +545,19 @@ fn apply_env_overrides(config: &mut Config) {
         }
     }
 
+    // SSE peak-defence knobs (also settable in `[http]`): an operator must be able to tighten
+    // them at deploy time without editing the file.
+    if let Ok(v) = std::env::var("AIMAILGW_MAX_SSE_CONNECTIONS") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            config.http.max_sse_connections = n;
+        }
+    }
+    if let Ok(v) = std::env::var("AIMAILGW_CONNECT_SNAPSHOT_BYTES") {
+        if let Ok(n) = v.trim().parse::<usize>() {
+            config.http.connect_snapshot_bytes = n;
+        }
+    }
+
     // SMTP
     if let Ok(v) = std::env::var("AIMAILGW_SMTP_ADDR") {
         if !v.is_empty() {
@@ -580,6 +611,16 @@ fn default_storage_dir() -> PathBuf {
 
 fn default_db_pool_size() -> u32 {
     25
+}
+
+/// Default cap on concurrent SSE streams: sized for a 2 vCPU / 2 GB instance (~4096 × 43 KB).
+fn default_max_sse_connections() -> usize {
+    4096
+}
+
+/// Default per-stream connect snapshot budget: 32 KiB ≈ 2–3 ordinary mails.
+fn default_connect_snapshot_bytes() -> usize {
+    32 * 1024
 }
 
 fn default_max_message_size() -> usize {

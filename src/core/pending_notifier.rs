@@ -46,6 +46,13 @@ pub enum NotifyKey {
     System(String),
     /// agent-scope waiters (storage filter: `system_id` + lowercased email).
     Email { system_id: String, email: String },
+    /// Aggregate (AgentSystemId) waiters: one key per local agent instance.
+    ///
+    /// The aggregate SSE scope is an AgentSystemId — a GROUP of addresses — while the per-address
+    /// key above only fires for one of them. Without this variant an aggregate stream could not be
+    /// woken by mail addressed to its non-representative members, which is why it used to poll on
+    /// the heartbeat clock instead of being pushed to.
+    AgentSystem(String),
 }
 
 struct PendingSlot {
@@ -119,6 +126,15 @@ impl PendingNotifier {
         slot.notify.notify_waiters();
     }
 
+    /// Wake every waiter on one AgentSystemId (aggregate streams).
+    /// Call AFTER the insert commits, once per delivered mail.
+    pub fn notify_agent_system(&self, agent_system_id: &str) {
+        let key = NotifyKey::AgentSystem(agent_system_id.to_string());
+        let slot = self.slot(&key);
+        slot.gen.fetch_add(1, Ordering::SeqCst);
+        slot.notify.notify_waiters();
+    }
+
     /// Wake every waiter on the (system, lowercased-email) key.
     /// Call AFTER the insert commits.
     pub fn notify_email(&self, system_id: &str, email_lower: &str) {
@@ -169,6 +185,33 @@ impl PendingNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_system_key_wakes_only_its_own_waiters() {
+        // The aggregate scope is an AgentSystemId (a group of addresses), so its wake-up key must be
+        // the AgentSystemId — a per-address key would never fire for a non-representative member.
+        let n = Arc::new(PendingNotifier::new());
+        let mine = NotifyKey::AgentSystem("as-mine".to_string());
+        let other = NotifyKey::AgentSystem("as-other".to_string());
+        let since_mine = n.snapshot(&mine);
+        let since_other = n.snapshot(&other);
+
+        let n2 = n.clone();
+        let waiter = tokio::spawn(async move {
+            n2.wait_since(&mine, since_mine, Duration::from_secs(2))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        n.notify_agent_system("as-mine");
+        assert_eq!(waiter.await.unwrap(), WaitOutcome::Woke);
+
+        // No cross-talk: another instance's key is untouched.
+        assert_eq!(
+            n.wait_since(&other, since_other, Duration::from_millis(100))
+                .await,
+            WaitOutcome::Timeout
+        );
+    }
 
     #[tokio::test]
     async fn notify_after_wait_start_wakes_quickly() {

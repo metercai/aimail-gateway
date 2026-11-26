@@ -166,6 +166,14 @@ impl Server {
                 4096,
             ),
             delivery_slot: aimail_base::core::api::types::SingleSlotLock::new(),
+            sse_slots: {
+                let max = config.http.max_sse_connections;
+                Arc::new(tokio::sync::Semaphore::new(if max == 0 {
+                    tokio::sync::Semaphore::MAX_PERMITS
+                } else {
+                    max
+                }))
+            },
             health_extra: None,
         };
 

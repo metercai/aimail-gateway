@@ -550,6 +550,13 @@ fn run_migrations(conn: &Connection) -> AppResult<()> {
             created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now'))
         );
         CREATE INDEX IF NOT EXISTS idx_pending_system ON pending_deliveries(system_id, created_at);
+        -- The aggregate pull joins on `email` while every row of a deployment shares ONE system_id,
+        -- so `idx_pending_system` is not selective at all: without this index each pull scanned the
+        -- whole pending table (payloads included) and sorted it in a temp b-tree — measured 200 MB
+        -- of page reads per stream per tick on a 10k-row backlog. This one makes the join O(rows of
+        -- that address) and keeps `ORDER BY id` on the index.
+        CREATE INDEX IF NOT EXISTS idx_pending_email
+            ON pending_deliveries(email, status, id);
 
         -- Email tables
         CREATE TABLE IF NOT EXISTS attachment_permissions (
@@ -1882,6 +1889,28 @@ impl Database {
         .await
     }
 
+    /// Which local agent instance owns this address (`None` = not bound anywhere).
+    ///
+    /// One primary-key lookup on `agent_system_addresses`; the ingest path uses it to wake the
+    /// AGGREGATE stream that can actually serve the mail (per-address notifier keys cannot).
+    pub async fn agent_system_id_for_address(&self, address: &str) -> AppResult<Option<String>> {
+        let addr = address.trim().to_lowercase();
+        if addr.is_empty() {
+            return Ok(None);
+        }
+        self.call(move |conn| {
+            let asid = conn
+                .query_row(
+                    "SELECT agent_system_id FROM agent_system_addresses WHERE address = ?1",
+                    params![addr],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            Ok(asid)
+        })
+        .await
+    }
+
     /// Cached view of [`Self::list_agent_system_address_anchors`] — the hot path's accessor.
     ///
     /// A hit costs one `RwLock` read + an `Arc` clone (no pool, no query); a miss costs one indexed
@@ -2793,6 +2822,60 @@ impl Database {
     /// AgentSystemId aggregation: pending rows for every address owned by the
     /// local Agent-system instance. The join is on BOTH address and system id
     /// so a coincidentally same-named address in another system is excluded.
+    /// Like [`Self::list_pending_for_agent_system`], but bounded by BYTES as well as rows.
+    ///
+    /// A stream materialises whatever it is about to hand the client, so the connect-time snapshot
+    /// is the one place where "20 rows" can mean hundreds of megabytes (20 × up to
+    /// `smtp.max_message_size`). `byte_budget` caps what one stream may pull in: rows are taken in
+    /// id order until the accumulated `payload + headers` would exceed it, and always at least one
+    /// row so an oversized mail still moves. Everything left is still pending in the store — it
+    /// arrives on the next tick, so no mail is dropped by this budget.
+    pub async fn list_pending_for_agent_system_budgeted(
+        &self,
+        agent_system_id: &str,
+        limit: i64,
+        byte_budget: usize,
+    ) -> AppResult<Vec<PendingDeliveryRecord>> {
+        let id = agent_system_id.to_string();
+        let lim = limit.clamp(1, 200);
+        let budget = byte_budget;
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT p.id, p.system_id, p.domain_addr, p.email, p.headers, p.payload,
+                        p.status, p.created_at
+                 FROM pending_deliveries p
+                 JOIN agent_system_addresses a
+                   ON a.address = p.email AND a.system_id = p.system_id
+                 WHERE a.agent_system_id = ?1 AND p.status = 'pending'
+                 ORDER BY p.id ASC LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![id, lim])?;
+            let mut out: Vec<PendingDeliveryRecord> = Vec::new();
+            let mut used = 0usize;
+            while let Some(row) = rows.next()? {
+                let rec = PendingDeliveryRecord {
+                    id: row.get(0)?,
+                    system_id: row.get(1)?,
+                    domain_addr: row.get(2)?,
+                    email: row.get(3)?,
+                    headers: row.get(4)?,
+                    payload: row.get(5)?,
+                    status: row.get(6)?,
+                    created_at: row.get(7)?,
+                };
+                let size = rec.payload.len() + rec.headers.len();
+                // `budget == 0` keeps the historical count-only behaviour.
+                if budget > 0 && !out.is_empty() && used + size > budget {
+                    break; // this row stays pending and comes on the next tick
+                }
+                used += size;
+                out.push(rec);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     pub async fn list_pending_for_agent_system(
         &self,
         agent_system_id: &str,
@@ -4590,6 +4673,58 @@ mod anchor_tests {
         assert!(
             !cache.contains_key("as-0"),
             "the oldest insertion was evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn budgeted_pending_query_stops_at_the_byte_budget() {
+        // A stream materialises what it is about to hand out; this is the knob that keeps "20 rows"
+        // from meaning "20 x up to smtp.max_message_size" for thousands of streams at once.
+        let db = temp_db();
+        db.bind_agent_system_address("asid_x", "a@example.com", "shared_addr_1")
+            .await
+            .unwrap();
+        let payload = format!("{{\"body\":\"{}\"}}", "x".repeat(10_000));
+        for _ in 0..20 {
+            db.insert_pending_delivery(
+                "shared_addr_1",
+                "example.com",
+                "a@example.com",
+                "{}",
+                &payload,
+            )
+            .await
+            .unwrap();
+        }
+
+        // 0 = count-only (historical): the row limit decides.
+        let all = db
+            .list_pending_for_agent_system_budgeted("asid_x", 20, 0)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 20);
+
+        // 31 KiB ⇒ three ~10 KiB payloads (30 066 B); the fourth would exceed it and stays pending.
+        let budgeted = db
+            .list_pending_for_agent_system_budgeted("asid_x", 20, 31 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            budgeted.len(),
+            3,
+            "the budget must cap the snapshot by BYTES"
+        );
+        assert!(budgeted.iter().all(|r| r.status == "pending"));
+
+        // Nothing is lost: the remaining rows are still pending and still returned by a bigger read.
+        let next = db
+            .list_pending_for_agent_system_budgeted("asid_x", 20, 1)
+            .await
+            .unwrap();
+        assert_eq!(
+            next.len(),
+            1,
+            "an over-budget mail still moves one row at a time"
         );
     }
 

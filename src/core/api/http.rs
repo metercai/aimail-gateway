@@ -3247,6 +3247,23 @@ async fn pending_records_for(
                 })?;
             Ok((nkey, records))
         }
+        // Aggregate scope reached through the shared helper (the SSE handler resolves its own
+        // rows, but the key must stay exhaustively handled and consistent if reused).
+        NotifyKey::AgentSystem(agent_system_id) => {
+            let records = db
+                .list_pending_for_agent_system(agent_system_id, req.limit)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Database error".to_string(),
+                            detail: Some(e.to_string()),
+                        }),
+                    )
+                })?;
+            Ok((nkey, records))
+        }
         NotifyKey::System(system_id) => {
             require_scope_any(key, &["system", "bridge"])?;
             let use_filter = !req.filter.is_empty();
@@ -3750,8 +3767,17 @@ struct SseStreamState {
     heartbeat: std::time::Duration,
     life: std::time::Duration,
     started: tokio::time::Instant,
-    /// Connect-time rows, emitted as the first frame.
-    pending_first: Option<Vec<crate::core::storage::PendingDeliveryRecord>>,
+    /// Rows already fetched but not yet emitted, in id order.
+    ///
+    /// A queue (not a single "first batch") because ONE frame is now bounded by BYTES: whatever
+    /// does not fit is emitted by the following steps instead of being held in one giant frame.
+    /// Total memory per stream stays within `snapshot_bytes`.
+    queue: std::collections::VecDeque<crate::core::storage::PendingDeliveryRecord>,
+    /// Byte budget for one frame (and for the fetch that fills the queue). 0 = count-only.
+    snapshot_bytes: usize,
+    /// Capacity permit (concurrent-stream cap). Held for the life of the stream; dropping it
+    /// frees the slot even on an abrupt disconnect, because the stream future is dropped too.
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
     /// When set, this stream is scoped to an AgentSystemId (aggregate mode).
     agent_system_id: Option<String>,
     /// Single-slot claim: released on drop (abrupt disconnect, zero grace)
@@ -3809,6 +3835,52 @@ fn client_id_of(cid: &ClientId) -> &str {
     &cid.0
 }
 
+/// Take up to `budget` bytes of queued records (always at least one) for the NEXT frame.
+///
+/// Bytes, not rows: a single mail can be up to `smtp.max_message_size`, so "20 rows" is not a bound.
+/// Keeping the batch together preserves `group_pending_batches` de-duplication (one body, N
+/// deliveries) while keeping the frame — and the copy `format!` makes of it — inside the budget.
+fn drain_frame_batch(
+    queue: &mut std::collections::VecDeque<crate::core::storage::PendingDeliveryRecord>,
+    budget: usize,
+) -> Vec<crate::core::storage::PendingDeliveryRecord> {
+    let mut out: Vec<crate::core::storage::PendingDeliveryRecord> = Vec::new();
+    let mut used = 0usize;
+    while let Some(rec) = queue.front() {
+        let size = rec.payload.len() + rec.headers.len();
+        if budget > 0 && !out.is_empty() && used + size > budget {
+            break;
+        }
+        used += size;
+        if let Some(rec) = queue.pop_front() {
+            out.push(rec);
+        }
+    }
+    out
+}
+
+/// Admission for one more concurrent stream.
+///
+/// The cap lives on the state ([`HttpState::sse_slots`]) so tests can size it; the permit is kept
+/// in the stream state, which means an abrupt disconnect frees the slot when the future drops.
+fn try_take_sse_slot(
+    state: &HttpState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (StatusCode, Json<ErrorResponse>)> {
+    state.sse_slots.clone().try_acquire_owned().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "sse_capacity".to_string(),
+                detail: Some(format!(
+                    "{} concurrent streams are already open (http.max_sse_connections); \
+                     retry with backoff",
+                    state.config.http.max_sse_connections
+                )),
+            }),
+        )
+    })
+}
+
 fn sse_mail_frame(payload: &serde_json::Value) -> SseItem {
     Ok(format!("event: mail\ndata: {}\n\n", payload))
 }
@@ -3818,11 +3890,13 @@ fn sse_mail_frame(payload: &serde_json::Value) -> SseItem {
 async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamState)> {
     let notifier = PendingNotifier::global();
 
-    // First frame: whatever the connect-time query found.
-    if let Some(records) = st.pending_first.take() {
-        if !records.is_empty() {
-            st.watermark = records.iter().map(|r| r.id).max().unwrap_or(0);
-            return Some((sse_mail_frame(&group_pending_batches(&records)), st));
+    // Anything already queued (connect snapshot or a previous over-budget fetch) goes out first,
+    // one BUDGETED frame at a time — never the whole queue in one allocation.
+    if !st.queue.is_empty() {
+        let batch = drain_frame_batch(&mut st.queue, st.snapshot_bytes);
+        if !batch.is_empty() {
+            st.watermark = batch.iter().map(|r| r.id).max().unwrap_or(st.watermark);
+            return Some((sse_mail_frame(&group_pending_batches(&batch)), st));
         }
     }
 
@@ -3836,20 +3910,36 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
             return None;
         }
         if let Some(agent_system_id) = st.agent_system_id.as_deref() {
-            tokio::time::sleep(st.heartbeat).await;
+            // Event-driven first: ingest calls `notify_agent_system` right after the pending row
+            // commits, so new mail is pushed in ~one DB query instead of waiting out the heartbeat.
+            // The heartbeat stays as the TIMEOUT — keep-alive, lost-notify fallback and the only
+            // clock when nothing is happening.
+            let outcome = notifier.wait_since(&st.nkey, st.since, st.heartbeat).await;
+            st.since = notifier.snapshot(&st.nkey);
+            if matches!(outcome, WaitOutcome::Timeout) {
+                // Nothing was delivered this window: keep the connection obviously alive. No query
+                // on this path any more (it used to re-read the queue every heartbeat).
+                return Some((Ok(": ping\n\n".to_string()), st));
+            }
             match st
                 .db
-                .list_pending_for_agent_system(agent_system_id, st.req.limit)
+                .list_pending_for_agent_system_budgeted(
+                    agent_system_id,
+                    st.req.limit,
+                    st.snapshot_bytes,
+                )
                 .await
             {
                 Ok(records) => {
-                    let fresh: Vec<_> = records
-                        .into_iter()
-                        .filter(|r| r.id > st.watermark)
-                        .collect();
-                    if !fresh.is_empty() {
-                        st.watermark = fresh.iter().map(|r| r.id).max().unwrap_or(st.watermark);
-                        return Some((sse_mail_frame(&group_pending_batches(&fresh)), st));
+                    for rec in records {
+                        if rec.id > st.watermark {
+                            st.queue.push_back(rec);
+                        }
+                    }
+                    if !st.queue.is_empty() {
+                        let batch = drain_frame_batch(&mut st.queue, st.snapshot_bytes);
+                        st.watermark = batch.iter().map(|r| r.id).max().unwrap_or(st.watermark);
+                        return Some((sse_mail_frame(&group_pending_batches(&batch)), st));
                     }
                 }
                 Err(_) => { /* next tick re-queries */ }
@@ -3864,13 +3954,15 @@ async fn sse_stream_step(mut st: SseStreamState) -> Option<(SseItem, SseStreamSt
 
         match pending_records_for(&st.db, &st.api_key, &st.req).await {
             Ok((_k, records)) => {
-                let fresh: Vec<_> = records
-                    .into_iter()
-                    .filter(|r| r.id > st.watermark)
-                    .collect();
-                if !fresh.is_empty() {
-                    st.watermark = fresh.iter().map(|r| r.id).max().unwrap_or(st.watermark);
-                    return Some((sse_mail_frame(&group_pending_batches(&fresh)), st));
+                for rec in records {
+                    if rec.id > st.watermark {
+                        st.queue.push_back(rec);
+                    }
+                }
+                if !st.queue.is_empty() {
+                    let batch = drain_frame_batch(&mut st.queue, st.snapshot_bytes);
+                    st.watermark = batch.iter().map(|r| r.id).max().unwrap_or(st.watermark);
+                    return Some((sse_mail_frame(&group_pending_batches(&batch)), st));
                 }
             }
             Err(_) => {
@@ -3896,6 +3988,10 @@ async fn sse_response_scoped(
     client_id: String,
     agent_system_id: Option<String>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // Capacity FIRST: a reconnect storm must be refused cheaply (503) before it allocates the
+    // slot, the snapshot or the stream state. The permit rides in the stream state, so an abrupt
+    // disconnect releases it with the future.
+    let permit = try_take_sse_slot(&state)?;
     // Single-slot claim BEFORE any work: the first connection wins; a
     // different client is 409 without building a stream. Same client
     // (reconnect / rotation) re-acquires and refreshes. Aggregate streams use
@@ -3931,8 +4027,14 @@ async fn sse_response_scoped(
         timeout_ms: 0,
     };
     let (nkey, initial) = if let Some(ref agent_system_id) = agent_system_id {
+        // Budgeted: the connect snapshot is the only place where "20 rows" can mean hundreds of
+        // MB (20 x up to smtp.max_message_size). The rest stays pending and arrives next tick.
         let records = db
-            .list_pending_for_agent_system(agent_system_id, req.limit)
+            .list_pending_for_agent_system_budgeted(
+                agent_system_id,
+                req.limit,
+                state.config.http.connect_snapshot_bytes,
+            )
             .await
             .map_err(|e| {
                 (
@@ -3943,7 +4045,12 @@ async fn sse_response_scoped(
                     }),
                 )
             })?;
-        (pending_notify_key(&api_key).unwrap(), records)
+        // Aggregate streams wait on the AgentSystem key (pushed on ingest), not on the
+        // representative address' key: mail for a non-representative member would never wake it.
+        (
+            crate::core::pending_notifier::NotifyKey::AgentSystem(agent_system_id.clone()),
+            records,
+        )
     } else {
         pending_records_for(db, &api_key, &req).await?
     };
@@ -3961,7 +4068,9 @@ async fn sse_response_scoped(
         heartbeat,
         life,
         started: tokio::time::Instant::now(),
-        pending_first: Some(initial),
+        queue: initial.into_iter().collect(),
+        snapshot_bytes: state.config.http.connect_snapshot_bytes,
+        _permit: Some(permit),
         agent_system_id,
         guard: SlotGuard::new(state.delivery_slot.clone(), slot_key, client_id.as_str()),
     };
@@ -4248,9 +4357,141 @@ mod tests {
             dns_resolver: None,
             send_deduper: SendDeduper::new(Duration::from_secs(60), 64),
             delivery_slot: SingleSlotLock::new(),
+            sse_slots: Arc::new(tokio::sync::Semaphore::new(
+                tokio::sync::Semaphore::MAX_PERMITS,
+            )),
             health_extra: None,
         };
         (db, state, trigger_rx, dir)
+    }
+
+    // ── Peak shaving (2026-11-26): byte budget, budgeted frames, concurrent-stream cap ──
+
+    #[tokio::test]
+    async fn aggregate_stream_is_woken_by_ingest_not_by_the_clock() {
+        // The whole point of the AgentSystem notify key: a stream sitting on a 30 s heartbeat must
+        // hand the mail over as soon as ingest commits it, not on the next tick.
+        use super::{sse_stream_step, SseStreamState};
+        use crate::core::api::types::SlotGuard;
+        use crate::core::pending_notifier::{NotifyKey, PendingNotifier};
+
+        let (db, state, _rx, dir) = probe_fixture("sse-wake").await;
+        db.bind_agent_system_address("as-wake", "w@test.local", "shared_addr_1")
+            .await
+            .unwrap();
+        let notifier = PendingNotifier::global();
+        let key = NotifyKey::AgentSystem("as-wake".to_string());
+        let since = notifier.snapshot(&key);
+
+        let st = SseStreamState {
+            db: db.clone(),
+            api_key: crate::core::storage::ApiKeyRecord {
+                id: -1,
+                system_id: "shared_addr_1".to_string(),
+                email_address: "w@test.local".to_string(),
+                key_hash: String::new(),
+                key_prefix: String::new(),
+                scopes: vec!["agent".to_string()],
+                is_active: true,
+                created_at: String::new(),
+                expires_at: None,
+                last_used_at: None,
+                category: "agent".to_string(),
+                activation_code_hash: None,
+                activation_expires_at: None,
+                claimed_at: None,
+            },
+            nkey: key.clone(),
+            req: super::PendingPollRequest {
+                limit: 20,
+                emails: Vec::new(),
+                filter: Vec::new(),
+                timeout_ms: 0,
+            },
+            watermark: 0,
+            since,
+            heartbeat: std::time::Duration::from_secs(30),
+            life: std::time::Duration::from_secs(300),
+            started: tokio::time::Instant::now(),
+            queue: std::collections::VecDeque::new(),
+            snapshot_bytes: 32 * 1024,
+            _permit: None,
+            agent_system_id: Some("as-wake".to_string()),
+            guard: SlotGuard::new(state.delivery_slot.clone(), 1, "wake-test"),
+        };
+
+        let waiter = tokio::spawn(async move { sse_stream_step(st).await });
+        // Ingest side: commit the row, then notify (the production order).
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        db.insert_pending_delivery(
+            "shared_addr_1",
+            "test.local",
+            "w@test.local",
+            "{}",
+            "{\"body\":\"hi\"}",
+        )
+        .await
+        .unwrap();
+        notifier.notify_agent_system("as-wake");
+
+        let (item, _st) = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("must wake on notify, not after the 30 s heartbeat")
+            .expect("step task")
+            .expect("a frame");
+        let frame = item.expect("frame is Ok");
+        assert!(frame.contains("event: mail"), "got: {frame}");
+        assert!(frame.contains("\"body\""), "got: {frame}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn frame_batch_is_bounded_by_bytes_and_takes_at_least_one() {
+        use super::drain_frame_batch;
+        use crate::core::storage::PendingDeliveryRecord;
+        use std::collections::VecDeque;
+        let rec = |id: i64| PendingDeliveryRecord {
+            id,
+            system_id: "s".into(),
+            domain_addr: "d".into(),
+            email: "a@test.local".into(),
+            headers: "{}".into(),
+            payload: "x".repeat(1000),
+            status: "pending".into(),
+            created_at: "t".into(),
+        };
+        let mut q: VecDeque<_> = (1..=5).map(rec).collect();
+
+        // Two records (1002 B each) fit in 2500 B, the third does not.
+        let batch = drain_frame_batch(&mut q, 2500);
+        assert_eq!(batch.len(), 2, "the frame must stop at the byte budget");
+        assert_eq!(q.len(), 3, "the rest stays queued for the next frame");
+
+        // 0 = count-only (the historical behaviour).
+        assert_eq!(drain_frame_batch(&mut q, 0).len(), 3);
+
+        // A single mail larger than the budget still moves: progress over purity.
+        let mut big: VecDeque<_> = (1..=2).map(rec).collect();
+        assert_eq!(drain_frame_batch(&mut big, 1).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stream_is_refused_with_503_once_the_cap_is_reached() {
+        use super::try_take_sse_slot;
+        let (_db, mut state, _rx, dir) = probe_fixture("sse-cap").await;
+        state.sse_slots = Arc::new(tokio::sync::Semaphore::new(2));
+
+        let held: Vec<_> = (0..2)
+            .map(|_| try_take_sse_slot(&state).expect("within cap"))
+            .collect();
+        let err = try_take_sse_slot(&state).expect_err("over cap must be refused");
+        assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.1.error, "sse_capacity");
+
+        // Dropping a permit frees exactly one slot (the abrupt-disconnect path).
+        drop(held);
+        let _released = try_take_sse_slot(&state).expect("capacity is released with the permit");
+        std::fs::remove_dir_all(dir).ok();
     }
 
     fn probe_router(state: &HttpState) -> Router {

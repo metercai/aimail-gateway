@@ -321,6 +321,16 @@ pub async fn process_email_webhook(
                         let notifier = crate::core::pending_notifier::PendingNotifier::global();
                         notifier.notify_system(&d.system_id);
                         notifier.notify_email(&d.system_id, &addr.to_lowercase());
+                        // Aggregate (SSE-V2) streams: one key per AgentSystemId. The per-address
+                        // key above only wakes that address' own stream, so without this a group
+                        // stream keeps polling on its heartbeat and mail for a NON-representative
+                        // member waits up to the heartbeat interval. One primary-key lookup per
+                        // delivered mail; an unbound address simply has no aggregate waiter.
+                        if let Ok(Some(asid)) =
+                            env_factory.db.agent_system_id_for_address(addr).await
+                        {
+                            notifier.notify_agent_system(&asid);
+                        }
                         // Mark endpoint success so check_all_endpoints_completed
                         // passes for mixed pull+webhook scenarios.
                         if let Err(e) = email_factory

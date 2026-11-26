@@ -232,6 +232,9 @@ pub struct HttpState {
     /// long-poll paths (409 occupied otherwise). Shared across handler
     /// clones (Arc-backed).
     pub delivery_slot: SingleSlotLock,
+    /// Concurrent SSE stream cap ([`HttpConfig::max_sse_connections`]): a reconnect storm is
+    /// refused with 503 before it allocates anything. `Semaphore::MAX_PERMITS` when uncapped.
+    pub sse_slots: Arc<tokio::sync::Semaphore>,
     /// Optional extra `/health` fields (edition-specific, e.g. the
     /// advanced machine-binding derivation report). `None` → omitted.
     pub health_extra: Option<serde_json::Value>,
