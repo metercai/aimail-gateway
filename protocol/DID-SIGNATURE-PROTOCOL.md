@@ -204,8 +204,8 @@ DID-Auth-Results: result=failed; integrity=fail; address=unknown; reason=body_ha
 
 | Field | Values |
 |---|---|
-| `result` | `verified` / `failed` |
-| `integrity` | `pass` / `fail` |
+| `result` | `verified` / `failed` / **`unknown`** |
+| `integrity` | `pass` / `fail` / **`delegated`** |
 | `address` | `verified` / `failed` / `unknown` |
 | `did-id` | present only when `address=verified` |
 | `reason` | present only when `result=failed` |
@@ -214,6 +214,16 @@ Emission order: `result, integrity, address, did-id, reason`.
 
 `result=verified` **iff** `integrity=pass` **and** `address=verified`. When `integrity=fail` the verifier
 MUST skip the anchor query and emit `address=unknown`.
+
+**This profile's split.** The receiving MTA checks **address only** and emits
+`result=unknown; integrity=delegated; address=…`. `integrity=delegated` means "the MTA did not check
+message integrity — the recipient must"; it MUST NOT be read as a pass. Only the recipient SDK computes
+`Content-v1` (one implementation, in `did-sdk`), and only it can emit `integrity=pass|fail`.
+
+Rationale: rejecting on integrity at the MTA cannot be attributed (a tampering relay would otherwise be
+able to get any legitimate message refused), and recomputing `Content-v1` including attachment digests per
+message buys nothing the recipient does not recompute anyway. An MTA MAY additionally verify integrity as
+an opt-in per-domain enhancement.
 
 The receiving MTA strips any pre-existing `DID-Auth-Results` at ingress; only its own verdict is trusted.
 One header instance per `From` address.
@@ -296,6 +306,7 @@ The verdict is keyed on `integrity` + `reason`, **never on `result` alone** (`di
 | Condition | Verdict | Action |
 |---|---|---|
 | no `DID-Signature` | `did_absent` | accept |
+| MTA emitted `integrity=delegated` (this profile's normal case) | — | compute integrity locally; never treat as pass |
 | `did` not `did:key` / malformed | `did_unsupported` | accept + warn |
 | own signature check fails | `signature_invalid` / `body_hash_mismatch` / `rcpt_hash_mismatch` / `timestamp_out_of_window` | **reject** |
 | anchor infrastructure unavailable | `chain_unavailable` | accept + flag |
