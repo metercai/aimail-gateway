@@ -560,8 +560,12 @@ fail() {
 # A durable trace: some hosts swallow a tool's stdout, so "the script ran" must be provable
 # without parsing the agent's words. This line is the evidence (also handy in production).
 record() {
+  _f="${AIMAIL_BOOTSTRAP_LOG:-$HOME/.aimail/bootstrap.log}"
   _line="status=$1 host=$HOST kind=${KIND:-unknown} version=$2 tool=${3:--} at=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo -)"
-  printf '%s\n' "$_line" >> "${AIMAIL_BOOTSTRAP_LOG:-$HOME/.aimail/bootstrap.log}" 2>/dev/null || true
+  # the parent may not exist yet (measured on hermes: ~/.aimail was missing and the trace,
+  # which is the only attribution evidence a harness has, was silently lost)
+  mkdir -p "$(dirname "$_f")" 2>/dev/null || true
+  printf '%s\n' "$_line" >> "$_f" 2>/dev/null || true
 }
 ok() {
   record ok "$1" "${2:--}"
